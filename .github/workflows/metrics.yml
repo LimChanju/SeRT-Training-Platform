@@ -1,0 +1,159 @@
+name: Human-Robot DataOps Metrics
+
+on:
+  push:
+    paths:
+      - 'data_logs/**.json'
+  workflow_dispatch:
+
+jobs:
+  calculate-and-store-metrics:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write 
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate 4 DataOps Metrics & Export JSON (Python)
+        run: |
+          # 1. metrics-data 브랜치에 기존 데이터가 있으면 가져오고, 없으면 빈 배열 생성
+          git show origin/metrics-data:dora_metrics.json > dora_metrics.json 2>/dev/null || echo "[]" > dora_metrics.json
+          
+          python -c "
+          import json, os, glob
+          from datetime import datetime
+          
+          log_files = glob.glob('data_logs/*.json')
+          logs = []
+          for file in log_files:
+              try:
+                  with open(file, 'r') as f:
+                      logs.append(json.load(f))
+              except Exception as e:
+                  print(f'Error reading {file}: {e}')
+          
+          logs.sort(key=lambda x: x.get('end_time', '1970-01-01T00:00:00Z'))
+          
+          total_sessions = len(logs)
+          success_count = 0
+          fail_count = 0
+          lead_times_sec = []
+          recovery_times_sec = []
+          currently_failing = False
+          failure_start_time = None
+          
+          for log in logs:
+              is_fail = (log.get('status') == 'failed' or log.get('discarded') == True)
+              end_time_str = log.get('end_time')
+              if not end_time_str: continue
+              end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+              
+              if is_fail:
+                  fail_count += 1
+                  if not currently_failing:
+                      currently_failing = True
+                      failure_start_time = end_time
+              else:
+                  success_count += 1
+                  commit_time_str = log.get('scenario_commit_time')
+                  if commit_time_str:
+                      commit_time = datetime.fromisoformat(commit_time_str.replace('Z', '+00:00'))
+                      lead_time = (end_time - commit_time).total_seconds()
+                      if lead_time > 0: lead_times_sec.append(lead_time)
+                  
+                  if currently_failing and failure_start_time:
+                      recovery_time = (end_time - failure_start_time).total_seconds()
+                      recovery_times_sec.append(recovery_time)
+                      currently_failing = False
+                      failure_start_time = None
+          
+          df = success_count
+          cfr = (fail_count / total_sessions * 100) if total_sessions > 0 else 0
+          avg_lead_time_hrs = (sum(lead_times_sec) / len(lead_times_sec) / 3600) if lead_times_sec else 0
+          avg_mttr_hrs = (sum(recovery_times_sec) / len(recovery_times_sec) / 3600) if recovery_times_sec else 0
+          
+          new_data = {
+              'lead_time_hours': round(avg_lead_time_hrs, 2),
+              'deployment_frequency_sessions': df,
+              'change_failure_rate_percent': round(cfr, 2),
+              'mttr_hours': round(avg_mttr_hrs, 2),
+              'calculated_at': datetime.now().isoformat()
+          }
+          
+          # 2. 기존 배열을 읽어서 새 데이터 추가 (Append)
+          history = []
+          if os.path.exists('dora_metrics.json'):
+              try:
+                  with open('dora_metrics.json', 'r') as f:
+                      history = json.load(f)
+                      if not isinstance(history, list): history = []
+              except: pass
+          
+          history.append(new_data)
+          
+          # 3. 덮어쓰기 저장
+          with open('dora_metrics.json', 'w') as out:
+              json.dump(history, out, indent=2)
+          "
+
+      - name: Upload Metrics as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataops-metrics-json
+          path: dora_metrics.json
+          retention-days: 30
+
+      - name: Commit JSON to 'metrics-data' branch
+        run: |
+          cp dora_metrics.json /tmp/dora_metrics.json
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin metrics-data || true
+          git checkout metrics-data || git checkout --orphan metrics-data
+          git rm -rf . || true
+          cp /tmp/dora_metrics.json ./dora_metrics.json
+          git add dora_metrics.json
+          git commit -m "chore: update dataops metrics JSON [skip ci]" || echo "No changes to commit"
+          git push origin metrics-data
+
+  # --- 새롭게 추가된 Issue 생성 Job ---
+  create-issue-summary:
+    runs-on: ubuntu-latest
+    needs: calculate-and-store-metrics # 이전 Job이 성공적으로 끝나야 실행됨
+    permissions:
+      issues: write # Issue 생성을 위한 권한
+    steps:
+      - name: Download Metrics Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dataops-metrics-json
+          
+      - name: Parse JSON and Create Issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # jq를 사용하여 배열의 마지막 요소([-1])에서 JSON 데이터 추출
+          LEAD_TIME=$(jq '.[-1].lead_time_hours' dora_metrics.json)
+          DF=$(jq '.[-1].deployment_frequency_sessions' dora_metrics.json)
+          CFR=$(jq '.[-1].change_failure_rate_percent' dora_metrics.json)
+          MTTR=$(jq '.[-1].mttr_hours' dora_metrics.json)
+          CALC_AT=$(jq -r '.[-1].calculated_at' dora_metrics.json)
+          
+          # Issue 제목 및 본문 구성
+          ISSUE_TITLE="📊 Human-Robot DataOps Metrics Summary: $(date +'%Y-%m-%d')"
+          ISSUE_BODY="### SeRT 프로젝트 데이터 파이프라인 지표 요약
+          
+          해당 지표는 로컬에서 수집된 로그 데이터를 기반으로 자동 산출되었습니다.
+          
+          - **Lead Time (Avg)**: ${LEAD_TIME} 시간
+          - **Deployment Frequency (유효 세션)**: ${DF} 회
+          - **Change Failure Rate (세션 실패율)**: ${CFR} %
+          - **MTTR (평균 복구 시간)**: ${MTTR} 시간
+          
+          *산출 기준 일시: ${CALC_AT}*"
+          
+          # GitHub CLI를 통해 Issue 생성
+          gh issue create --title "$ISSUE_TITLE" --body "$ISSUE_BODY" --label "metrics" || echo "Failed to create issue"

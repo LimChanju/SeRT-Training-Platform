@@ -1,0 +1,16 @@
+metrics dashboard 구축 관련 Issue
+
+1. Prometheus 이슈
+ - Grafana와 prometheus를 사용하려고 했지만, 내가 만든 DORA의 산출물은 JSON 형식임
+ - 하지만 prometheus는 JSON 형식을 이해하지 못해 번역기가 필요한데, 배보다 배꼽이 더 큰 것 같음
+ - 그래서 Grafana + Infinity 플러그인을 활용해 Grafana가 직접 github의 JSON 파일을 읽어 차트를 그리게 만드는 Infinity 플러그인을 활용함
+
+2. README.md 뱃지 이슈
+ - 빌드 성공 (Build Status) ➔ 데이터 파이프라인 상태 (Workflow Status)
+   앞서 만든 metric.yml (Human-Robot DataOps Metrics) 워크플로우가 에러 없이 잘 실행되었는지(패스/실패) 보여주는 GitHub 기본 뱃지를 사용합니다.
+
+ - 커버리지 (Coverage) ➔ 유효 세션 수 또는 세션 실패율 (Data Quality/CFR)
+   코드 테스트 커버리지를 측정할 수 없으므로, 우리가 계산해서 metrics-data 브랜치에 올린 dora_metrics.json 파일의 Change Failure Rate (세션 실패율) 값을 동적으로 읽어와 뱃지로 띄웁니다.
+
+ - 최신 배포일 (Latest Deployment) ➔ 최신 데이터 수집일 (Latest Data Session)
+   마찬가지로 JSON 파일에 기록된 calculated_at (산출 기준 일시) 값을 읽어와 표시합니다.
