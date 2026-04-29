@@ -23,6 +23,59 @@ jobs:
       - name: Generate metrics and dashboard
         run: python metrics/compute_dora.py --input metrics/session_events.csv --out metrics/out
 
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Take screenshot of dashboard
+        run: |
+          python - <<'EOF'
+          import asyncio
+          from playwright.async_api import async_playwright
+
+          async def screenshot():
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch()
+                  page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                  await page.goto("file:///home/runner/work/${{ github.event.repository.name }}/${{ github.event.repository.name }}/metrics/out/dashboard.html")
+                  await page.screenshot(path="metrics/out/dashboard.png", full_page=True)
+                  await browser.close()
+
+          asyncio.run(screenshot())
+          EOF
+
+      - name: Update README with screenshot
+        run: |
+          python - <<'EOF'
+          with open("README.md", "r") as f:
+              content = f.read()
+
+          img_tag = "![DORA Metrics Dashboard](metrics/out/dashboard.png)"
+          marker = "<!-- DORA_SCREENSHOT -->"
+
+          if marker in content:
+              lines = content.split("\n")
+              new_lines = []
+              skip = False
+              for line in lines:
+                  if line.strip() == marker:
+                      new_lines.append(marker)
+                      new_lines.append(img_tag)
+                      skip = True
+                  elif skip and line.startswith("!["):
+                      continue
+                  else:
+                      skip = False
+                      new_lines.append(line)
+              content = "\n".join(new_lines)
+          else:
+              content += f"\n\n{marker}\n{img_tag}\n"
+
+          with open("README.md", "w") as f:
+              f.write(content)
+          EOF
+
       - name: Commit artifacts
         run: |
           git config user.name "github-actions[bot]"
