@@ -20,7 +20,6 @@ simulation_app = SimulationApp({
 # ── SimulationApp 초기화 후에 나머지 임포트 ───────────────────────────────
 import sys
 import os
-import csv
 import json
 import socket
 import numpy as np
@@ -28,6 +27,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from scene_setup import create_world, randomize_cubes, setup_scene
+from event_logger import EventLogger
 from panda_robot import add_panda, print_robot_info
 from pick_controller import create_pick_controller, run_pick_place
 
@@ -101,34 +101,21 @@ def main():
     current_pick_idx = 0
     completed_picks = 0
     cycle_reset_requested = False
-    last_event_step = {}
-    miss_logged_for_pick = False
-    stacked_expected = {}
-    stack_failed_cubes = set()
-    last_contact_step = {}
-    drop_logged_cubes = set()
-    last_human_contact_step = {}
-    human_collision_count = 0
-    max_human_collisions = 1000
-    episode_started = False
+    logger = EventLogger(
+        log_path=log_path,
+        cube_size=cube_size,
+        speed_threshold=0.6,
+        collision_dist=cube_size * 0.9,
+        stack_drop_threshold=0.03,
+        max_human_collisions=1000,
+    )
 
     udp_host = "0.0.0.0"
     udp_port = 5555
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((udp_host, udp_port))
     sock.setblocking(False)
-    speed_threshold = 0.6
-    collision_dist = cube_size * 0.9
     stack_drop_threshold = 0.03
-
-    def _log_event(event: str, details: str = ""):
-        file_exists = os.path.exists(log_path)
-        with open(log_path, "a", newline="") as csvfile:
-            writer = csv.writer(csvfile)
-            if not file_exists:
-                writer.writerow(["sim_time", "event", "details"])
-            writer.writerow([sim_time, event, details])
-        print(f"[ErrP] {event} | {details}")
 
     def _sim_time(world_obj, step_idx: int) -> float:
         if hasattr(world_obj, "current_time"):
@@ -154,10 +141,8 @@ def main():
 
             step += 1
             sim_time = _sim_time(world, step)
-
-            if not episode_started:
-                _log_event("episode_start", "reason=run_start")
-                episode_started = True
+            logger.update_context(step, sim_time)
+            logger.ensure_episode_started()
 
             # Update human proxies from UDP (JSON: {"left":[x,y,z],"right":[x,y,z],"head":[x,y,z]})
             while True:
@@ -224,22 +209,19 @@ def main():
                 )
                 if task_done:
                     placed_cube = pick_targets[current_pick_idx]
-                    stacked_expected[placed_cube.name] = stack_height
+                    logger.record_stack_expected(placed_cube.name, stack_height)
                     completed_picks += 1
                     current_pick_idx = (current_pick_idx + 1) % len(pick_targets)
                     controller.reset(end_effector_initial_height=approach_height)
                     task_done = False
-                    miss_logged_for_pick = False
+                    logger.reset_pick_miss()
                     if completed_picks % len(pick_targets) == 0:
                         randomize_cubes(cubes, table_xy, table_size, cube_center_z, cube_size, forbidden_xy=stack_base_xy)
                         completed_picks = 0
                         current_pick_idx = 0
                         controller.reset(end_effector_initial_height=approach_height)
                         cycle_reset_requested = True
-                        stacked_expected = {}
-                        stack_failed_cubes = set()
-                        last_contact_step = {}
-                        drop_logged_cubes = set()
+                        logger.reset_cycle()
                         print(f"\n✅ [Step {step}] 3개 Pick-and-Place 완료! 새 배치로 재시작")
 
             if cycle_reset_requested:
@@ -258,63 +240,14 @@ def main():
             gripper_closed = np.all(np.array(gripper_pos) < 0.01)
             ee_pos, _ = panda.end_effector.get_world_pose()
             current_cube = pick_targets[current_pick_idx]
-            cube_pos, _ = current_cube.get_world_pose()
-
-            for cube in pick_targets:
-                pos, _ = cube.get_world_pose()
-                if np.linalg.norm(ee_pos - pos) < cube_size * 1.5:
-                    last_contact_step[cube.name] = step
-
-            if gripper_closed and not miss_logged_for_pick:
-                if np.linalg.norm(ee_pos - cube_pos) > cube_size * 1.2:
-                    if step - last_event_step.get("pick_miss", -9999) > 30:
-                        _log_event("pick_miss", f"cube={current_cube.name}")
-                        last_event_step["pick_miss"] = step
-                        miss_logged_for_pick = True
-
-            for cube in pick_targets:
-                if hasattr(cube, "get_linear_velocity"):
-                    vel = cube.get_linear_velocity()
-                    speed = float(np.linalg.norm(vel))
-                    if speed > speed_threshold and cube.name not in drop_logged_cubes:
-                        recent_contact = step - last_contact_step.get(cube.name, -9999) <= 30
-                        if recent_contact and step - last_event_step.get("drop_throw", -9999) > 10:
-                            _log_event("drop_throw", f"cube={cube.name},speed={speed:.3f}")
-                            last_event_step["drop_throw"] = step
-                            drop_logged_cubes.add(cube.name)
-
-            for pick_cube in pick_targets:
-                pick_pos, _ = pick_cube.get_world_pose()
-                for green_cube in green_cubes:
-                    green_pos, _ = green_cube.get_world_pose()
-                    if np.linalg.norm(pick_pos - green_pos) < collision_dist:
-                        if step - last_event_step.get("collision_green", -9999) > 30:
-                            _log_event("collision_green", f"pick={pick_cube.name},green={green_cube.name}")
-                            last_event_step["collision_green"] = step
-
-            for proxy in human_proxies:
-                proxy_pos, _ = proxy.get_world_pose()
-                if np.linalg.norm(ee_pos - proxy_pos) < 0.08:
-                    key = f"human_collision:{proxy.name}"
-                    if step - last_human_contact_step.get(key, -9999) > 30:
-                        _log_event("human_collision", f"proxy={proxy.name}")
-                        last_human_contact_step[key] = step
-                        human_collision_count += 1
-                        if human_collision_count >= max_human_collisions:
-                            _log_event("episode_end", f"reason=human_collision_limit,count={human_collision_count}")
-                            simulation_app.close()
-                            return
-
-            for cube in pick_targets:
-                if cube.name in stacked_expected:
-                    if cube.name in stack_failed_cubes:
-                        continue
-                    pos, _ = cube.get_world_pose()
-                    if pos[2] < stacked_expected[cube.name] - stack_drop_threshold:
-                        if step - last_event_step.get("stack_failure", -9999) > 30:
-                            _log_event("stack_failure", f"cube={cube.name},z={pos[2]:.3f}")
-                            last_event_step["stack_failure"] = step
-                            stack_failed_cubes.add(cube.name)
+            logger.update_contact(ee_pos, pick_targets)
+            logger.check_pick_miss(gripper_closed, ee_pos, current_cube)
+            logger.check_drop_throw(pick_targets)
+            logger.check_collision_green(pick_targets, green_cubes)
+            if logger.check_human_collision(ee_pos, human_proxies):
+                simulation_app.close()
+                return
+            logger.check_stack_failure(pick_targets)
 
     simulation_app.close()
 
