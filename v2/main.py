@@ -26,7 +26,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import ERRP_MARKERS_PATH
+from app_config import ERRP_MARKERS_PATH
 from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
 from panda_robot import add_panda, print_robot_info

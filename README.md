@@ -1,5 +1,10 @@
 # DORA 지표 (실험 파이프라인)
 
+## 실행
+```bash
+isaac ~/isaac_vr_project/v2/main.py
+```
+
 VR 사람-로봇 협업 데이터 수집 파이프라인에 맞게 DORA 지표를 재정의하고 시각화합니다.
 
 ## 시각화하는 지표
