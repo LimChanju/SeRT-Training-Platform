@@ -108,6 +108,8 @@ def main():
     last_contact_step = {}
     drop_logged_cubes = set()
     last_human_contact_step = {}
+    human_collision_count = 0
+    max_human_collisions = 1000
 
     udp_host = "0.0.0.0"
     udp_port = 5555
@@ -292,6 +294,11 @@ def main():
                     if step - last_human_contact_step.get(key, -9999) > 30:
                         _log_event("human_collision", f"proxy={proxy.name}")
                         last_human_contact_step[key] = step
+                        human_collision_count += 1
+                        if human_collision_count >= max_human_collisions:
+                            _log_event("episode_end", f"reason=human_collision_limit,count={human_collision_count}")
+                            simulation_app.close()
+                            return
 
             for cube in pick_targets:
                 if cube.name in stacked_expected:
