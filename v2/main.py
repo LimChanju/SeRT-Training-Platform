@@ -26,6 +26,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from config import ERRP_MARKERS_PATH
 from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
 from panda_robot import add_panda, print_robot_info
@@ -72,7 +73,7 @@ def main():
         "right": right_hand_proxy.get_world_pose()[0] if right_hand_proxy else None,
         "head": None,
     }
-    log_path = os.path.join(os.path.dirname(__file__), "errp_markers.csv")
+    log_path = ERRP_MARKERS_PATH
 
     # 3. Panda 추가
     panda = add_panda(world, base_z=table_top_z)
