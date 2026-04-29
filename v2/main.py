@@ -110,6 +110,7 @@ def main():
     last_human_contact_step = {}
     human_collision_count = 0
     max_human_collisions = 1000
+    episode_started = False
 
     udp_host = "0.0.0.0"
     udp_port = 5555
@@ -153,6 +154,10 @@ def main():
 
             step += 1
             sim_time = _sim_time(world, step)
+
+            if not episode_started:
+                _log_event("episode_start", "reason=run_start")
+                episode_started = True
 
             # Update human proxies from UDP (JSON: {"left":[x,y,z],"right":[x,y,z],"head":[x,y,z]})
             while True:

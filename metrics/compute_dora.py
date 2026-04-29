@@ -40,13 +40,25 @@ def _compute_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     session_failed = [e for e in events if e["event"] == "session_failed"]
     incident_start = [e for e in events if e["event"] == "incident_start"]
     incident_end = [e for e in events if e["event"] == "incident_end"]
+    episode_start = [e for e in events if e["event"] == "episode_start"]
+    episode_end = [e for e in events if e["event"] == "episode_end"]
 
     lead_times_hours = []
-    for change in code_changes:
-        next_success = next((s for s in session_success if s["timestamp"] >= change["timestamp"]), None)
-        if next_success:
-            delta = next_success["timestamp"] - change["timestamp"]
-            lead_times_hours.append(delta.total_seconds() / 3600.0)
+    if episode_start and episode_end:
+        open_episodes = []
+        for e in sorted(episode_start + episode_end, key=lambda x: x["timestamp"]):
+            if e["event"] == "episode_start":
+                open_episodes.append(e["timestamp"])
+            elif e["event"] == "episode_end" and open_episodes:
+                start_ts = open_episodes.pop(0)
+                delta = e["timestamp"] - start_ts
+                lead_times_hours.append(delta.total_seconds() / 3600.0)
+    else:
+        for change in code_changes:
+            next_success = next((s for s in session_success if s["timestamp"] >= change["timestamp"]), None)
+            if next_success:
+                delta = next_success["timestamp"] - change["timestamp"]
+                lead_times_hours.append(delta.total_seconds() / 3600.0)
 
     success_count = len(session_success)
     failure_count = len(session_failed)
@@ -104,15 +116,15 @@ def _write_metrics(out_dir: str, metrics: Dict[str, Any]) -> None:
 
 
 def _write_dashboard(out_dir: str, metrics: Dict[str, Any]) -> None:
-        freq = metrics["deployment_frequency_by_day"]
-        days = list(sorted(freq.keys()))
-        counts = [freq[d] for d in days]
-        lead_times = metrics["lead_time_hours"]
-        mttr_values = metrics["mttr_minutes"]
-        cfr_success = metrics["session_success_count"]
-        cfr_failure = metrics["session_failure_count"]
+    freq = metrics["deployment_frequency_by_day"]
+    days = list(sorted(freq.keys()))
+    counts = [freq[d] for d in days]
+    lead_times = metrics["lead_time_hours"]
+    mttr_values = metrics["mttr_minutes"]
+    cfr_success = metrics["session_success_count"]
+    cfr_failure = metrics["session_failure_count"]
 
-        html = f"""<!doctype html>
+    html = f"""<!doctype html>
 <html lang=\"en\">
 <head>
     <meta charset=\"utf-8\" />
@@ -193,8 +205,8 @@ def _write_dashboard(out_dir: str, metrics: Dict[str, Any]) -> None:
 </body>
 </html>
 """
-        with open(os.path.join(out_dir, "dashboard.html"), "w", encoding="utf-8") as f:
-                f.write(html)
+    with open(os.path.join(out_dir, "dashboard.html"), "w", encoding="utf-8") as f:
+        f.write(html)
 
 
 def main() -> None:
