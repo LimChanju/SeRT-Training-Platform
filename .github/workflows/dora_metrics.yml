@@ -27,7 +27,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add dora/out/* README.md
+          git add metrics/out/* README.md
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
