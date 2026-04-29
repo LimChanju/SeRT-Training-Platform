@@ -1,0 +1,8 @@
+metric,value
+lead_time_avg_hours,1.375
+lead_time_median_hours,1.750
+deployment_frequency_avg_per_day,1.333
+change_failure_rate,0.333
+mttr_avg_minutes,30.000
+session_success_count,4
+session_failure_count,2

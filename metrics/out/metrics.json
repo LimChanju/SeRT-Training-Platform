@@ -1,0 +1,21 @@
+{
+  "lead_time_hours": [
+    1.75,
+    1.0
+  ],
+  "lead_time_avg_hours": 1.375,
+  "lead_time_median_hours": 1.75,
+  "deployment_frequency_by_day": {
+    "2026-04-27": 1,
+    "2026-04-28": 2,
+    "2026-04-29": 1
+  },
+  "deployment_frequency_avg_per_day": 1.3333333333333333,
+  "change_failure_rate": 0.3333333333333333,
+  "session_success_count": 4,
+  "session_failure_count": 2,
+  "mttr_minutes": [
+    30.0
+  ],
+  "mttr_avg_minutes": 30.0
+}

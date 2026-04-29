@@ -38,5 +38,11 @@ class RobotManager:
     def is_done(self):
         return self.controller.is_done()
 
+    def check_cube_placed(self, cube, goal_pos, threshold=0.08):
+        """큐브가 실제로 goal_pos 근처에 있는지 확인 (집기 성공 여부 검증)"""
+        cube_pos, _ = cube.get_world_pose()
+        dist = np.linalg.norm(cube_pos[:2] - goal_pos[:2])
+        return dist < threshold
+
     def reset_controller(self):
         self.controller.reset()

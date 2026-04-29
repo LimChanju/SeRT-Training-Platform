@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <rect width="1200" height="700" fill="#f7f7f7" />
+  <rect x="40" y="30" width="1120" height="80" rx="8" fill="#ffffff" stroke="#e5e5e5" />
+  <text x="70" y="80" font-family="Arial, sans-serif" font-size="28" fill="#222">DORA Metrics Dashboard (Mock)</text>
+
+  <rect x="40" y="130" width="1120" height="140" rx="8" fill="#ffffff" stroke="#e5e5e5" />
+  <text x="70" y="170" font-family="Arial, sans-serif" font-size="18" fill="#555">Lead Time (avg), Deployment Frequency, Change Failure Rate, MTTR</text>
+  <rect x="70" y="190" width="500" height="20" fill="#4e79a7" />
+  <rect x="70" y="220" width="380" height="20" fill="#59a14f" />
+  <rect x="70" y="250" width="260" height="20" fill="#e15759" />
+
+  <rect x="40" y="290" width="540" height="180" rx="8" fill="#ffffff" stroke="#e5e5e5" />
+  <text x="70" y="325" font-family="Arial, sans-serif" font-size="16" fill="#555">Lead Time (bar)</text>
+  <rect x="70" y="350" width="420" height="90" fill="#e9eef7" />
+
+  <rect x="620" y="290" width="540" height="180" rx="8" fill="#ffffff" stroke="#e5e5e5" />
+  <text x="650" y="325" font-family="Arial, sans-serif" font-size="16" fill="#555">Deployment Frequency (bar)</text>
+  <rect x="650" y="350" width="420" height="90" fill="#eaf3ea" />
+
+  <rect x="40" y="490" width="540" height="180" rx="8" fill="#ffffff" stroke="#e5e5e5" />
+  <text x="70" y="525" font-family="Arial, sans-serif" font-size="16" fill="#555">Change Failure Rate (donut)</text>
+  <circle cx="180" cy="590" r="50" fill="#e9eef7" />
+  <circle cx="180" cy="590" r="30" fill="#ffffff" />
+
+  <rect x="620" y="490" width="540" height="180" rx="8" fill="#ffffff" stroke="#e5e5e5" />
+  <text x="650" y="525" font-family="Arial, sans-serif" font-size="16" fill="#555">MTTR (bar)</text>
+  <rect x="650" y="550" width="420" height="90" fill="#f8efe5" />
+</svg>
