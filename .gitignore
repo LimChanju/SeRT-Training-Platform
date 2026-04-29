@@ -12,7 +12,4 @@ __pycache__/
 .ruff_cache/
 .vscode/
 *.ipynb_checkpoints/
-metrics/out/
-metrics/*.json
-metrics/*.csv
 spikerbox_test/
