@@ -16,7 +16,6 @@ except:
     exit()
 
 def read_thread():
-    global sample_buffer
     while True:
         if ser.in_waiting > 0:
             raw_data = ser.read(ser.in_waiting)
