@@ -5,7 +5,7 @@
 import numpy as np
 from omni.isaac.core import World
 from omni.isaac.core.utils.viewports import set_camera_view
-from omni.isaac.core.objects import DynamicCuboid, FixedCuboid, VisualCuboid
+from omni.isaac.core.objects import DynamicCuboid, FixedCuboid, VisualCuboid, VisualCylinder
 
 
 def create_world() -> World:
@@ -160,41 +160,45 @@ def setup_scene(world: World, cube_count: int = 6, show_human_proxies: bool = Tr
 
     human_proxies = [
         world.scene.add(
-            VisualCuboid(
+            VisualCylinder(
                 prim_path="/World/human_left_hand",
                 name="human_left_hand",
                 position=left_hand_pos,
-                scale=np.array([0.06, 0.06, 0.06]),
+                radius=0.03,
+                height=0.06,
                 color=np.array([0.0, 0.8, 0.9]),
                 visible=show_human_proxies,
             )
         ),
         world.scene.add(
-            VisualCuboid(
+            VisualCylinder(
                 prim_path="/World/human_right_hand",
                 name="human_right_hand",
                 position=right_hand_pos,
-                scale=np.array([0.06, 0.06, 0.06]),
+                radius=0.03,
+                height=0.06,
                 color=np.array([0.0, 0.8, 0.9]),
                 visible=show_human_proxies,
             )
         ),
         world.scene.add(
-            VisualCuboid(
+            VisualCylinder(
                 prim_path="/World/human_left_arm",
                 name="human_left_arm",
                 position=left_elbow_pos,
-                scale=np.array([0.08, 0.08, 0.25]),
+                radius=0.04,
+                height=0.25,
                 color=np.array([0.1, 0.7, 0.8]),
                 visible=show_human_proxies,
             )
         ),
         world.scene.add(
-            VisualCuboid(
+            VisualCylinder(
                 prim_path="/World/human_right_arm",
                 name="human_right_arm",
                 position=right_elbow_pos,
-                scale=np.array([0.08, 0.08, 0.25]),
+                radius=0.04,
+                height=0.25,
                 color=np.array([0.1, 0.7, 0.8]),
                 visible=show_human_proxies,
             )

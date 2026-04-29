@@ -26,7 +26,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import ERRP_MARKERS_PATH
+from app_config import ERRP_MARKERS_PATH
 from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
 from panda_robot import add_panda, print_robot_info
@@ -125,6 +125,22 @@ def main():
             return float(step_idx) * float(world_obj.get_physics_dt())
         return float(step_idx) * (1.0 / 60.0)
 
+    def _quat_from_vectors(v_from: np.ndarray, v_to: np.ndarray) -> np.ndarray:
+        v_from = v_from / np.linalg.norm(v_from)
+        v_to = v_to / np.linalg.norm(v_to)
+        dot = np.clip(np.dot(v_from, v_to), -1.0, 1.0)
+        if dot < -0.999999:
+            axis = np.array([1.0, 0.0, 0.0])
+            if abs(v_from[0]) > 0.9:
+                axis = np.array([0.0, 1.0, 0.0])
+            axis = axis - v_from * np.dot(v_from, axis)
+            axis = axis / np.linalg.norm(axis)
+            return np.array([axis[0], axis[1], axis[2], 0.0])
+        cross = np.cross(v_from, v_to)
+        s = np.sqrt((1.0 + dot) * 2.0)
+        inv_s = 1.0 / s
+        return np.array([cross[0] * inv_s, cross[1] * inv_s, cross[2] * inv_s, 0.5 * s])
+
     while simulation_app.is_running():
         world.step(render=True)
 
@@ -172,15 +188,27 @@ def main():
 
                 if last_hand_pose["left"] is not None:
                     left_hand_pos = last_hand_pose["left"]
+                    left_dir = left_hand_pos - shoulder_pos
                     left_elbow_pos = (shoulder_pos + left_hand_pos) * 0.5
-                    left_hand_proxy.set_world_pose(position=left_hand_pos)
-                    left_arm_proxy.set_world_pose(position=left_elbow_pos)
+                    if np.linalg.norm(left_dir) > 1e-6:
+                        left_ori = _quat_from_vectors(np.array([0.0, 0.0, 1.0]), left_dir)
+                        left_hand_proxy.set_world_pose(position=left_hand_pos, orientation=left_ori)
+                        left_arm_proxy.set_world_pose(position=left_elbow_pos, orientation=left_ori)
+                    else:
+                        left_hand_proxy.set_world_pose(position=left_hand_pos)
+                        left_arm_proxy.set_world_pose(position=left_elbow_pos)
 
                 if last_hand_pose["right"] is not None:
                     right_hand_pos = last_hand_pose["right"]
+                    right_dir = right_hand_pos - shoulder_pos
                     right_elbow_pos = (shoulder_pos + right_hand_pos) * 0.5
-                    right_hand_proxy.set_world_pose(position=right_hand_pos)
-                    right_arm_proxy.set_world_pose(position=right_elbow_pos)
+                    if np.linalg.norm(right_dir) > 1e-6:
+                        right_ori = _quat_from_vectors(np.array([0.0, 0.0, 1.0]), right_dir)
+                        right_hand_proxy.set_world_pose(position=right_hand_pos, orientation=right_ori)
+                        right_arm_proxy.set_world_pose(position=right_elbow_pos, orientation=right_ori)
+                    else:
+                        right_hand_proxy.set_world_pose(position=right_hand_pos)
+                        right_arm_proxy.set_world_pose(position=right_elbow_pos)
 
             # 약 2초마다 상태 출력
             if step % 120 == 0:
