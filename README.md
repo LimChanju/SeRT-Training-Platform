@@ -28,3 +28,4 @@ GitHub Actions로 생성:
 HTML을 열면 Chart.js로 시각화된 대시보드를 확인할 수 있습니다.
 
 <!-- DORA_SCREENSHOT -->
+![DORA Metrics Dashboard](metrics/out/dashboard.png)

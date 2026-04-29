@@ -1,10 +1,12 @@
 {
   "lead_time_hours": [
-    1.75,
-    1.0
+    0.5666666666666667,
+    0.4,
+    0.5333333333333333,
+    0.5166666666666667
   ],
-  "lead_time_avg_hours": 1.375,
-  "lead_time_median_hours": 1.75,
+  "lead_time_avg_hours": 0.5041666666666667,
+  "lead_time_median_hours": 0.5333333333333333,
   "deployment_frequency_by_day": {
     "2026-04-27": 1,
     "2026-04-28": 2,
