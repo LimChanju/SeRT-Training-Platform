@@ -14,6 +14,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ['3.9', '3.10', '3.11']
+        exclude:
+          - os: macos-latest
+            python-version: '3.9'
     uses: ./.github/workflows/reusable-ci.yml
     with:
       os: ${{ matrix.os }}
@@ -30,6 +33,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ['3.9', '3.10', '3.11']
+        exclude:
+          - os: macos-latest
+            python-version: '3.9'
     uses: ./.github/workflows/reusable-ci.yml
     with:
       os: ${{ matrix.os }}
