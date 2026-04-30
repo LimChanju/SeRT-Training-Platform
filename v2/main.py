@@ -55,7 +55,7 @@ def main():
         table_size,
         stack_base_xy,
         human_proxies,
-    ) = setup_scene(world, cube_count=6, show_human_proxies=True)
+    ) = setup_scene(world, cube_count=6, show_human_proxies=False)
     pick_targets = cubes[:3]
     green_indices = list(range(3, 6))
     green_cubes = [cubes[i] for i in green_indices if i < len(cubes)]

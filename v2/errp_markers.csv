@@ -97,3 +97,13 @@ sim_time,event,details
 36.683335246518254,pick_miss,cube=cube_2
 42.51666888408363,drop_throw,"cube=cube_2,speed=0.675"
 30.600001595914364,stack_failure,"cube=cube_1,z=0.476"
+0.05000000260770321,episode_start,reason=run_start
+0.05000000260770321,episode_start,reason=run_start
+30.600001595914364,stack_failure,"cube=cube_1,z=0.476"
+37.333335280418396,drop_throw,"cube=cube_2,speed=0.605"
+40.5166687797755,drop_throw,"cube=cube_2,speed=0.628"
+5.566666956990957,pick_miss,cube=cube_0
+31.116668289527297,stack_failure,"cube=cube_1,z=0.476"
+21.01666776277125,pick_miss,cube=cube_1
+31.63333498314023,stack_failure,"cube=cube_1,z=0.476"
+32.15000167675316,stack_failure,"cube=cube_1,z=0.476"
