@@ -7,32 +7,131 @@ on:
     branches: [ "main" ]
 
 jobs:
-  matrix-run:
+  cached-matrix:
+    name: Cached Matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.9', '3.10', '3.11']
     uses: ./.github/workflows/reusable-ci.yml
     with:
-      os: ubuntu-latest
-      python-version: '3.10'
+      os: ${{ matrix.os }}
+      python-version: ${{ matrix.python-version }}
       use-cache: true
       run-tests: true
-      artifact-prefix: with-cache
+      artifact-prefix: cache
 
-  matrix-run-no-cache:
+  nocache-matrix:
+    name: No-Cache Matrix
+    needs: cached-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.9', '3.10', '3.11']
     uses: ./.github/workflows/reusable-ci.yml
     with:
-      os: ubuntu-latest
-      python-version: '3.10'
+      os: ${{ matrix.os }}
+      python-version: ${{ matrix.python-version }}
       use-cache: false
       run-tests: true
-      artifact-prefix: no-cache
-    needs: matrix-run
+      artifact-prefix: nocache
 
-  conditional-deploy:
-    needs: [matrix-run, matrix-run-no-cache]
+  cache-report:
+    name: Cache Timing Report
+    needs: [cached-matrix, nocache-matrix]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[deploy]')
+    steps:
+      - name: Download timing artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: timing-artifacts
+
+      - name: Build timing report
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import glob
+
+          records = []
+          for path in glob.glob("timing-artifacts/**/timing_*.json", recursive=True):
+            with open(path, "r") as f:
+              records.append(json.load(f))
+
+          def key(r):
+            return (r["os"], r["python"])
+
+          cache = {key(r): r for r in records if r.get("run_type") == "cache"}
+          nocache = {key(r): r for r in records if r.get("run_type") == "nocache"}
+
+          lines = [
+            "# Cache Timing Report",
+            "",
+            "| OS | Python | Cache (s) | No-Cache (s) | Improvement |",
+            "| --- | ------ | --------- | ------------ | ----------- |",
+          ]
+
+          for k in sorted(cache.keys() | nocache.keys()):
+            c = cache.get(k, {})
+            n = nocache.get(k, {})
+            c_d = float(c.get("duration_seconds", 0.0))
+            n_d = float(n.get("duration_seconds", 0.0))
+            if n_d > 0:
+              improvement = (n_d - c_d) / n_d * 100.0
+              imp_text = f"{improvement:.1f}%"
+            else:
+              imp_text = "n/a"
+            lines.append(f"| {k[0]} | {k[1]} | {c_d:.2f} | {n_d:.2f} | {imp_text} |")
+
+          report = "\n".join(lines) + "\n"
+          with open("cache_timing_report.md", "w") as f:
+            f.write(report)
+          print(report)
+          PY
+
+      - name: Upload timing report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cache-report
+          path: cache_timing_report.md
+
+  changes:
+    name: Detect Deploy Changes
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.filter.outputs.deploy }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            deploy:
+              - 'v2/**'
+              - 'metrics/**'
+              - '.github/workflows/**'
+
+  conditional-deploy:
+    name: Conditional Deploy
+    needs: [cache-report, changes]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download cache report
+        uses: actions/download-artifact@v4
+        with:
+          name: cache-report
+          path: deploy-artifacts
 
       - name: Deploy (mock)
         env:
