@@ -128,7 +128,7 @@ jobs:
     name: Conditional Deploy
     needs: [cache-report, changes]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true' && secrets.DEPLOY_TOKEN != ''
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -145,7 +145,7 @@ jobs:
         run: |
           echo "Conditional deploy triggered."
           if [ -z "$DEPLOY_TOKEN" ]; then
-            echo "No deploy token configured; aborting deploy."
-            exit 1
+            echo "No deploy token configured; skipping deploy."
+            exit 0
           fi
           echo "Deploy successful."
