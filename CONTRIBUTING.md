@@ -40,3 +40,23 @@ git checkout -b feat/your-feature-name
 4. **작업 요약**, **주요 변경 사항**을 PR 템플릿에 맞추어 자세히 작성합니다. (스크린샷이나 에러 로그가 있다면 포함합니다.)
 5. 리뷰어의 피드백(MUST, SHOULD 등) 사항을 수용하고, 반영된 내용을 재커밋하여 PR에 연동시킵니다.
 6. 충분한 리뷰를 거친 후 관리자에 의해 성공적으로 Merge 됩니다.
+* `test/`: 테스트 코드 추가 및 수정
+
+```bash
+git checkout -b feat/your-feature-name
+```
+
+## 3. 커밋 메시지 컨벤션 (Commit Message Convention)
+[Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) 형식을 본떠 커밋 메시지를 작성합니다:
+* `feat: add new gripper proxy`
+* `fix: resolve UDP port binding error`
+* `docs: initialize OSS structure`
+* `refactor: centralize logging configurations`
+
+## 4. Pull Request (PR) 절차
+1. 로컬에서 변경된 코드가 에러 없이 정상 구동(Isaac Sim 모의 등)되는지 확인합니다.
+2. 당신의 Fork 저장소로 브랜치를 Push 합니다. `git push origin 브랜치이름`
+3. 원본 저장소의 `main` 브랜치로 **Pull Request**를 생성합니다.
+4. **작업 요약**, **주요 변경 사항**을 PR 템플릿에 맞추어 자세히 작성합니다. (스크린샷이나 에러 로그가 있다면 포함합니다.)
+5. 리뷰어의 피드백(MUST, SHOULD 등) 사항을 수용하고, 반영된 내용을 재커밋하여 PR에 연동시킵니다.
+6. 충분한 리뷰를 거친 후 관리자에 의해 성공적으로 Merge 됩니다.
