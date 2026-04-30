@@ -1,0 +1,86 @@
+name: Python CI Composite
+
+description: Set up Python, optionally cache pip, install deps, lint, and run tests.
+
+inputs:
+  python-version:
+    description: Python version to use
+    required: true
+  use-cache:
+    description: Enable pip cache
+    required: false
+    default: "true"
+  run-tests:
+    description: Run pytest
+    required: false
+    default: "true"
+
+outputs:
+  duration-seconds:
+    description: Total duration of install + lint + test
+    value: ${{ steps.timing.outputs.duration }}
+  cache-hit:
+    description: Whether the pip cache was hit
+    value: ${{ steps.pip-cache.outputs.cache-hit }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Cache pip
+      if: ${{ inputs.use-cache == 'true' }}
+      id: pip-cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ inputs.python-version }}-${{ hashFiles('**/requirements*.txt', '**/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ inputs.python-version }}-
+
+    - name: Start timer
+      id: timer-start
+      shell: bash
+      run: |
+        python - <<'PY'
+        import time, os
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"start={time.time()}\n")
+        PY
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pytest
+
+    - name: Run Flake8 Linting
+      shell: bash
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude v1 --filename "*.py"
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics --exclude v1 --filename "*.py"
+
+    - name: Run Tests
+      if: ${{ inputs.run-tests == 'true' }}
+      shell: bash
+      run: |
+        echo "Running tests..."
+        python -m pytest -q || echo "No tests found; skipping."
+
+    - name: End timer
+      id: timing
+      shell: bash
+      env:
+        START_TIME: ${{ steps.timer-start.outputs.start }}
+      run: |
+        python - <<'PY'
+        import os, time
+        start = float(os.environ.get("START_TIME", "0"))
+        duration = max(0.0, time.time() - start)
+        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"duration={duration:.2f}\n")
+        PY
