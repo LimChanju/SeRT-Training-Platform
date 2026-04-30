@@ -1,63 +1,42 @@
-# Contributor Covenant Code of Conduct
+# 기여자 행동 강령 (Contributor Covenant Code of Conduct)
 
-## Our Pledge
+## 우리의 서약
 
-We as members, contributors, and leaders pledge to make participation in our
-community a harassment-free experience for everyone, regardless of age, body
-size, visible or invisible disability, ethnicity, sex characteristics, gender
-identity and expression, level of experience, education, socio-economic status,
-nationality, personal appearance, race, religion, or sexual identity
-and orientation.
+우리는 멤버, 기여자, 리더로서 나이, 체형, 눈에 보이거나 보이지 않는 장애, 민족, 성적 특징, 성 정체성 및 표현, 경험 수준, 교육, 사회 경제적 지위, 국적, 개인 외모, 인종, 종교, 성 정체성 및 성적 지향에 관계없이 모두에게 괴롭힘 없는 경험을 제공하는 커뮤니티를 만들기 위해 참여할 것을 서약합니다.
 
-We pledge to act and interact in ways that contribute to an open, welcoming,
-diverse, inclusive, and healthy community.
+우리는 개방적이고 환영하며, 다양성을 존중하고, 포용적이며 건전한 커뮤니티에 기여하는 방식으로 행동하고 소통할 것을 서약합니다.
 
-## Our Standards
+## 우리의 기준
 
-Examples of behavior that contributes to a positive environment for our
-community include:
+커뮤니티를 위한 긍정적인 환경 조성에 기여하는 행동의 예는 다음과 같습니다:
 
-* Demonstrating empathy and kindness toward other people
-* Being respectful of differing opinions, viewpoints, and experiences
-* Giving and gracefully accepting constructive feedback
-* Accepting responsibility and apologizing to those affected by our mistakes,
-  and learning from the experience
-* Focusing on what is best not just for us as individuals, but for the
-  overall community
+* 다른 사람에 대한 공감과 친절함을 보여주기
+* 서로 다른 의견, 관점, 경험을 존중하기
+* 건설적인 피드백을 제공하고 기꺼이 수용하기
+* 실수를 인정하고 영향을 받은 사람들에게 사과하며 경험을 통해 배우기
+* 개인뿐만 아니라 커뮤니티 전체에 가장 유익한 것에 집중하기
 
-Examples of unacceptable behavior include:
+용납할 수 없는 행동의 예는 다음과 같습니다:
 
-* The use of sexualized language or imagery, and sexual attention or
-  advances of any kind
-* Trolling, insulting or derogatory comments, and personal or political attacks
-* Public or private harassment
-* Publishing others' private information, such as a physical or email
-  address, without their explicit permission
-* Other conduct which could reasonably be considered inappropriate in a
-  professional setting
+* 성적인 언어 및 이미지의 사용, 어떠한 형태의 성적 관심 또는 유혹
+* 트롤링, 모욕적이거나 경멸적인 댓글, 개인적 또는 정치적인 공격
+* 공개적이거나 사적인 괴롭힘
+* 명시적인 허락 없이 실제 주소나 이메일 주소 등 타인의 개인 정보를 공개하는 행위
+* 기타 전문가적인 환경에서 부적절하다고 합리적으로 간주될 수 있는 행위
 
-## Enforcement Responsibilities
+## 집행 책임
 
-Community leaders are responsible for clarifying and enforcing our standards of
-acceptable behavior and will take appropriate and fair corrective action in
-response to any behavior that they deem inappropriate, threatening, offensive,
-or harmful.
+커뮤니티 리더는 허용되는 행동의 기준을 명확히 하고, 부적절하거나 위협적이거나 불쾌하거나 해롭다고 판단되는 특정 행동에 대해 적절하고 공정한 시정 조치를 취할 책임이 있습니다.
 
-## Scope
+## 적용 범위
 
-This Code of Conduct applies within all community spaces, and also applies when
-an individual is officially representing the community in public spaces.
+이 행동 강령은 모든 커뮤니티 공간 내에서 적용되며, 개인이 공식적으로 커뮤니티를 대표하여 공적인 공간에 나설 때에도 적용됩니다.
 
-## Enforcement
+## 집행
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement.
+학대, 괴롭힘 또는 기타 용납할 수 없는 행동의 사례가 발생하면 집행을 담당하는 커뮤니티 리더에게 신고할 수 있습니다.
 
-## Attribution
+## 출처
 
-This Code of Conduct is adapted from the [Contributor Covenant][homepage],
-version 2.1, available at
-[https://www.contributor-covenant.org/version/2/1/code_of_conduct.html][v2.1].
-
-[homepage]: https://www.contributor-covenant.org
-[v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
+이 행동 강령은 [Contributor Covenant](https://www.contributor-covenant.org) 버전 2.1을 채택하여 작성되었습니다. 
+해당 문서의 원본은 [https://www.contributor-covenant.org/version/2/1/code_of_conduct.html](https://www.contributor-covenant.org/version/2/1/code_of_conduct.html)에서 확인할 수 있습니다.
