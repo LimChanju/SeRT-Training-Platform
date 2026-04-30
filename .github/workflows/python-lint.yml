@@ -128,7 +128,7 @@ jobs:
     name: Conditional Deploy
     needs: [cache-report, changes]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true' && secrets.DEPLOY_TOKEN != ''
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
