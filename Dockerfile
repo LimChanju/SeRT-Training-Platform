@@ -1,43 +1,14 @@
-FROM python:3.11-slim
+# ── Stage 1: builder ─────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
 
-LABEL org.opencontainers.image.source="https://github.com/LimChanju/SeRT-Training-Platform"
-LABEL org.opencontainers.image.description="SeRT VR Training Platform — dependency environment"
-LABEL org.opencontainers.image.licenses="MIT"
+WORKDIR /build
 
-WORKDIR /app
-
-# 의존성 먼저 복사 (레이어 캐시 활용)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# 소스 복사
-COPY pyproject.toml .
-COPY v2/ ./v2/
-
-# Isaac Sim 전용 모듈(omni.*, pxr)은 런타임에 없으므로 stub 생성
+# Isaac Sim stub 생성 (CI/클라우드 환경용)
 RUN python - <<'EOF'
-import os, sys
-
-# omni / pxr stub — CI 스모크 테스트 전용
-for mod in ["omni", "omni.isaac", "omni.isaac.kit", "omni.isaac.core",
-            "omni.isaac.core.utils", "omni.isaac.core.utils.viewports",
-            "omni.isaac.core.objects", "omni.isaac.franka",
-            "omni.isaac.franka.tasks", "omni.isaac.franka.controllers",
-            "pxr"]:
-    parts = mod.split(".")
-    parent = None
-    for i, part in enumerate(parts):
-        full = ".".join(parts[:i+1])
-        if full not in sys.modules:
-            import types
-            m = types.ModuleType(full)
-            sys.modules[full] = m
-            if parent:
-                setattr(parent, part, m)
-        parent = sys.modules[full]
-
-stub_path = "/app/isaac_stubs"
-os.makedirs(stub_path, exist_ok=True)
+import os
 
 stub_code = '''
 import sys, types
@@ -67,33 +38,47 @@ class _AnyClass:
     def __getattr__(self, n): return _AnyClass()
     def __call__(self, *a, **kw): return _AnyClass()
 
-import omni.isaac.kit as _kit
-_kit.SimulationApp = _AnyClass
-import omni.isaac.core as _core
-_core.World = _AnyClass
-import omni.isaac.core.utils.viewports as _vp
-_vp.set_camera_view = lambda *a, **kw: None
+import omni.isaac.kit as _kit; _kit.SimulationApp = _AnyClass
+import omni.isaac.core as _core; _core.World = _AnyClass
+import omni.isaac.core.utils.viewports as _vp; _vp.set_camera_view = lambda *a, **kw: None
 import omni.isaac.core.objects as _obj
-_obj.DynamicCuboid = _AnyClass
-_obj.FixedCuboid   = _AnyClass
-_obj.VisualCuboid  = _AnyClass
-import pxr as _pxr
-_pxr.Gf = _AnyClass()
+_obj.DynamicCuboid = _AnyClass; _obj.FixedCuboid = _AnyClass; _obj.VisualCuboid = _AnyClass
+import pxr as _pxr; _pxr.Gf = _AnyClass()
 '''
 
-with open(f"{stub_path}/isaac_stubs.pth", "w") as f:
-    f.write(stub_path + "\n")
-
-with open(f"{stub_path}/sitecustomize.py", "w") as f:
+os.makedirs("/install/isaac_stubs", exist_ok=True)
+with open("/install/isaac_stubs/sitecustomize.py", "w") as f:
     f.write(stub_code)
-
-print("Isaac Sim stubs installed.")
+with open("/install/isaac_stubs/isaac_stubs.pth", "w") as f:
+    f.write("/install/isaac_stubs\n")
+print("stubs OK")
 EOF
 
-# sitecustomize를 site-packages에 배치
-RUN cp /app/isaac_stubs/sitecustomize.py \
-       $(python -c "import site; print(site.getsitepackages()[0])")/sitecustomize.py
+# ── Stage 2: runtime ─────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+LABEL org.opencontainers.image.source="https://github.com/LimChanju/SeRT-Training-Platform"
+LABEL org.opencontainers.image.description="SeRT VR Training Platform — dependency environment"
+LABEL org.opencontainers.image.licenses="MIT"
+
+WORKDIR /app
+
+# builder에서 설치된 패키지만 복사 (소스 제외)
+COPY --from=builder /install /usr/local
+
+# 소스 복사
+COPY pyproject.toml .
+COPY v2/ ./v2/
+COPY api/ ./api/ 2>/dev/null || true
+
+# stub을 site-packages에 연결
+RUN SITE=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    cp /usr/local/isaac_stubs/sitecustomize.py "$SITE/sitecustomize.py" && \
+    echo "/usr/local/isaac_stubs" >> "$SITE/isaac_stubs.pth"
 
 ENV PYTHONPATH="/app"
+ENV PORT=8080
 
-CMD ["python", "-c", "from v2 import __version__; print('sert-vr-training', __version__, 'OK')"]
+EXPOSE 8080
+
+CMD ["python", "-m", "api.app"]

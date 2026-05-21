@@ -1,0 +1,137 @@
+name: Deploy to GCP Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - "api/**"
+      - "Dockerfile"
+      - "requirements.txt"
+      - ".github/workflows/cloud-run.yml"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  GCP_REGION: asia-northeast3      # 서울 리전
+  CLOUD_RUN_SERVICE: sert-vr-api
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write                  # Workload Identity Federation용
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GCP 인증 (Workload Identity Federation — 시크릿 키 불필요)
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # GHCR 이미지를 GCR(Artifact Registry)로 복사
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Re-tag and push to Artifact Registry
+        id: push
+        run: |
+          SRC="ghcr.io/${{ env.IMAGE_NAME }}:latest"
+          DST="${{ env.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sert/${{ env.CLOUD_RUN_SERVICE }}:${{ github.sha }}"
+          docker pull "$SRC"
+          docker tag  "$SRC" "$DST"
+          docker push "$DST"
+          echo "image=$DST" >> $GITHUB_OUTPUT
+
+      # Cloud Run 배포
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.CLOUD_RUN_SERVICE }}
+          region: ${{ env.GCP_REGION }}
+          image: ${{ steps.push.outputs.image }}
+          env_vars: |
+            APP_ENV=prod
+            APP_VERSION=${{ github.sha }}
+          flags: >-
+            --allow-unauthenticated
+            --min-instances=0
+            --max-instances=3
+            --memory=512Mi
+            --cpu=1
+            --port=8080
+            --timeout=30
+
+      # 헬스체크 검증
+      - name: Health check
+        run: |
+          URL="${{ steps.deploy.outputs.url }}"
+          echo "Service URL: $URL"
+
+          for i in 1 2 3; do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$URL/health" || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed (attempt $i)"
+              break
+            fi
+            echo "Attempt $i: HTTP $STATUS — retrying in 10s..."
+            sleep 10
+          done
+
+          [ "$STATUS" = "200" ] || { echo "Health check failed"; exit 1; }
+
+          curl -sf "$URL/health" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          print(json.dumps(d, indent=2))
+          assert d['status'] == 'ok'
+          assert d['env'] == 'prod'
+          "
+
+      # Cloud Monitoring 업타임 체크 생성/갱신
+      - name: Create Uptime Check (Cloud Monitoring)
+        run: |
+          URL="${{ steps.deploy.outputs.url }}"
+          HOST=$(echo "$URL" | sed 's|https://||')
+
+          gcloud monitoring uptime create "sert-vr-api-health" \
+            --resource-type=uptime-url \
+            --resource-labels="host=$HOST,project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            --check-interval=300 \
+            --path="/health" \
+            --port=443 \
+            --use-ssl \
+            --project=${{ secrets.GCP_PROJECT_ID }} 2>/dev/null || \
+          echo "Uptime check already exists or skipped."
+
+      - name: Job summary
+        run: |
+          echo "### GCP Cloud Run 배포 완료" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 서비스 | ${{ env.CLOUD_RUN_SERVICE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 리전 | ${{ env.GCP_REGION }} (서울) |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | ${{ steps.deploy.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 헬스체크 | ${{ steps.deploy.outputs.url }}/health |" >> $GITHUB_STEP_SUMMARY
+          echo "| 커밋 | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY

@@ -2,12 +2,20 @@ name: Docker Build and Push
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, "release/**"]
     paths:
       - "v2/**"
+      - "api/**"
       - "Dockerfile"
       - "requirements.txt"
       - ".github/workflows/docker.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "v2/**"
+      - "api/**"
+      - "Dockerfile"
+      - "requirements.txt"
   workflow_dispatch:
 
 env:
@@ -19,86 +27,119 @@ permissions:
   packages: write
 
 jobs:
+  # ── 환경 결정 (dev / staging / prod) ────────────────────────────────────────
+  resolve-env:
+    runs-on: ubuntu-latest
+    outputs:
+      env_name: ${{ steps.set.outputs.env_name }}
+      image_tag: ${{ steps.set.outputs.image_tag }}
+
+    steps:
+      - name: Resolve deployment environment
+        id: set
+        run: |
+          REF="${{ github.ref }}"
+          if [[ "$REF" == "refs/heads/main" ]]; then
+            echo "env_name=prod"    >> $GITHUB_OUTPUT
+            echo "image_tag=latest" >> $GITHUB_OUTPUT
+          elif [[ "$REF" == refs/heads/release/* ]]; then
+            echo "env_name=staging"  >> $GITHUB_OUTPUT
+            echo "image_tag=staging" >> $GITHUB_OUTPUT
+          else
+            echo "env_name=dev"    >> $GITHUB_OUTPUT
+            echo "image_tag=dev"   >> $GITHUB_OUTPUT
+          fi
+
+  # ── 빌드 & 푸시 ──────────────────────────────────────────────────────────────
   build-and-push:
+    needs: resolve-env
     runs-on: ubuntu-latest
 
     outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
       digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            type=raw,value=${{ needs.resolve-env.outputs.image_tag }}
             type=sha,prefix=sha-
-            type=ref,event=branch
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=pr,prefix=pr-
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push image
+      - name: Build and push (${{ needs.resolve-env.outputs.env_name }})
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
+          target: runtime
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_ENV=${{ needs.resolve-env.outputs.env_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # ── 스모크 테스트 (PR 제외, push만) ────────────────────────────────────────
   smoke-test:
-    needs: build-and-push
+    needs: [resolve-env, build-and-push]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull latest image
-        run: docker pull ghcr.io/${{ github.repository }}:latest
+      - name: Pull image
+        run: |
+          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-env.outputs.image_tag }}
+
+      - name: Smoke test — health endpoint
+        run: |
+          docker run -d --name sert-test -p 8080:8080 \
+            -e APP_ENV=${{ needs.resolve-env.outputs.env_name }} \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-env.outputs.image_tag }}
+          sleep 3
+          curl -sf http://localhost:8080/health | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert d['status'] == 'ok', f'health check failed: {d}'
+          print('health OK:', d)
+          "
+          docker stop sert-test
 
       - name: Smoke test — package import
         run: |
           docker run --rm \
-            ghcr.io/${{ github.repository }}:latest \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-env.outputs.image_tag }} \
             python -c "from v2 import __version__; print('version:', __version__)"
 
-      - name: Smoke test — event_logger import
+      - name: Job summary
         run: |
-          docker run --rm \
-            ghcr.io/${{ github.repository }}:latest \
-            python -c "from v2.event_logger import EventLogger; print('EventLogger OK')"
-
-      - name: Smoke test — app_config import
-        run: |
-          docker run --rm \
-            ghcr.io/${{ github.repository }}:latest \
-            python -c "from v2.app_config import BASE_DIR; print('BASE_DIR:', BASE_DIR)"
-
-      - name: Report image digest
-        run: |
-          echo "### Docker Image" >> $GITHUB_STEP_SUMMARY
+          echo "### Docker Deploy Summary" >> $GITHUB_STEP_SUMMARY
           echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| Registry | ghcr.io/${{ github.repository }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Digest | ${{ needs.build-and-push.outputs.digest }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 환경 | ${{ needs.resolve-env.outputs.env_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 태그 | ${{ needs.resolve-env.outputs.image_tag }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 스모크 테스트 | 통과 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Digest | ${{ needs.build-and-push.outputs.digest }} |" >> $GITHUB_STEP_SUMMARY
