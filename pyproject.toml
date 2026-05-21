@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "sert-vr-training"
+version = "1.0.0"
+description = "SeRT VR Training Platform — Isaac Sim based neuro-rehabilitation simulation"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "LimChanju", email = "dlackswn0716@gmail.com" }]
+requires-python = ">=3.9"
+keywords = ["isaac-sim", "vr", "rehabilitation", "neuroscience", "robotics"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pip-audit>=2.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["v2*"]

@@ -1,0 +1,105 @@
+name: Publish Python Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install build tomli tomli-w
+
+      - name: Bump version
+        id: bump
+        shell: python
+        run: |
+          import tomllib, tomli_w, os
+
+          with open("pyproject.toml", "rb") as f:
+              cfg = tomllib.load(f)
+
+          current = cfg["project"]["version"]
+          major, minor, patch = map(int, current.split("."))
+
+          bump_type = os.environ.get("BUMP_TYPE", "patch")
+          if bump_type == "major":
+              major += 1; minor = 0; patch = 0
+          elif bump_type == "minor":
+              minor += 1; patch = 0
+          else:
+              patch += 1
+
+          new_version = f"{major}.{minor}.{patch}"
+          cfg["project"]["version"] = new_version
+
+          with open("pyproject.toml", "wb") as f:
+              tomli_w.dump(cfg, f)
+
+          # v2/__init__.py 의 __version__ 도 동기화
+          init_path = "v2/__init__.py"
+          with open(init_path) as f:
+              lines = f.readlines()
+          with open(init_path, "w") as f:
+              for line in lines:
+                  if line.startswith("__version__"):
+                      f.write(f'__version__ = "{new_version}"\n')
+                  else:
+                      f.write(line)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"old_version={current}\n")
+              fh.write(f"new_version={new_version}\n")
+        env:
+          BUMP_TYPE: ${{ inputs.bump }}
+
+      - name: Build package
+        run: python -m build
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml v2/__init__.py
+          git commit -m "chore: bump version ${{ steps.bump.outputs.old_version }} → ${{ steps.bump.outputs.new_version }}"
+          git push
+
+      - name: Create GitHub Release and upload artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.new_version }}
+          name: "v${{ steps.bump.outputs.new_version }}"
+          body: |
+            ## sert-vr-training v${{ steps.bump.outputs.new_version }}
+
+            **변경 내용**: ${{ inputs.bump }} 버전 업데이트 (${{ steps.bump.outputs.old_version }} → ${{ steps.bump.outputs.new_version }})
+
+            ### 설치 방법
+            ```bash
+            pip install sert-vr-training==${{ steps.bump.outputs.new_version }} \
+              --find-links https://github.com/${{ github.repository }}/releases/download/v${{ steps.bump.outputs.new_version }}/
+            ```
+          files: dist/*
+          draft: false
+          prerelease: false
