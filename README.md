@@ -86,5 +86,51 @@ python scripts/generate_sample_logs.py
 
 A/B 테스트 구현은 [`v2/ab_test.py`](v2/ab_test.py)를 참고하세요.
 
+## 테스트
+
+### 단위 테스트 (pytest)
+
+핵심 모듈에 대해 TDD(Red-Green-Refactor) 사이클로 작성된 단위 테스트입니다.
+
+| TDD 사이클 | 대상 | 검증 내용 |
+|-----------|------|-----------|
+| 1 | `ENABLE_VR` 플래그 | 기본 OFF, 환경변수 ON, 피험자 목록 토글 |
+| 2 | 피험자 bucket 해시 | 동일 ID → 항상 같은 그룹 배정 |
+| 3 | A/B variant 할당 | 동일 피험자 → 항상 같은 variant |
+| 4 | 이벤트 CSV 기록 | `record()` 호출 시 파일에 행 저장 |
+| 5 | EventLogger | 충돌/드롭/스택 이벤트 기록 검증 |
+
+```bash
+pip install pytest pytest-cov numpy
+python -m pytest tests/ --ignore=tests/e2e -v
+```
+
+현재 커버리지: **95%** (CI 최소 기준 80%)
+
+### E2E 테스트 (Playwright)
+
+DORA 대시보드 HTML을 실제 브라우저로 열어 시나리오를 검증합니다.
+
+- 페이지 로드 및 제목 확인
+- Lead Time, MTTR 등 지표 4개 텍스트 존재 확인
+- 차트 요소(SVG/canvas) 렌더링 확인
+- JavaScript 에러 없음 확인
+
+테스트 실패 시 스크린샷이 `test-artifacts/screenshots/`에 자동 저장됩니다.
+
+```bash
+pip install pytest-playwright
+playwright install chromium
+python metrics/compute_dora.py --input metrics/session_events.csv --out metrics/out
+python -m pytest tests/e2e/ -v
+```
+
+### CI
+
+push 또는 PR 시 GitHub Actions에서 자동 실행됩니다.
+
+1. 단위 테스트 → 커버리지 80% 미달 시 CI 실패
+2. E2E 테스트 → 실패 시 스크린샷 아티팩트 업로드
+
 ## License
 이 프로젝트는 [MIT License](LICENSE)에 따라 배포됩니다.
