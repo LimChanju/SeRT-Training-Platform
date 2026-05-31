@@ -45,5 +45,46 @@ isaac ~/isaac_vr_project/v2/main.py
 - `incident_start`
 - `incident_end`
 
+`metrics/session_events.csv`
+
+컬럼: `timestamp,event,details`
+## Feature Flags
+
+실험 조건을 코드 변경 없이 환경 변수 또는 피험자 ID 기준으로 토글합니다.
+
+| 플래그 | 기본값 | 설명 |
+|--------|--------|------|
+| `ENABLE_VR` | OFF | VR 모드 활성화 (환경변수 또는 `VR_SUBJECT_IDS` 목록 기반) |
+| `ENABLE_ERP_LOGGING` | ON | ERP 마커 로깅 (`ERP_ROLLOUT_PCT`로 비율 조절 가능) |
+| `ENABLE_ROBOT_COLLISION` | ON | 로봇 충돌 감지 활성화 |
+| `ENABLE_RAYCAST` | OFF | 레이캐스트 시각화 (실험적 기능) |
+
+설정은 [`flags.env`](flags.env)에서 관리하며, 실행 전 아래 명령으로 적용합니다:
+
+```bash
+export $(cat flags.env | xargs)
+isaac ~/isaac_vr_project/v2/main.py
+```
+
+플래그는 [`v2/feature_flags.py`](v2/feature_flags.py)에 구현되어 있습니다.
+
+## A/B 테스트
+
+피험자 ID의 SHA-256 해시를 기반으로 variant를 결정합니다. 동일한 피험자 ID는 항상 같은 variant에 배정됩니다.
+
+| | Variant A | Variant B |
+|---|-----------|-----------|
+| 큐브 수 | 3개 | 5개 |
+| 배치 | 표준 간격 | 확장/좁은 간격 |
+| 속도 임계값 | 0.5 m/s | 0.3 m/s |
+
+이벤트 추적 로그는 `data/ab_logs/` 에 피험자별 CSV로 저장됩니다. 샘플 로그 생성:
+
+```bash
+python scripts/generate_sample_logs.py
+```
+
+A/B 테스트 구현은 [`v2/ab_test.py`](v2/ab_test.py)를 참고하세요.
+
 ## License
 이 프로젝트는 [MIT License](LICENSE)에 따라 배포됩니다.
