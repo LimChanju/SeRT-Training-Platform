@@ -48,6 +48,80 @@ isaac ~/isaac_vr_project/v2/main.py
 `metrics/session_events.csv`
 
 컬럼: `timestamp,event,details`
+## CI/CD 파이프라인
+
+### Python 패키지 배포
+
+`v2/` 코드를 `sert-vr-training` 패키지로 빌드하여 GitHub Releases에 배포합니다.
+
+```bash
+# Actions 탭 → Publish Python Package → bump 타입 선택 → Run workflow
+# patch / minor / major 선택 시 pyproject.toml 버전 자동 bump + .whl 릴리스 첨부
+```
+
+- 워크플로우: [`.github/workflows/publish-package.yml`](.github/workflows/publish-package.yml)
+- 패키지 설정: [`pyproject.toml`](pyproject.toml)
+
+### Docker 이미지 자동 빌드/푸시
+
+`v2/` 또는 `api/` 변경 시 자동으로 GHCR에 이미지를 빌드/푸시하고 스모크 테스트를 실행합니다.
+
+| 브랜치 | 이미지 태그 | 환경 |
+|--------|------------|------|
+| `main` | `latest` | prod |
+| `release/*` | `staging` | staging |
+| 기타 | `dev` | dev |
+
+```bash
+# 로컬 실행 검증
+docker pull ghcr.io/limchanju/sert-training-platform:latest
+docker run --rm ghcr.io/limchanju/sert-training-platform:latest
+```
+
+- 워크플로우: [`.github/workflows/docker.yml`](.github/workflows/docker.yml)
+- Dockerfile: [`Dockerfile`](Dockerfile) (multi-stage builder/runtime)
+
+### Dependabot + 보안 스캔
+
+Dependabot이 매주 월요일 pip/GitHub Actions 패키지 업데이트 PR을 자동 생성합니다.
+
+| 그룹 | 대상 |
+|------|------|
+| `scientific` | numpy, scipy, pandas |
+| `dev-tools` | pytest, pip-audit, build |
+| `actions` | GitHub Actions 전체 |
+
+`pip-audit` 기반 보안 스캔은 `requirements.txt` 변경 시 및 매주 화요일 자동 실행되며, 취약점 발견 시 GitHub Issue를 자동 생성합니다.
+
+- Dependabot 설정: [`.github/dependabot.yml`](.github/dependabot.yml)
+- 보안 스캔 워크플로우: [`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml)
+
+### GitHub Pages + PR 프리뷰
+
+`metrics/` 변경 시 DORA 대시보드 HTML이 GitHub Pages에 자동 배포됩니다.
+PR 생성 시 프리뷰 URL이 코멘트로 자동 등록되며, PR 닫힘 시 자동 삭제됩니다.
+
+- 라이브 URL: `https://limchanju.github.io/SeRT-Training-Platform/`
+- 워크플로우: [`.github/workflows/pages.yml`](.github/workflows/pages.yml)
+
+### GCP Cloud Run 배포
+
+`api/app.py` 헬스체크 API를 GCP Cloud Run(서울 리전)에 자동 배포합니다.
+배포 후 `/health` 엔드포인트 검증 및 Cloud Monitoring 업타임 체크를 자동 등록합니다.
+
+```json
+// GET /health 응답 예시
+{"status": "ok", "version": "...", "env": "prod", "uptime_seconds": 42.1}
+```
+
+GCP 배포를 위해 아래 시크릿을 저장소에 설정해야 합니다:
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`
+- `GCP_SERVICE_ACCOUNT`
+- `GCP_PROJECT_ID`
+
+- 워크플로우: [`.github/workflows/cloud-run.yml`](.github/workflows/cloud-run.yml)
+- API 서버: [`api/app.py`](api/app.py)
+
 ## Feature Flags
 
 실험 조건을 코드 변경 없이 환경 변수 또는 피험자 ID 기준으로 토글합니다.
