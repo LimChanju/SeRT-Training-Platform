@@ -1,0 +1,82 @@
+{
+  "experiment": {
+    "name": "SeRT VR A/B Test — Cube Count Variation",
+    "period": "2026-05-01 ~ 2026-05-14 (2주)",
+    "variant_a": "기본 배치 — 큐브 3개, 표준 간격",
+    "variant_b": "확장 배치 — 큐브 5개, 좁은 간격",
+    "total_subjects": 40,
+    "total_sessions": 120
+  },
+  "overall": {
+    "A": {
+      "variant": "A",
+      "n_sessions": 72,
+      "avg_duration_sec": 32.54,
+      "min_duration_sec": 13.8,
+      "max_duration_sec": 47.25,
+      "avg_collisions": 1.0,
+      "success_rate": 1.0,
+      "erp_detection_rate": 0.639
+    },
+    "B": {
+      "variant": "B",
+      "n_sessions": 48,
+      "avg_duration_sec": 42.21,
+      "min_duration_sec": 19.34,
+      "max_duration_sec": 58.61,
+      "avg_collisions": 2.52,
+      "success_rate": 1.0,
+      "erp_detection_rate": 0.646
+    }
+  },
+  "weekly": {
+    "week1": {
+      "A": {
+        "variant": "A",
+        "n_sessions": 33,
+        "avg_duration_sec": 33.34,
+        "min_duration_sec": 13.8,
+        "max_duration_sec": 47.25,
+        "avg_collisions": 0.91,
+        "success_rate": 1.0,
+        "erp_detection_rate": 0.606
+      },
+      "B": {
+        "variant": "B",
+        "n_sessions": 27,
+        "avg_duration_sec": 43.95,
+        "min_duration_sec": 30.66,
+        "max_duration_sec": 57.43,
+        "avg_collisions": 2.33,
+        "success_rate": 1.0,
+        "erp_detection_rate": 0.667
+      }
+    },
+    "week2": {
+      "A": {
+        "variant": "A",
+        "n_sessions": 39,
+        "avg_duration_sec": 31.86,
+        "min_duration_sec": 20.97,
+        "max_duration_sec": 45.71,
+        "avg_collisions": 1.08,
+        "success_rate": 1.0,
+        "erp_detection_rate": 0.667
+      },
+      "B": {
+        "variant": "B",
+        "n_sessions": 21,
+        "avg_duration_sec": 39.96,
+        "min_duration_sec": 19.34,
+        "max_duration_sec": 58.61,
+        "avg_collisions": 2.76,
+        "success_rate": 1.0,
+        "erp_detection_rate": 0.619
+      }
+    }
+  },
+  "conclusion": {
+    "winner": "A",
+    "key_finding": "Variant A 평균 완료 시간 32.54초 vs Variant B 42.21초. 성공률 A=100.0% / B=100.0%"
+  }
+}
