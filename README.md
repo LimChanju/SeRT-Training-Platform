@@ -132,5 +132,48 @@ push 또는 PR 시 GitHub Actions에서 자동 실행됩니다.
 1. 단위 테스트 → 커버리지 80% 미달 시 CI 실패
 2. E2E 테스트 → 실패 시 스크린샷 아티팩트 업로드
 
+## 사용자 피드백 및 실험 결과
+
+### LLM 기반 10명 페르소나 피드백
+
+뇌졸중 환자, 신경과학 연구자, 재활치료사, VR 엔지니어 등 10개 페르소나를 Claude API로 생성하여 시스템을 평가했습니다.
+
+| 지표 | 결과 |
+|------|------|
+| 평균 만족도 | **4.2 / 5.0** |
+| 사용 의향 | **7 / 10명 (70%)** |
+| 주요 긍정 | ERP 마커 연동, 피험자별 조건 제어, 데이터 자동 기록 |
+| 주요 개선 요청 | UI 단순화, EEG 동기화, 보안 인증 |
+
+피드백 데이터: [`data/persona_feedback/`](data/persona_feedback/)
+
+피드백 재생성:
+```bash
+ANTHROPIC_API_KEY=your_key python scripts/generate_persona_feedback.py
+```
+
+### A/B 테스트 2주 운영 결과
+
+피험자 40명, 120세션을 대상으로 2주간 실험을 운영했습니다.
+
+| 지표 | Variant A (큐브 3개) | Variant B (큐브 5개) |
+|------|---------------------|---------------------|
+| 평균 완료 시간 | **32.54초** | 42.21초 |
+| 평균 충돌 횟수 | **1.0회** | 2.52회 |
+| 태스크 성공률 | 100% | 100% |
+| ERP P300 검출률 | 63.9% | 64.6% |
+
+실험 데이터: [`data/ab_experiment/`](data/ab_experiment/)
+
+### Pivot or Persevere 결정
+
+**결정: Persevere (현행 유지 + 개선)**
+
+Variant A가 완료 시간 23% 단축, 충돌 60% 감소로 우세하여 기본 실험 조건으로 확정했습니다. 상세 결정 근거 및 다음 스프린트 계획: [`docs/pivot-decision.md`](docs/pivot-decision.md)
+
+### 주간 리포팅 자동화
+
+매주 월요일 GitHub Actions가 자동으로 실험 지표를 수집하고 GitHub Issue로 리포트를 생성합니다.
+
 ## License
 이 프로젝트는 [MIT License](LICENSE)에 따라 배포됩니다.
