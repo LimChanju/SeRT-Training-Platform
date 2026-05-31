@@ -1,0 +1,12 @@
+timestamp,subject_id,variant,event,num_cubes,speed_threshold
+2026-05-31T12:59:14Z,S012,A,session_start,3,0.5
+2026-05-31T12:59:14Z,S012,A,flags_snapshot,56,False,True,True,False
+2026-05-31T12:59:14Z,S012,A,pick_attempt,0,False,541.6
+2026-05-31T12:59:14Z,S012,A,pick_attempt,1,True,817.0
+2026-05-31T12:59:14Z,S012,A,pick_attempt,2,True,414.1
+2026-05-31T12:59:14Z,S012,A,pick_attempt,3,True,553.1
+2026-05-31T12:59:14Z,S012,A,pick_attempt,4,True,449.9
+2026-05-31T12:59:14Z,S012,A,erp_marker,P300,0.7728
+2026-05-31T12:59:14Z,S012,A,erp_marker,N200,0.9359
+2026-05-31T12:59:14Z,S012,A,erp_marker,ERN,0.8146
+2026-05-31T12:59:14Z,S012,A,task_complete,28.29,5
