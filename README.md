@@ -48,6 +48,41 @@ isaac ~/isaac_vr_project/v2/main.py
 `metrics/session_events.csv`
 
 컬럼: `timestamp,event,details`
+## CI 최적화
+
+### Matrix 확장 테스트
+
+Ubuntu / Windows / macOS × Python 3.9 / 3.10 / 3.11 조합으로 8개 환경에서 병렬 테스트를 실행합니다.
+
+- 워크플로우: [`.github/workflows/python-lint.yml`](.github/workflows/python-lint.yml)
+- Reusable Workflow: [`.github/workflows/reusable-ci.yml`](.github/workflows/reusable-ci.yml)
+- Composite Action: [`.github/actions/python-ci/action.yml`](.github/actions/python-ci/action.yml)
+
+### 캐싱 전후 실행 시간 비교
+
+`cached-matrix`와 `nocache-matrix` 두 잡을 순차 실행하여 pip 캐시 효과를 측정합니다. 결과는 자동으로 [`cache_timing_report.md`](cache_timing_report.md)에 기록됩니다.
+
+| OS | Python | 캐시 (s) | 캐시 없음 (s) | 개선률 |
+|----|--------|---------|------------|--------|
+| ubuntu-latest | 3.11 | 4.25 | 6.86 | **38.0%** |
+| windows-latest | 3.10 | 12.49 | 17.50 | **28.6%** |
+| ubuntu-latest | 3.10 | 6.59 | 5.25 | -25.5% |
+
+> 전체 결과: [`cache_timing_report.md`](cache_timing_report.md)
+
+### 선택적 배포 파이프라인
+
+`dorny/paths-filter`로 변경 파일을 감지하여 `v2/`, `metrics/`, `.github/workflows/` 변경 시에만 배포 잡을 실행합니다.
+
+```
+push to main
+  ├── cached-matrix (항상 실행)
+  ├── nocache-matrix (항상 실행)
+  ├── cache-report (항상 실행)
+  ├── changes — 변경 파일 감지
+  └── conditional-deploy — v2/metrics/.github 변경 시에만 실행
+```
+
 ## CI/CD 파이프라인
 
 ### Python 패키지 배포
