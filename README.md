@@ -50,6 +50,35 @@ isaac ~/isaac_vr_project/v2/main.py
 컬럼: `timestamp,event,details`
 ## CI 최적화
 
+### CI 워크플로우 구성
+
+`main` 브랜치 push 및 PR 시 Lint(Flake8) → Test(pytest) 가 자동 실행됩니다.
+
+민감정보는 GitHub Secrets로 주입합니다:
+
+| Secret | 용도 |
+|--------|------|
+| `DEPLOY_TOKEN` | 조건부 배포 인증 |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | GCP 인증 |
+| `GCP_SERVICE_ACCOUNT` | GCP 서비스 계정 |
+| `GCP_PROJECT_ID` | GCP 프로젝트 ID |
+
+### Build → Test → Deploy 복합 워크플로우
+
+잡 간 의존성과 아티팩트 전달로 순차 실행을 보장합니다:
+
+```
+cached-matrix ──┐
+                ├──► cache-report ──► changes ──► conditional-deploy
+nocache-matrix ─┘         │
+                           └──► upload-artifact(cache-report)
+                                      │
+                           conditional-deploy ──► download-artifact
+```
+
+- 타이밍 결과는 `upload-artifact`로 저장 → `cache-report` 잡에서 `download-artifact`로 수집
+- 배포 잡은 `needs: [cache-report, changes]`로 선행 잡 완료 후 실행
+
 ### Matrix 확장 테스트
 
 Ubuntu / Windows / macOS × Python 3.9 / 3.10 / 3.11 조합으로 8개 환경에서 병렬 테스트를 실행합니다.
