@@ -47,3 +47,10 @@ where = [
 include = [
     "v2*",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=v2.feature_flags --cov=v2.ab_test --cov=v2.event_logger --cov-fail-under=80 --cov-report=term-missing"
+
+[tool.coverage.run]
+omit = ["tests/*", "scripts/*", "api/*"]
