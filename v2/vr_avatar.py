@@ -180,7 +180,15 @@ HAND_SPHERE_ENABLED = os.environ.get("XR_HAND_SPHERE_ENABLED", "0").lower() in (
     "yes",
     "on",
 )
-HAND_JOINT_VISUAL_RADIUS = 0.022
+HAND_PROXY_LINES = os.environ.get("XR_HAND_PROXY_LINES", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+HAND_PROXY_STYLE = os.environ.get("XR_HAND_PROXY_STYLE", "side").strip().lower()
+HAND_JOINT_VISUAL_RADIUS = float(os.environ.get("XR_HAND_JOINT_VISUAL_RADIUS", "0.022"))
+HAND_BONE_VISUAL_WIDTH = float(os.environ.get("XR_HAND_BONE_VISUAL_WIDTH", "0.006"))
 
 HAND_JOINT_NAMES = (
     "XR_HAND_JOINT_WRIST_EXT",
@@ -229,6 +237,53 @@ FALLBACK_HAND_OFFSETS = (
     ("little_1", np.array([-0.025, -0.052, 0.002])),
     ("little_2", np.array([-0.060, -0.065, 0.006])),
     ("little_tip", np.array([-0.092, -0.076, 0.008])),
+)
+
+FALLBACK_HAND_BONES = (
+    ("wrist", "palm"),
+    ("palm", "thumb_1"),
+    ("thumb_1", "thumb_2"),
+    ("thumb_2", "thumb_tip"),
+    ("palm", "index_1"),
+    ("index_1", "index_2"),
+    ("index_2", "index_tip"),
+    ("palm", "middle_1"),
+    ("middle_1", "middle_2"),
+    ("middle_2", "middle_tip"),
+    ("palm", "ring_1"),
+    ("ring_1", "ring_2"),
+    ("ring_2", "ring_tip"),
+    ("palm", "little_1"),
+    ("little_1", "little_2"),
+    ("little_2", "little_tip"),
+)
+
+OPENXR_HAND_BONES = (
+    ("XR_HAND_JOINT_WRIST_EXT", "XR_HAND_JOINT_PALM_EXT"),
+    ("XR_HAND_JOINT_PALM_EXT", "XR_HAND_JOINT_THUMB_METACARPAL_EXT"),
+    ("XR_HAND_JOINT_THUMB_METACARPAL_EXT", "XR_HAND_JOINT_THUMB_PROXIMAL_EXT"),
+    ("XR_HAND_JOINT_THUMB_PROXIMAL_EXT", "XR_HAND_JOINT_THUMB_DISTAL_EXT"),
+    ("XR_HAND_JOINT_THUMB_DISTAL_EXT", "XR_HAND_JOINT_THUMB_TIP_EXT"),
+    ("XR_HAND_JOINT_PALM_EXT", "XR_HAND_JOINT_INDEX_METACARPAL_EXT"),
+    ("XR_HAND_JOINT_INDEX_METACARPAL_EXT", "XR_HAND_JOINT_INDEX_PROXIMAL_EXT"),
+    ("XR_HAND_JOINT_INDEX_PROXIMAL_EXT", "XR_HAND_JOINT_INDEX_INTERMEDIATE_EXT"),
+    ("XR_HAND_JOINT_INDEX_INTERMEDIATE_EXT", "XR_HAND_JOINT_INDEX_DISTAL_EXT"),
+    ("XR_HAND_JOINT_INDEX_DISTAL_EXT", "XR_HAND_JOINT_INDEX_TIP_EXT"),
+    ("XR_HAND_JOINT_PALM_EXT", "XR_HAND_JOINT_MIDDLE_METACARPAL_EXT"),
+    ("XR_HAND_JOINT_MIDDLE_METACARPAL_EXT", "XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT"),
+    ("XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT", "XR_HAND_JOINT_MIDDLE_INTERMEDIATE_EXT"),
+    ("XR_HAND_JOINT_MIDDLE_INTERMEDIATE_EXT", "XR_HAND_JOINT_MIDDLE_DISTAL_EXT"),
+    ("XR_HAND_JOINT_MIDDLE_DISTAL_EXT", "XR_HAND_JOINT_MIDDLE_TIP_EXT"),
+    ("XR_HAND_JOINT_PALM_EXT", "XR_HAND_JOINT_RING_METACARPAL_EXT"),
+    ("XR_HAND_JOINT_RING_METACARPAL_EXT", "XR_HAND_JOINT_RING_PROXIMAL_EXT"),
+    ("XR_HAND_JOINT_RING_PROXIMAL_EXT", "XR_HAND_JOINT_RING_INTERMEDIATE_EXT"),
+    ("XR_HAND_JOINT_RING_INTERMEDIATE_EXT", "XR_HAND_JOINT_RING_DISTAL_EXT"),
+    ("XR_HAND_JOINT_RING_DISTAL_EXT", "XR_HAND_JOINT_RING_TIP_EXT"),
+    ("XR_HAND_JOINT_PALM_EXT", "XR_HAND_JOINT_LITTLE_METACARPAL_EXT"),
+    ("XR_HAND_JOINT_LITTLE_METACARPAL_EXT", "XR_HAND_JOINT_LITTLE_PROXIMAL_EXT"),
+    ("XR_HAND_JOINT_LITTLE_PROXIMAL_EXT", "XR_HAND_JOINT_LITTLE_INTERMEDIATE_EXT"),
+    ("XR_HAND_JOINT_LITTLE_INTERMEDIATE_EXT", "XR_HAND_JOINT_LITTLE_DISTAL_EXT"),
+    ("XR_HAND_JOINT_LITTLE_DISTAL_EXT", "XR_HAND_JOINT_LITTLE_TIP_EXT"),
 )
 
 
@@ -288,6 +343,12 @@ def _env_pose_priority(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(out) if out else default
 
 
+def _safe_usd_name(name: str) -> str:
+    out = name.lower().replace("xr_hand_joint_", "").replace("_ext", "")
+    out = "".join(ch if ch.isalnum() else "_" for ch in out)
+    return out.strip("_") or "joint"
+
+
 XR_CONTROLLER_POSE_PRIORITY = _env_pose_priority(
     "XR_CONTROLLER_POSE_PRIORITY",
     ("grip", "aim", "", "palm", "pinch", "poke"),
@@ -309,6 +370,7 @@ class VRAvatar:
         self._lhand_prim = None
         self._rhand_prim = None
         self._hand_proxy_prims = {"left": {}, "right": {}}
+        self._hand_proxy_bones = {"left": {}, "right": {}}
 
         self._xr_core     = None
         self._openxr      = None
@@ -346,6 +408,8 @@ class VRAvatar:
             f"visualize-openxr-joints={XR_VISUALIZE_OPENXR_HAND_JOINTS} | "
             f"hand-proxy={HAND_PROXY_ENABLED} | "
             f"hand-sphere={HAND_SPHERE_ENABLED} | "
+            f"hand-lines={HAND_PROXY_LINES} | "
+            f"hand-style={HAND_PROXY_STYLE} | "
             f"arm-lines={XR_DRAW_ARM_LINES} | "
             f"controller-pose-priority={XR_CONTROLLER_POSE_PRIORITY} | "
             f"collision-geometry={ARM_ROBOT_COLLISION_GEOMETRY} "
@@ -393,7 +457,7 @@ class VRAvatar:
     def _create_hand_proxy(self, world, hand: str, palm_pos: np.ndarray) -> None:
         from omni.isaac.core.objects import VisualSphere
 
-        color = np.array([0.55, 0.72, 1.0]) if hand == "left" else np.array([1.0, 0.62, 0.36])
+        color = self._hand_proxy_color(hand)
         for joint_name in HAND_JOINT_NAMES:
             safe_name = joint_name.replace("XR_HAND_JOINT_", "").replace("_EXT", "").lower()
             prim = world.scene.add(VisualSphere(
@@ -414,6 +478,42 @@ class VRAvatar:
                 color=color,
             ))
             self._hand_proxy_prims[hand][fallback_name] = prim
+
+        if HAND_PROXY_LINES:
+            self._create_hand_bone_curves(hand, "openxr", OPENXR_HAND_BONES, palm_pos, color)
+            self._create_hand_bone_curves(hand, "fallback", FALLBACK_HAND_BONES, palm_pos, color)
+
+    def _hand_proxy_color(self, hand: str) -> np.ndarray:
+        if HAND_PROXY_STYLE in ("quest", "hand", "skeleton", "wire"):
+            return np.array([0.58, 0.80, 1.0]) if hand == "left" else np.array([0.92, 0.97, 1.0])
+        return np.array([0.55, 0.72, 1.0]) if hand == "left" else np.array([1.0, 0.62, 0.36])
+
+    def _create_hand_bone_curves(
+        self,
+        hand: str,
+        namespace: str,
+        bones: tuple[tuple[str, str], ...],
+        palm_pos: np.ndarray,
+        color: np.ndarray,
+    ) -> None:
+        import omni.usd
+
+        stage = omni.usd.get_context().get_stage()
+        gf_color = Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))
+        parked = Gf.Vec3f(float(palm_pos[0]), float(palm_pos[1]), float(palm_pos[2]))
+        for name_a, name_b in bones:
+            key = (namespace, name_a, name_b)
+            path = (
+                f"/World/Avatar/{hand}_{namespace}_bone_"
+                f"{_safe_usd_name(name_a)}_to_{_safe_usd_name(name_b)}"
+            )
+            curve = UsdGeom.BasisCurves.Define(stage, path)
+            curve.CreateTypeAttr(UsdGeom.Tokens.linear)
+            curve.CreateCurveVertexCountsAttr([2])
+            curve.CreateWidthsAttr([HAND_BONE_VISUAL_WIDTH])
+            curve.CreateDisplayColorAttr([gf_color])
+            curve.CreatePointsAttr([parked, parked])
+            self._hand_proxy_bones[hand][key] = curve
 
     # ── XRCore / DebugDraw 초기화 ──────────────────────────────────────────
     def _init_xr(self):
@@ -884,6 +984,47 @@ class VRAvatar:
             except Exception:
                 pass
 
+    def _set_hand_bone_points(self, curve, pos_a: np.ndarray, pos_b: np.ndarray) -> None:
+        try:
+            curve.GetPointsAttr().Set([
+                Gf.Vec3f(float(pos_a[0]), float(pos_a[1]), float(pos_a[2])),
+                Gf.Vec3f(float(pos_b[0]), float(pos_b[1]), float(pos_b[2])),
+            ])
+        except Exception:
+            pass
+
+    def _park_hand_bone_curves(self, hand: str, active_keys: set[tuple]) -> None:
+        if not HAND_PROXY_LINES:
+            return
+        parked = np.array([0.0, 0.0, -100.0])
+        for key, curve in self._hand_proxy_bones.get(hand, {}).items():
+            if key in active_keys:
+                continue
+            self._set_hand_bone_points(curve, parked, parked)
+
+    def _update_hand_bone_curves(
+        self,
+        hand: str,
+        namespace: str,
+        positions: dict[str, np.ndarray],
+    ) -> None:
+        if not HAND_PROXY_LINES:
+            return
+        bones = OPENXR_HAND_BONES if namespace == "openxr" else FALLBACK_HAND_BONES
+        active = set()
+        for name_a, name_b in bones:
+            pos_a = positions.get(name_a)
+            pos_b = positions.get(name_b)
+            if pos_a is None or pos_b is None:
+                continue
+            key = (namespace, name_a, name_b)
+            curve = self._hand_proxy_bones.get(hand, {}).get(key)
+            if curve is None:
+                continue
+            self._set_hand_bone_points(curve, pos_a, pos_b)
+            active.add(key)
+        self._park_hand_bone_curves(hand, active)
+
     def _update_hand_proxy(self, hand: str, palm_pos: "np.ndarray | None") -> None:
         if not HAND_PROXY_ENABLED:
             return
@@ -904,25 +1045,29 @@ class VRAvatar:
                 except Exception:
                     pass
             self._park_hand_joint_prims(hand, active)
+            self._update_hand_bone_curves(hand, "openxr", joint_positions)
             return
 
         if palm_pos is None:
             self._park_hand_joint_prims(hand, set())
+            self._park_hand_bone_curves(hand, set())
             return
 
         active = set()
+        fallback_positions = {}
         for fallback_name, offset in FALLBACK_HAND_OFFSETS:
             prim = prims.get(fallback_name)
             if prim is None:
                 continue
+            pos = palm_pos + self._fallback_hand_offset(hand, offset)
+            fallback_positions[fallback_name] = pos
             try:
-                prim.set_world_pose(
-                    position=palm_pos + self._fallback_hand_offset(hand, offset)
-                )
+                prim.set_world_pose(position=pos)
                 active.add(fallback_name)
             except Exception:
                 pass
         self._park_hand_joint_prims(hand, active)
+        self._update_hand_bone_curves(hand, "fallback", fallback_positions)
 
     def shoulder_pos(self, hand: str, head_pos: np.ndarray) -> "np.ndarray | None":
         if head_pos is None:
