@@ -5,7 +5,7 @@
 import numpy as np
 from omni.isaac.core import World
 from omni.isaac.core.utils.viewports import set_camera_view
-from omni.isaac.core.objects import DynamicCuboid, FixedCuboid, VisualCuboid, VisualCylinder
+from omni.isaac.core.objects import DynamicCuboid, FixedCuboid, VisualCuboid
 
 
 def create_world() -> World:
@@ -82,7 +82,7 @@ def randomize_cubes(
             cube.set_angular_velocity(np.zeros(3))
 
 
-def setup_scene(world: World, cube_count: int = 6, show_human_proxies: bool = True):
+def setup_scene(world: World, cube_count: int = 6):
     """
     씬 구성
     - 바닥
@@ -99,7 +99,7 @@ def setup_scene(world: World, cube_count: int = 6, show_human_proxies: bool = Tr
     cube_size = 0.0515
     cube_half = cube_size / 2.0
     table_size = np.array([1.2, 0.8, 0.05])
-    table_height = 0.4
+    table_height = 0.9   # VR HMD 트래킹 사용 → 현실적인 테이블 높이로 조정
     table_center_z = table_height + (table_size[2] / 2.0)
     table_top_z = table_center_z + (table_size[2] / 2.0)
     cube_center_z = table_top_z + cube_half
@@ -117,13 +117,8 @@ def setup_scene(world: World, cube_count: int = 6, show_human_proxies: bool = Tr
     table_xy = np.array([0.4, 0.0])
     table_center_z = table_height + (table_size[2] / 2.0)
     table_center = np.array([table_xy[0], table_xy[1], table_center_z])
-    viewer_eye = np.array([1.2, 0.0, 1.2])
+    viewer_eye = np.array([1.1, 0.0, 1.5])
     set_camera_view(eye=viewer_eye, target=table_center)
-    shoulder_pos = np.array([viewer_eye[0], viewer_eye[1], 1.1])
-    left_hand_pos = shoulder_pos + np.array([-0.35, 0.2, -0.25])
-    right_hand_pos = shoulder_pos + np.array([-0.35, -0.2, -0.25])
-    left_elbow_pos = (shoulder_pos + left_hand_pos) * 0.5
-    right_elbow_pos = (shoulder_pos + right_hand_pos) * 0.5
     stack_base_xy = np.array([0.6, -0.25])
     cube_xy_positions = _sample_positions(
         table_xy,
@@ -158,53 +153,6 @@ def setup_scene(world: World, cube_count: int = 6, show_human_proxies: bool = Tr
         )
     )
 
-    human_proxies = [
-        world.scene.add(
-            VisualCylinder(
-                prim_path="/World/human_left_hand",
-                name="human_left_hand",
-                position=left_hand_pos,
-                radius=0.03,
-                height=0.06,
-                color=np.array([0.0, 0.8, 0.9]),
-                visible=show_human_proxies,
-            )
-        ),
-        world.scene.add(
-            VisualCylinder(
-                prim_path="/World/human_right_hand",
-                name="human_right_hand",
-                position=right_hand_pos,
-                radius=0.03,
-                height=0.06,
-                color=np.array([0.0, 0.8, 0.9]),
-                visible=show_human_proxies,
-            )
-        ),
-        world.scene.add(
-            VisualCylinder(
-                prim_path="/World/human_left_arm",
-                name="human_left_arm",
-                position=left_elbow_pos,
-                radius=0.04,
-                height=0.25,
-                color=np.array([0.1, 0.7, 0.8]),
-                visible=show_human_proxies,
-            )
-        ),
-        world.scene.add(
-            VisualCylinder(
-                prim_path="/World/human_right_arm",
-                name="human_right_arm",
-                position=right_elbow_pos,
-                radius=0.04,
-                height=0.25,
-                color=np.array([0.1, 0.7, 0.8]),
-                visible=show_human_proxies,
-            )
-        ),
-    ]
-
     return (
         cubes,
         place_target,
@@ -213,5 +161,4 @@ def setup_scene(world: World, cube_count: int = 6, show_human_proxies: bool = Tr
         table_xy,
         table_size,
         stack_base_xy,
-        human_proxies,
     )

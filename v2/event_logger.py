@@ -14,8 +14,12 @@ class EventLogger:
         collision_dist: float,
         stack_drop_threshold: float,
         max_human_collisions: int,
+        sample_path: Optional[str] = None,
+        sample_interval_steps: int = 1,
     ) -> None:
         self._log_path = log_path
+        self._sample_path = sample_path
+        self._sample_interval_steps = max(1, int(sample_interval_steps))
         self._cube_size = cube_size
         self._speed_threshold = speed_threshold
         self._collision_dist = collision_dist
@@ -38,9 +42,17 @@ class EventLogger:
         self._sim_time = sim_time
 
     def ensure_episode_started(self) -> None:
+        self.start_episode("reason=run_start")
+
+    def start_episode(self, details: str = "") -> None:
         if not self._episode_started:
-            self.log_event("episode_start", "reason=run_start")
+            self.log_event("episode_start", details)
             self._episode_started = True
+
+    def end_episode(self, details: str = "") -> None:
+        if self._episode_started:
+            self.log_event("episode_end", details)
+            self._episode_started = False
 
     def log_event(self, event: str, details: str = "") -> None:
         file_exists = os.path.exists(self._log_path)
@@ -50,6 +62,48 @@ class EventLogger:
                 writer.writerow(["sim_time", "event", "details"])
             writer.writerow([self._sim_time, event, details])
         print(f"[ErrP] {event} | {details}")
+
+    def log_sample(
+        self,
+        left_hand_gripper_dist: Optional[float],
+        right_hand_gripper_dist: Optional[float],
+        min_hand_gripper_dist: Optional[float],
+        human_robot_collision: bool,
+    ) -> None:
+        if self._sample_path is None:
+            return
+        if self._step % self._sample_interval_steps != 0:
+            return
+
+        file_exists = os.path.exists(self._sample_path)
+        with open(self._sample_path, "a", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            if not file_exists:
+                writer.writerow(
+                    [
+                        "sim_time",
+                        "step",
+                        "left_hand_gripper_dist_m",
+                        "right_hand_gripper_dist_m",
+                        "min_hand_gripper_dist_m",
+                        "human_robot_collision",
+                    ]
+                )
+            writer.writerow(
+                [
+                    self._sim_time,
+                    self._step,
+                    self._format_optional_float(left_hand_gripper_dist),
+                    self._format_optional_float(right_hand_gripper_dist),
+                    self._format_optional_float(min_hand_gripper_dist),
+                    1 if human_robot_collision else 0,
+                ]
+            )
+
+    def _format_optional_float(self, value: Optional[float]) -> str:
+        if value is None:
+            return ""
+        return f"{float(value):.6f}"
 
     def reset_cycle(self) -> None:
         self._stacked_expected = {}
@@ -116,6 +170,19 @@ class EventLogger:
                         )
                         return True
         return False
+
+    def check_arm_robot_collision(self, hand: str, hit_prims: list) -> None:
+        """가상 팔(HMD→컨트롤러)이 로봇 링크에 근접하면 ErrP 후보 이벤트 기록."""
+        if not hit_prims:
+            return
+        key = f"arm_robot:{hand}"
+        if self._step - self._last_event_step.get(key, -9999) > 30:
+            links = ",".join(p.split("/")[-1] for p in hit_prims[:3])
+            self.log_event(
+                "arm_robot_collision",
+                f"hand={hand},links={links}",
+            )
+            self._last_event_step[key] = self._step
 
     def check_stack_failure(self, pick_targets: Iterable) -> None:
         for cube in pick_targets:
