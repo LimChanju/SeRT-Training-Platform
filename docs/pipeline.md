@@ -21,9 +21,11 @@ flowchart LR
         Panda["Panda Robot"]
         PickPlace["PickPlace Controller"]
         Avatar["VRAvatar<br/>head, hands, arm proxies"]
+        Human["HumanAvatar<br/>standing body + moving arms"]
         Grab["VRGrabManager<br/>cube grabbing"]
         GripCam["GripperCamera<br/>optional viewport / recording"]
         Collision["Collision + ErrP Detection"]
+        PseudoErrP["Pseudo ErrP Mapping<br/>human-robot collision"]
         Logger["EventLogger"]
     end
 
@@ -48,6 +50,7 @@ flowchart LR
     Main --> World
     Main --> Panda
     Main --> Avatar
+    Main --> Human
     Main --> Grab
     Main --> GripCam
 
@@ -56,6 +59,9 @@ flowchart LR
     PickPlace --> Panda
 
     Avatar --> Collision
+    Avatar --> Human
+    Human --> Collision
+    Human --> PseudoErrP
     Panda --> Collision
     World --> Collision
 
@@ -63,6 +69,7 @@ flowchart LR
     Grab --> World
 
     Collision --> Logger
+    PseudoErrP --> Logger
     Main --> Logger
 
     Logger --> Markers
@@ -82,6 +89,7 @@ sequenceDiagram
     participant HT as Hand Tracking UDP
     participant M as v2/main.py Loop
     participant A as VRAvatar
+    participant HA as HumanAvatar
     participant G as VRGrabManager
     participant R as Panda Robot
     participant C as Collision ErrP Logic
@@ -93,11 +101,12 @@ sequenceDiagram
     HT->>M: pinch/index/thumb points
 
     loop every simulation frame
-        M->>A: update head and hands
+        M->>A: read/update XR head and hands
+        M->>HA: update standing human body and arms
         M->>G: update cube grab state
         M->>R: run pick-place controller
         M->>C: check robot, gripper, cube, human collisions
-        C->>L: log ErrP markers if detected
+        C->>L: log ErrP and pseudo ErrP markers if detected
         M->>L: log session sample distances
         C->>H: send haptic pulse on collision
     end
@@ -109,6 +118,9 @@ sequenceDiagram
   distances and `human_robot_collision`.
 - `v2/errp_markers.csv` stores event markers such as episode starts, ErrP
   candidates, collisions, and episode ends.
+- `HumanAvatar` turns VR HMD/hand poses into scene-native human prims so later
+  RL observations can use a stable simulated human body instead of XR render
+  models.
 
 ## TensorBoard CSV Visualization
 

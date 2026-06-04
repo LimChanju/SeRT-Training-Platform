@@ -184,6 +184,31 @@ class EventLogger:
             )
             self._last_event_step[key] = self._step
 
+    def check_pseudo_errp(self, source: str, details: str = "", cooldown_steps: int = 30) -> None:
+        key = f"pseudo_errp:{source}"
+        if self._step - self._last_event_step.get(key, -9999) <= cooldown_steps:
+            return
+        self.log_event("pseudo_errp", f"source={source},{details}")
+        self._last_event_step[key] = self._step
+
+    def check_human_task_touch(
+        self,
+        target: str,
+        hand: str,
+        min_dist: Optional[float],
+        threshold: float,
+    ) -> None:
+        if not target or min_dist is None or float(min_dist) > float(threshold):
+            return
+        key = f"human_task_touch:{target}:{hand}"
+        if self._step - self._last_event_step.get(key, -9999) <= 30:
+            return
+        self.log_event(
+            "human_task_touch",
+            f"target={target},hand={hand},dist={float(min_dist):.3f}",
+        )
+        self._last_event_step[key] = self._step
+
     def check_stack_failure(self, pick_targets: Iterable) -> None:
         for cube in pick_targets:
             if cube.name in self._stacked_expected:

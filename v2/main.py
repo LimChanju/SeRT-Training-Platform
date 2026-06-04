@@ -89,6 +89,7 @@ from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
 from gripper_camera import GripperCamera
 from hand_tracking import HandTrackingReceiver
+from human_avatar import HumanAvatar, HUMAN_AVATAR_TOUCH_DIST
 from haptics_udp import HapticsUdpClient
 from panda_robot import add_panda, print_robot_info
 from pick_controller import create_pick_controller, run_pick_place
@@ -375,6 +376,8 @@ def main():
     # 4. VR 아바타 프림 생성 (world.reset() 전에 추가해야 함)
     avatar = VRAvatar()
     avatar.setup(world)
+    human_avatar = HumanAvatar(table_top_z=table_top_z)
+    human_avatar.setup(world)
 
     # 5. 리셋 (물리 핸들 초기화 — 반드시 필요)
     print("[Main] Resetting world...", flush=True)
@@ -442,6 +445,7 @@ def main():
 
     print("[Main] Entering simulation loop...", flush=True)
     waiting_for_vr_logged = False
+    human_task_started = False
     while simulation_app.is_running():
         world.step(render=True)
 
@@ -457,6 +461,7 @@ def main():
                 task_done = False
                 step = 0
                 cycle_reset_requested = False
+                human_task_started = False
 
             step += 1
             sim_time = _sim_time(world, step)
@@ -480,6 +485,21 @@ def main():
 
             # ── VR 아바타 갱신 (머리·손 프림 위치 + 팔 DebugDraw) ──────────
             head_pos, left_pos, right_pos = avatar.update()
+            human_avatar.update(head_pos, left_pos, right_pos)
+            human_task = human_avatar.update_task(green_cubes, left_pos, right_pos)
+            if human_task and not human_task_started:
+                logger.log_event(
+                    "human_task_start",
+                    f"task=touch_green_cube,target={human_task.get('target', '')}",
+                )
+                human_task_started = True
+            if human_task:
+                logger.check_human_task_touch(
+                    human_task.get("target", ""),
+                    human_task.get("hand", ""),
+                    human_task.get("min_dist"),
+                    HUMAN_AVATAR_TOUCH_DIST,
+                )
             if MIRROR_VIEW_TO_HMD and head_pos is not None and step % 2 == 0:
                 try:
                     hmd_forward = avatar.get_hmd_forward()
@@ -506,10 +526,11 @@ def main():
             # 팔↔로봇 충돌 → ErrP
             ee_pos, _ = panda.end_effector.get_world_pose()
             current_cube_pos_for_camera, _ = pick_targets[current_pick_idx].get_world_pose()
+            gripper_center = _gripper_center_from_fingers(panda)
             gripper_camera.update(
                 ee_pos,
                 target_pos=current_cube_pos_for_camera,
-                mount_pos=_gripper_center_from_fingers(panda),
+                mount_pos=gripper_center,
             )
             arm_robot_collision_active = False
             for hand, ctrl_pos in (("left", left_pos), ("right", right_pos)):
@@ -519,8 +540,19 @@ def main():
                     arm_robot_collision_active = True
                     haptics.pulse(100, hand=hand, event="gripper_robot_collision")
 
-            left_hand_gripper_dist = _distance_or_none(left_pos, ee_pos)
-            right_hand_gripper_dist = _distance_or_none(right_pos, ee_pos)
+            gripper_sample_pos = gripper_center if gripper_center is not None else ee_pos
+            left_hand_gripper_dist = _distance_or_none(left_pos, gripper_sample_pos)
+            right_hand_gripper_dist = _distance_or_none(right_pos, gripper_sample_pos)
+            human_avatar_hits = human_avatar.check_gripper_collision(gripper_sample_pos)
+            if human_avatar_hits:
+                hit_details = ",".join(
+                    f"{hit['part']}:{hit['dist']:.3f}"
+                    for hit in human_avatar_hits[:3]
+                )
+                logger.check_pseudo_errp(
+                    "human_robot_collision",
+                    f"robot=gripper,hits={hit_details}",
+                )
             logger.log_sample(
                 left_hand_gripper_dist=left_hand_gripper_dist,
                 right_hand_gripper_dist=right_hand_gripper_dist,
@@ -598,6 +630,7 @@ def main():
                         cycle_reset_requested = True
                         logger.reset_cycle()
                         logger.start_episode("reason=cubes_randomized")
+                        human_task_started = False
                         print(f"\n✅ [Step {step}] 3개 Pick-and-Place 완료! 새 배치로 재시작")
 
             if cycle_reset_requested:
@@ -611,6 +644,7 @@ def main():
                 task_done = False
                 step = 0
                 cycle_reset_requested = False
+                human_task_started = False
 
             # ── ErrP 후보 이벤트 감지 ─────────────────────────────────────────
             gripper_pos = panda.gripper.get_joint_positions()
