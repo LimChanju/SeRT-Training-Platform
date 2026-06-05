@@ -21,7 +21,7 @@ flowchart LR
         Panda["Panda Robot"]
         PickPlace["PickPlace Controller"]
         Avatar["VRAvatar<br/>head, hands, arm proxies"]
-        Human["HumanAvatar<br/>standing body + moving arms"]
+        Human["HumanAvatar<br/>USD human skeleton + VR-driven joints"]
         Grab["VRGrabManager<br/>cube grabbing"]
         GripCam["GripperCamera<br/>optional viewport / recording"]
         Collision["Collision + ErrP Detection"]
@@ -102,7 +102,7 @@ sequenceDiagram
 
     loop every simulation frame
         M->>A: read/update XR head and hands
-        M->>HA: update standing human body and arms
+        M->>HA: update human skeleton head, arm, and hand joints
         M->>G: update cube grab state
         M->>R: run pick-place controller
         M->>C: check robot, gripper, cube, human collisions
@@ -118,9 +118,9 @@ sequenceDiagram
   distances and `human_robot_collision`.
 - `v2/errp_markers.csv` stores event markers such as episode starts, ErrP
   candidates, collisions, and episode ends.
-- `HumanAvatar` turns VR HMD/hand poses into scene-native human prims so later
-  RL observations can use a stable simulated human body instead of XR render
-  models.
+- `HumanAvatar` references Isaac's `human_skeleton.usd` and drives the head,
+  arm, and hand joints from VR HMD/hand poses. It keeps an internal collision
+  model for pseudo ErrP and RL observations; visual debug proxies are optional.
 
 ## TensorBoard CSV Visualization
 
