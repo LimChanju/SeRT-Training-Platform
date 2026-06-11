@@ -34,12 +34,18 @@ from .rewards import (
     reward_component_names,
     reward_weights_dict,
 )
+from .trajectory_recorder import (
+    EXPERT_JOINT_ACTION_DIM,
+    TRAJECTORY_SCHEMA_VERSION,
+    TrajectoryRecorder,
+)
 
 __all__ = [
     "ACTION_DIM",
     "ACTION_NAMES",
     "ACTION_VERSION",
     "DEFAULT_REWARD_WEIGHTS",
+    "EXPERT_JOINT_ACTION_DIM",
     "MAX_EE_DELTA_M",
     "MAX_YAW_DELTA_RAD",
     "OBSERVATION_DIM",
@@ -49,7 +55,9 @@ __all__ = [
     "RewardResult",
     "RewardWeights",
     "TASK_PHASES",
+    "TRAJECTORY_SCHEMA_VERSION",
     "TaskSpaceAction",
+    "TrajectoryRecorder",
     "build_observation",
     "clip_action",
     "compute_reward",
