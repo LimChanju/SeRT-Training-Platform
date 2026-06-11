@@ -118,6 +118,8 @@ sequenceDiagram
   distances and `human_robot_collision`.
 - `v2/errp_markers.csv` stores event markers such as episode starts, ErrP
   candidates, collisions, and episode ends.
+- `docs/rl_trajectory_schema.md` defines the v0 observation/action/reward
+  contract for trajectory collection and policy learning.
 - `HumanAvatar` references Isaac's `human_skeleton.usd` and drives the head,
   arm, and hand joints from VR HMD/hand poses. It keeps an internal collision
   model for pseudo ErrP and RL observations; visual debug proxies are optional.
