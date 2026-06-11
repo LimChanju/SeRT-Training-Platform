@@ -45,10 +45,30 @@ Flattened dimension: `73`.
 
 ## Action V0
 
+Action version: `action_v0_task_space`
+
+Policy actions are normalized to `[-1, 1]` and interpreted as 5D task-space
+commands:
+
+```text
+[dx, dy, dz, dyaw, gripper_cmd]
+```
+
+The canonical implementation lives in `v2/rl/actions.py`.
+
+| Component | Scale | Meaning |
+|---|---:|---|
+| `dx` | `0.03m` | End-effector delta in world x. |
+| `dy` | `0.03m` | End-effector delta in world y. |
+| `dz` | `0.03m` | End-effector delta in world z. |
+| `dyaw` | `0.15rad` | Wrist yaw delta. |
+| `gripper_cmd` | sign | `+1` opens the gripper, `-1` closes it. |
+
 The first recorder should store both action forms when possible:
 
 | Field | Shape | Meaning |
 |---|---:|---|
+| `policy_action` | `[5]` | Normalized policy action using the components above. |
 | `expert_task_action` | `[5]` | End-effector command: `dx, dy, dz, dyaw, gripper_cmd`. |
 | `expert_joint_action` | `[9]` | Raw articulation action from the expert controller. |
 
