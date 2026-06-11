@@ -238,3 +238,17 @@ Evaluate the checkpoint offline before running it in Isaac:
 
 This reports overall and per-action MSE/MAE, then prints a few predicted actions
 next to the expert actions from the dataset.
+
+Roll out the trained policy in Isaac with a rule-based gripper:
+
+```bash
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/rollout_bc_policy.py" \
+  --checkpoint v2/policies/bc_pick_place_v0.pt \
+  --episodes 3 \
+  --device cuda
+```
+
+Add `--render` when you want to watch it. The default rollout uses the BC
+network for `dx, dy, dz, dyaw` and a distance rule for open/close because the
+first BC model learns the continuous arm motion much better than the gripper
+state.
