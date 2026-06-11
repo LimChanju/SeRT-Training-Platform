@@ -226,3 +226,15 @@ obs_policy [73] -> expert_task_action [5]
 
 The checkpoint stores the MLP weights plus observation normalization statistics
 so policy replay can apply the same preprocessing.
+
+Evaluate the checkpoint offline before running it in Isaac:
+
+```bash
+/home/railabchan/isaac-sim-4.5.0/python.sh v2/rl/evaluate_bc.py \
+  --data v2/trajectories/expert_pick_place_v0.hdf5 \
+  --checkpoint v2/policies/bc_pick_place_v0.pt \
+  --device cuda
+```
+
+This reports overall and per-action MSE/MAE, then prints a few predicted actions
+next to the expert actions from the dataset.
