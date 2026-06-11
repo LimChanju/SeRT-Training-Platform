@@ -34,11 +34,25 @@ from .rewards import (
     reward_component_names,
     reward_weights_dict,
 )
-from .trajectory_recorder import (
-    EXPERT_JOINT_ACTION_DIM,
-    TRAJECTORY_SCHEMA_VERSION,
-    TrajectoryRecorder,
-)
+try:
+    from .trajectory_recorder import (
+        EXPERT_JOINT_ACTION_DIM,
+        TRAJECTORY_SCHEMA_VERSION,
+        TrajectoryRecorder,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "h5py":
+        raise
+    EXPERT_JOINT_ACTION_DIM = 9
+    TRAJECTORY_SCHEMA_VERSION = "trajectory_v0_transitions"
+
+    class TrajectoryRecorder:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs) -> None:
+            raise ModuleNotFoundError(
+                "h5py is required for TrajectoryRecorder. Install it in the Isaac "
+                "Python environment, or run collect_expert_trajectories.py with "
+                "--install-missing-deps."
+            ) from exc
 
 __all__ = [
     "ACTION_DIM",

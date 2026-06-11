@@ -182,7 +182,7 @@ errp_feedback = 0.0
 Run:
 
 ```bash
-./launch_isaac.sh "$PWD/v2/collect_expert_trajectories.py" --episodes 10 --overwrite
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/collect_expert_trajectories.py" --episodes 10 --overwrite
 ```
 
 Output:
@@ -193,3 +193,13 @@ v2/trajectories/expert_pick_place_v0.hdf5
 
 This first dataset is for learning basic pick-and-place behavior. HRI safety
 and ErrP replay can be added later using the same schema.
+
+If Isaac's active Python environment does not have `h5py`, run the first
+collection once with:
+
+```bash
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/collect_expert_trajectories.py" --episodes 1 --overwrite --install-missing-deps
+```
+
+Do not pass `--render` for headless collection. Add `--render` only when you
+want to visually debug the expert rollout.

@@ -1,13 +1,14 @@
 # collect_expert_trajectories.py -- Isaac Sim 4.5 expert demo collector
 #
 # Example:
-#   ./launch_isaac.sh "$PWD/v2/collect_expert_trajectories.py" \
+#   ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/collect_expert_trajectories.py" \
 #       --episodes 10 --overwrite
 
 from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 
 import numpy as np
@@ -26,10 +27,38 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7, help="Numpy random seed.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing HDF5 file.")
     parser.add_argument("--render", action="store_true", help="Render while collecting.")
+    parser.add_argument(
+        "--install-missing-deps",
+        action="store_true",
+        help="Install missing Python dependencies into the active Isaac Python environment.",
+    )
     return parser.parse_args()
 
 
 args = _parse_args()
+
+
+def _ensure_h5py() -> None:
+    try:
+        import h5py  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+
+    if not args.install_missing_deps:
+        raise SystemExit(
+            "[ExpertCollect] Missing dependency: h5py\n"
+            "Install it in the Isaac Python environment once, or rerun with:\n"
+            "  --install-missing-deps\n"
+            "Example:\n"
+            "  ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "
+            "\"$PWD/v2/collect_expert_trajectories.py\" --episodes 1 "
+            "--overwrite --install-missing-deps"
+        )
+
+    print("[ExpertCollect] h5py not found; installing h5py>=3.8 into active Python...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "h5py>=3.8"])
+    import h5py  # noqa: F401
 
 simulation_app = SimulationApp(
     {
@@ -42,8 +71,10 @@ simulation_app = SimulationApp(
         "max_gpu_count": 1,
     }
 )
+print(f"[ExpertCollect] SimulationApp headless={not args.render}")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ensure_h5py()
 
 from panda_robot import add_panda  # noqa: E402
 from pick_controller import create_pick_controller  # noqa: E402
