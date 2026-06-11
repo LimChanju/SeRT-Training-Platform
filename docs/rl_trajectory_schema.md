@@ -252,3 +252,28 @@ Add `--render` when you want to watch it. The default rollout uses the BC
 network for `dx, dy, dz, dyaw` and a distance rule for open/close because the
 first BC model learns the continuous arm motion much better than the gripper
 state.
+
+If task-space BC does not move correctly during rollout, train a joint-target
+BC policy that bypasses the task-space-to-RMPFlow conversion:
+
+```bash
+/home/railabchan/isaac-sim-4.5.0/python.sh v2/rl/train_joint_bc.py \
+  --data v2/trajectories/expert_pick_place_v0_100eps.hdf5 \
+  --output v2/policies/bc_arm_joint_v0_100eps.pt \
+  --device cuda \
+  --epochs 120
+```
+
+Then roll it out with the same script:
+
+```bash
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/rollout_bc_policy.py" \
+  --checkpoint v2/policies/bc_arm_joint_v0_100eps.pt \
+  --episodes 3 \
+  --device cuda \
+  --render
+```
+
+The rollout script auto-detects `expert_arm_joint_action_v0` checkpoints and
+applies the predicted 7 arm joint targets directly, while keeping the gripper
+rule-based.

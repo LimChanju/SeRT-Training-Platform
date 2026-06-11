@@ -46,6 +46,12 @@ def _parse_args() -> argparse.Namespace:
         help="Use a fixed top-down gripper orientation. Default leaves orientation unconstrained.",
     )
     parser.add_argument(
+        "--max-joint-delta",
+        type=float,
+        default=0.035,
+        help="Maximum per-step arm joint delta for joint-target BC checkpoints.",
+    )
+    parser.add_argument(
         "--gripper-mode",
         choices=("rule", "policy"),
         default="rule",
@@ -93,7 +99,7 @@ from omni.isaac.franka.controllers import RMPFlowController  # noqa: E402
 
 from actions import ACTION_DIM, MAX_EE_DELTA_M, MAX_YAW_DELTA_RAD, clip_action  # noqa: E402
 from observations import OBSERVATION_DIM, build_observation, flatten_observation, task_phase_onehot  # noqa: E402
-from policies import MLPPolicy  # noqa: E402
+from policies import MLPPolicy, MLPRegressor  # noqa: E402
 from rewards import is_success  # noqa: E402
 
 from panda_robot import add_panda  # noqa: E402
@@ -105,21 +111,36 @@ class PolicyRunner:
         checkpoint_path = _resolve_project_path(checkpoint_path)
         self.device = _select_device(device_name)
         checkpoint = _torch_load(checkpoint_path, self.device)
+        self.target_version = str(checkpoint.get("target_version", "task_space_action_v0"))
         self.obs_mean = _tensor_to_numpy(checkpoint["obs_mean"]).reshape(1, -1)
         self.obs_std = _tensor_to_numpy(checkpoint["obs_std"]).reshape(1, -1)
+        self.target_mean = None
+        self.target_std = None
+        self.target_min = None
+        self.target_max = None
+        if "target_mean" in checkpoint and "target_std" in checkpoint:
+            self.target_mean = _tensor_to_numpy(checkpoint["target_mean"]).reshape(1, -1)
+            self.target_std = _tensor_to_numpy(checkpoint["target_std"]).reshape(1, -1)
+        if "target_min" in checkpoint and "target_max" in checkpoint:
+            self.target_min = _tensor_to_numpy(checkpoint["target_min"]).reshape(1, -1)
+            self.target_max = _tensor_to_numpy(checkpoint["target_max"]).reshape(1, -1)
         hidden_dims = tuple(int(value) for value in checkpoint.get("hidden_dims", (256, 256)))
         obs_dim = int(checkpoint.get("obs_dim", OBSERVATION_DIM))
         action_dim = int(checkpoint.get("action_dim", ACTION_DIM))
         if obs_dim != OBSERVATION_DIM:
             raise ValueError(f"Checkpoint obs dim {obs_dim} != runtime obs dim {OBSERVATION_DIM}")
-        if action_dim != ACTION_DIM:
+        if self.is_joint_policy:
+            model_cls = MLPRegressor
+        else:
+            model_cls = MLPPolicy
+        if not self.is_joint_policy and action_dim != ACTION_DIM:
             raise ValueError(f"Checkpoint action dim {action_dim} != runtime action dim {ACTION_DIM}")
-        self.model = MLPPolicy(obs_dim, action_dim, hidden_dims=hidden_dims).to(self.device)
+        self.model = model_cls(obs_dim, action_dim, hidden_dims=hidden_dims).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
         print(
             f"[BCRollout] loaded checkpoint={checkpoint_path} device={self.device} "
-            f"torch={torch.__version__} hidden_dims={hidden_dims}",
+            f"torch={torch.__version__} target={self.target_version} hidden_dims={hidden_dims}",
             flush=True,
         )
         if self.device.type == "cuda":
@@ -131,7 +152,16 @@ class PolicyRunner:
         with torch.no_grad():
             tensor = torch.from_numpy(obs_norm.astype(np.float32)).to(self.device)
             action = self.model(tensor).detach().cpu().numpy()[0]
+        if self.target_mean is not None and self.target_std is not None:
+            action = (action.reshape(1, -1) * self.target_std + self.target_mean)[0]
+            if self.target_min is not None and self.target_max is not None:
+                action = np.clip(action.reshape(1, -1), self.target_min, self.target_max)[0]
+            return np.asarray(action, dtype=np.float32)
         return clip_action(action)
+
+    @property
+    def is_joint_policy(self) -> bool:
+        return self.target_version == "expert_arm_joint_action_v0"
 
 
 def _select_device(requested: str):
@@ -265,6 +295,26 @@ def _merge_gripper_action(robot, arm_action, gripper_command: str | None):
     return arm_action
 
 
+def _joint_action_from_prediction(
+    robot,
+    joint_prediction: np.ndarray,
+    max_delta: float,
+    template_action=None,
+):
+    current = np.asarray(robot.get_joint_positions(), dtype=float).reshape(-1)[:7]
+    target = np.asarray(joint_prediction, dtype=float).reshape(-1)[:7]
+    delta = np.clip(target - current, -float(max_delta), float(max_delta))
+    positions = (current + delta).astype(np.float32)
+    if template_action is None:
+        from isaacsim.core.utils.types import ArticulationAction
+
+        return ArticulationAction(joint_positions=positions)
+    template_action.joint_positions = positions
+    template_action.joint_velocities = None
+    template_action.joint_efforts = None
+    return template_action
+
+
 def _target_from_action(
     obs: dict[str, np.ndarray],
     action: np.ndarray,
@@ -347,14 +397,18 @@ def _run() -> None:
         for step_idx in range(args.max_steps):
             obs = _build_obs(panda, active_cube, place_pos)
             policy_action = runner.predict(obs)
-            target_pos, target_quat, yaw = _target_from_action(
-                obs,
-                policy_action,
-                yaw=yaw,
-                action_scale=args.action_scale,
-                table_top_z=table_top_z,
-                fixed_orientation=args.fixed_orientation,
-            )
+            if runner.is_joint_policy:
+                target_pos = None
+                target_quat = None
+            else:
+                target_pos, target_quat, yaw = _target_from_action(
+                    obs,
+                    policy_action,
+                    yaw=yaw,
+                    action_scale=args.action_scale,
+                    table_top_z=table_top_z,
+                    fixed_orientation=args.fixed_orientation,
+                )
             if args.gripper_mode == "rule":
                 prev_gripper_closed = gripper_closed
                 gripper_closed = _rule_gripper_should_close(
@@ -373,10 +427,22 @@ def _run() -> None:
             else:
                 gripper_command = None
 
-            arm_action = rmp_controller.forward(
-                target_end_effector_position=target_pos,
-                target_end_effector_orientation=target_quat,
-            )
+            if runner.is_joint_policy:
+                template_action = rmp_controller.forward(
+                    target_end_effector_position=np.asarray(obs["ee_pos"], dtype=float),
+                    target_end_effector_orientation=None,
+                )
+                arm_action = _joint_action_from_prediction(
+                    panda,
+                    policy_action,
+                    args.max_joint_delta,
+                    template_action=template_action,
+                )
+            else:
+                arm_action = rmp_controller.forward(
+                    target_end_effector_position=target_pos,
+                    target_end_effector_orientation=target_quat,
+                )
             control_action = _merge_gripper_action(panda, arm_action, gripper_command)
             panda.apply_action(control_action)
             world.step(render=args.render)
