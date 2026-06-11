@@ -77,18 +77,57 @@ remains useful for replay and debugging.
 
 ## Reward V0
 
-The reward should be stored per step:
+Reward version: `reward_v0_hri_errp`
+
+The canonical implementation lives in `v2/rl/rewards.py`.
+
+The per-step reward is:
 
 ```text
- distance improvement: ee -> cube
-+ distance improvement: cube -> target
-+ grasp bonus
-+ success bonus
-- action penalty
-- near human penalty
-- human collision penalty
-- ErrP feedback penalty
+r_t =
+  2.0 * (d_ee_cube[t-1] - d_ee_cube[t])
++ 3.0 * (d_cube_goal[t-1] - d_cube_goal[t])
++ 0.2 * grasp_t
++ 10.0 * success_t
+- 0.01 * ||action_t||_2
+- 0.5 * near_human_t
+- 5.0 * human_robot_collision_t
+- 2.0 * errp_feedback_t
 ```
+
+where:
+
+```text
+d_ee_cube[t]    = ||cube_pos[t] - ee_pos[t]||
+d_cube_goal[t] = ||place_target_pos[t] - cube_pos[t]||
+```
+
+The reward should be stored per step as both total and component breakdown:
+
+```text
+/rewards/total
+/rewards/components/ee_to_cube_progress
+/rewards/components/cube_to_target_progress
+/rewards/components/grasp_bonus
+/rewards/components/success_bonus
+/rewards/components/action_penalty
+/rewards/components/near_human_penalty
+/rewards/components/human_collision_penalty
+/rewards/components/errp_penalty
+```
+
+Default weights:
+
+| Term | Weight |
+|---|---:|
+| `ee_to_cube_progress` | `2.0` |
+| `cube_to_target_progress` | `3.0` |
+| `grasp_bonus` | `0.2` |
+| `success_bonus` | `10.0` |
+| `action_penalty` | `0.01` |
+| `near_human_penalty` | `0.5` |
+| `human_collision_penalty` | `5.0` |
+| `errp_penalty` | `2.0` |
 
 At first:
 
