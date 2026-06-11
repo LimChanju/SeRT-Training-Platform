@@ -206,3 +206,23 @@ collector's Python path.
 
 Do not pass `--render` for headless collection. Add `--render` only when you
 want to visually debug the expert rollout.
+
+## Behavior Cloning V0
+
+Train a first policy from the expert trajectories:
+
+```bash
+/home/railabchan/isaac-sim-4.5.0/python.sh v2/rl/train_bc.py \
+  --data v2/trajectories/expert_pick_place_v0.hdf5 \
+  --output v2/policies/bc_pick_place_v0.pt \
+  --device cuda
+```
+
+The training target is:
+
+```text
+obs_policy [73] -> expert_task_action [5]
+```
+
+The checkpoint stores the MLP weights plus observation normalization statistics
+so policy replay can apply the same preprocessing.

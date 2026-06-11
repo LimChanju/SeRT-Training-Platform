@@ -17,5 +17,6 @@ spikerbox_test/
 v1/
 v2/gripper_camera_recording/
 v2/.python_packages/
+v2/policies/
 v2/session_samples.csv
 v2/trajectories/
