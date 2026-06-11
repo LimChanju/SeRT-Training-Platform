@@ -201,5 +201,8 @@ collection once with:
 ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/collect_expert_trajectories.py" --episodes 1 --overwrite --install-missing-deps
 ```
 
+This installs `h5py` into `v2/.python_packages/` and adds that directory to the
+collector's Python path.
+
 Do not pass `--render` for headless collection. Add `--render` only when you
 want to visually debug the expert rollout.

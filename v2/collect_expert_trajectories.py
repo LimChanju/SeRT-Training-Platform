@@ -12,7 +12,10 @@ import subprocess
 import sys
 
 import numpy as np
-from omni.isaac.kit import SimulationApp
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PYTHON_PACKAGE_DIR = os.path.join(SCRIPT_DIR, ".python_packages")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -39,6 +42,8 @@ args = _parse_args()
 
 
 def _ensure_h5py() -> None:
+    if PYTHON_PACKAGE_DIR not in sys.path:
+        sys.path.insert(0, PYTHON_PACKAGE_DIR)
     try:
         import h5py  # noqa: F401
         return
@@ -56,9 +61,31 @@ def _ensure_h5py() -> None:
             "--overwrite --install-missing-deps"
         )
 
-    print("[ExpertCollect] h5py not found; installing h5py>=3.8 into active Python...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "h5py>=3.8"])
+    os.makedirs(PYTHON_PACKAGE_DIR, exist_ok=True)
+    print(
+        "[ExpertCollect] h5py not found; installing h5py>=3.8 into project package dir: "
+        f"{PYTHON_PACKAGE_DIR}"
+    )
+    subprocess.check_call([
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--target",
+        PYTHON_PACKAGE_DIR,
+        "--no-deps",
+        "h5py>=3.8",
+    ])
+    import importlib
+
+    importlib.invalidate_caches()
     import h5py  # noqa: F401
+
+
+_ensure_h5py()
+
+from omni.isaac.kit import SimulationApp
 
 simulation_app = SimulationApp(
     {
@@ -73,8 +100,7 @@ simulation_app = SimulationApp(
 )
 print(f"[ExpertCollect] SimulationApp headless={not args.render}")
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-_ensure_h5py()
+sys.path.insert(0, SCRIPT_DIR)
 
 from panda_robot import add_panda  # noqa: E402
 from pick_controller import create_pick_controller  # noqa: E402
