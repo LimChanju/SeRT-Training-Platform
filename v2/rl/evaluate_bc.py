@@ -27,17 +27,23 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a BC policy on expert HDF5 trajectories.")
     parser.add_argument(
         "--data",
-        default=os.path.join("v2", "trajectories", "expert_pick_place_v0.hdf5"),
+        default=os.path.join(V2_DIR, "trajectories", "expert_pick_place_v1.hdf5"),
         help="Input HDF5 trajectory file.",
     )
     parser.add_argument(
         "--checkpoint",
-        default=os.path.join("v2", "policies", "bc_pick_place_v0.pt"),
+        default=os.path.join(V2_DIR, "policies", "bc_pick_place_v1.pt"),
         help="PyTorch checkpoint produced by train_bc.py.",
     )
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--samples", type=int, default=8, help="Number of prediction examples to print.")
+    parser.add_argument(
+        "--target-dataset",
+        default="expert_task_action",
+        choices=("expert_task_action", "expert_target_action"),
+        help="Dataset under each episode's actions group to evaluate against.",
+    )
     parser.add_argument(
         "--output-json",
         default="",
@@ -87,10 +93,9 @@ def _ensure_eval_deps(args: argparse.Namespace) -> None:
 
 
 from actions import ACTION_DIM, ACTION_NAMES  # noqa: E402
-from observations import OBSERVATION_DIM  # noqa: E402
 
 
-def _load_dataset(path: str) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+def _load_dataset(path: str, target_dataset: str) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     import h5py
 
     obs_chunks = []
@@ -103,7 +108,10 @@ def _load_dataset(path: str) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         for episode_name in sorted(episodes.keys()):
             group = episodes[episode_name]
             obs = np.asarray(group["obs_policy"], dtype=np.float32)
-            actions = np.asarray(group["actions/expert_task_action"], dtype=np.float32)
+            action_path = f"actions/{target_dataset}"
+            if action_path not in group:
+                raise KeyError(f"{episode_name}: missing dataset '{action_path}'")
+            actions = np.asarray(group[action_path], dtype=np.float32)
             if obs.shape[0] != actions.shape[0]:
                 raise ValueError(
                     f"{episode_name}: obs/action length mismatch "
@@ -119,6 +127,7 @@ def _load_dataset(path: str) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     action_all = np.concatenate(action_chunks, axis=0).astype(np.float32)
     metadata["transitions"] = int(obs_all.shape[0])
     metadata["episode_lengths"] = episode_lengths
+    metadata["target_dataset"] = target_dataset
     return obs_all, action_all, metadata
 
 
@@ -174,9 +183,7 @@ def _evaluate(args: argparse.Namespace) -> None:
 
     from policies import MLPPolicy
 
-    obs_np, action_np, data_meta = _load_dataset(args.data)
-    if obs_np.shape[1] != OBSERVATION_DIM:
-        raise ValueError(f"Expected obs dim {OBSERVATION_DIM}, got {obs_np.shape[1]}")
+    obs_np, action_np, data_meta = _load_dataset(args.data, args.target_dataset)
     if action_np.shape[1] != ACTION_DIM:
         raise ValueError(f"Expected action dim {ACTION_DIM}, got {action_np.shape[1]}")
 
@@ -185,13 +192,15 @@ def _evaluate(args: argparse.Namespace) -> None:
     obs_mean = _tensor_to_numpy(checkpoint["obs_mean"]).reshape(1, -1)
     obs_std = _tensor_to_numpy(checkpoint["obs_std"]).reshape(1, -1)
     hidden_dims = tuple(int(value) for value in checkpoint.get("hidden_dims", (256, 256)))
+    checkpoint_obs_dim = int(checkpoint.get("obs_dim", obs_mean.shape[1]))
     model = MLPPolicy(
-        int(checkpoint.get("obs_dim", OBSERVATION_DIM)),
+        checkpoint_obs_dim,
         int(checkpoint.get("action_dim", ACTION_DIM)),
         hidden_dims=hidden_dims,
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
+    obs_np = _align_obs_dim(obs_np, checkpoint_obs_dim)
     obs_norm = (obs_np - obs_mean) / np.maximum(obs_std, 1e-6)
     pred_np = _predict(model, obs_norm.astype(np.float32), device, max(1, args.batch_size))
     target_np = np.clip(action_np, -1.0, 1.0)
@@ -230,7 +239,7 @@ def _evaluate(args: argparse.Namespace) -> None:
     print(
         f"[EvalBC] data={args.data} checkpoint={args.checkpoint} "
         f"transitions={metrics['transitions']} episodes={metrics['episodes']} "
-        f"device={device} torch={torch.__version__}"
+        f"target={args.target_dataset} device={device} torch={torch.__version__}"
     )
     if device.type == "cuda":
         print(f"[EvalBC] cuda={torch.cuda.get_device_name(0)}")
@@ -265,6 +274,15 @@ def _print_samples(pred: np.ndarray, target: np.ndarray, abs_error: np.ndarray, 
         target_text = np.array2string(target[idx], precision=3, suppress_small=True)
         err_text = np.array2string(abs_error[idx], precision=3, suppress_small=True)
         print(f"  idx={idx:05d} pred={pred_text} expert={target_text} abs_err={err_text}")
+
+
+def _align_obs_dim(obs: np.ndarray, expected_dim: int) -> np.ndarray:
+    if obs.shape[1] == expected_dim:
+        return obs
+    if obs.shape[1] > expected_dim:
+        return obs[:, :expected_dim]
+    pad = np.zeros((obs.shape[0], expected_dim - obs.shape[1]), dtype=obs.dtype)
+    return np.concatenate([obs, pad], axis=1)
 
 
 if __name__ == "__main__":

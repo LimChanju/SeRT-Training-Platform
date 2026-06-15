@@ -58,6 +58,10 @@ class TrajectoryRecorder:
             "next_obs_policy": [],
             "policy_action": [],
             "expert_task_action": [],
+            "expert_target_action": [],
+            "expert_target_position": [],
+            "expert_controller_event": [],
+            "expert_controller_t": [],
             "expert_joint_action": [],
             "reward_total": [],
             "reward_components": {name: [] for name in reward_component_names()},
@@ -80,6 +84,10 @@ class TrajectoryRecorder:
         expert_joint_action: np.ndarray,
         reward: RewardResult | float,
         done: bool,
+        expert_target_action: np.ndarray | None = None,
+        expert_target_position: np.ndarray | None = None,
+        expert_controller_event: int = -1,
+        expert_controller_t: float = 0.0,
         errp_label: int = 0,
         errp_feedback: float = 0.0,
         errp_source_code: int = 0,
@@ -101,6 +109,14 @@ class TrajectoryRecorder:
         self._buffers["next_obs_policy"].append(flatten_observation(next_obs))
         self._buffers["policy_action"].append(clip_action(policy_action))
         self._buffers["expert_task_action"].append(clip_action(expert_task_action))
+        if expert_target_action is None:
+            expert_target_action = expert_task_action
+        if expert_target_position is None:
+            expert_target_position = obs.get("ee_pos", np.zeros(3, dtype=np.float32))
+        self._buffers["expert_target_action"].append(clip_action(expert_target_action))
+        self._buffers["expert_target_position"].append(_fixed_array(expert_target_position, 3))
+        self._buffers["expert_controller_event"].append(int(expert_controller_event))
+        self._buffers["expert_controller_t"].append(float(expert_controller_t))
         self._buffers["expert_joint_action"].append(
             _fixed_array(expert_joint_action, EXPERT_JOINT_ACTION_DIM)
         )
@@ -166,6 +182,30 @@ class TrajectoryRecorder:
             "expert_task_action",
             self._buffers["expert_task_action"],
             (ACTION_DIM,),
+        )
+        self._write_dataset(
+            actions_group,
+            "expert_target_action",
+            self._buffers["expert_target_action"],
+            (ACTION_DIM,),
+        )
+        self._write_dataset(
+            actions_group,
+            "expert_target_position",
+            self._buffers["expert_target_position"],
+            (3,),
+        )
+        self._write_dataset(
+            actions_group,
+            "expert_controller_event",
+            self._buffers["expert_controller_event"],
+            (),
+        )
+        self._write_dataset(
+            actions_group,
+            "expert_controller_t",
+            self._buffers["expert_controller_t"],
+            (),
         )
         self._write_dataset(
             actions_group,

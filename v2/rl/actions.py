@@ -5,10 +5,13 @@ from dataclasses import dataclass
 import numpy as np
 
 
-ACTION_VERSION = "action_v0_task_space"
+LEGACY_TRANSITION_ACTION_VERSION = "action_v0_task_space"
+ACTION_VERSION = "action_v1_controller_target_delta"
+CONTROLLER_TARGET_ACTION_VERSION = ACTION_VERSION
 ACTION_NAMES = ("dx", "dy", "dz", "dyaw", "gripper_cmd")
 ACTION_DIM = len(ACTION_NAMES)
 MAX_EE_DELTA_M = 0.03
+CONTROLLER_TARGET_MAX_DELTA_M = 0.75
 MAX_YAW_DELTA_RAD = 0.15
 
 
@@ -57,6 +60,34 @@ def denormalize_action(action: np.ndarray) -> dict[str, np.ndarray | float | boo
         "gripper_cmd": task_action.gripper_cmd,
         "gripper_should_open": task_action.gripper_should_open,
     }
+
+
+def controller_target_action_from_target(
+    ee_pos_now: np.ndarray,
+    target_pos: np.ndarray,
+    *,
+    yaw_now: float = 0.0,
+    yaw_target: float = 0.0,
+    gripper_cmd: float = 0.0,
+) -> np.ndarray:
+    """Encode the expert controller's intended EE target as a normalized 5D action."""
+
+    ee_pos_now = np.asarray(ee_pos_now, dtype=float).reshape(3)
+    target_pos = np.asarray(target_pos, dtype=float).reshape(3)
+    delta_pos = (target_pos - ee_pos_now) / float(CONTROLLER_TARGET_MAX_DELTA_M)
+    delta_yaw = _wrap_angle(float(yaw_target) - float(yaw_now)) / float(MAX_YAW_DELTA_RAD)
+    return clip_action(np.array([delta_pos[0], delta_pos[1], delta_pos[2], delta_yaw, gripper_cmd]))
+
+
+def controller_target_from_action(
+    ee_pos_now: np.ndarray,
+    action: np.ndarray,
+    *,
+    action_scale: float = 1.0,
+) -> np.ndarray:
+    ee_pos_now = np.asarray(ee_pos_now, dtype=float).reshape(3)
+    action = clip_action(action)
+    return ee_pos_now + action[:3].astype(float) * float(CONTROLLER_TARGET_MAX_DELTA_M) * float(action_scale)
 
 
 def task_action_from_transition(

@@ -22,7 +22,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect PickPlaceController expert trajectories.")
     parser.add_argument(
         "--output",
-        default=os.path.join("v2", "trajectories", "expert_pick_place_v0.hdf5"),
+        default=os.path.join(SCRIPT_DIR, "trajectories", "expert_pick_place_v1.hdf5"),
         help="Output HDF5 path.",
     )
     parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to collect.")
@@ -108,11 +108,15 @@ from scene_setup import create_world, randomize_cubes, setup_scene  # noqa: E402
 from rl import (  # noqa: E402
     TrajectoryRecorder,
     build_observation,
+    controller_target_action_from_target,
     compute_reward,
     expert_joint_action_vector,
     is_success,
-    task_action_from_transition,
 )
+from rl.pick_place_phase import task_phase_from_event  # noqa: E402
+
+
+END_EFFECTOR_OFFSET = np.array([0.0, 0.005, 0.0], dtype=float)
 
 
 def _task_phase(obs: dict[str, np.ndarray]) -> str:
@@ -126,6 +130,100 @@ def _task_phase(obs: dict[str, np.ndarray]) -> str:
     if cube_target_dist > 0.08:
         return "move_to_target"
     return "release_cube"
+
+
+def _controller_event(controller) -> int:
+    try:
+        return int(controller.get_current_event())
+    except Exception:
+        return int(getattr(controller, "_event", 0))
+
+
+def _controller_t(controller) -> float:
+    try:
+        return float(getattr(controller, "_t", 0.0))
+    except Exception:
+        return 0.0
+
+
+def _controller_gripper_cmd(event: int) -> float:
+    if event == 3:
+        return -1.0
+    if event == 7:
+        return 1.0
+    return 0.0
+
+
+def _controller_target_before_forward(
+    controller,
+    picking_position: np.ndarray,
+    placing_position: np.ndarray,
+    end_effector_offset: np.ndarray,
+) -> np.ndarray | None:
+    event = _controller_event(controller)
+    if event in (2, 3, 7) or event >= 10:
+        return None
+
+    picking_position = np.asarray(picking_position, dtype=float).reshape(3)
+    placing_position = np.asarray(placing_position, dtype=float).reshape(3)
+    end_effector_offset = np.asarray(end_effector_offset, dtype=float).reshape(3)
+    t = _controller_t(controller)
+    h1 = float(getattr(controller, "_h1", picking_position[2] + 0.2))
+
+    if event in (0, 1):
+        current_x = float(picking_position[0])
+        current_y = float(picking_position[1])
+        h0 = float(picking_position[2])
+    else:
+        current_x = float(getattr(controller, "_current_target_x", picking_position[0]))
+        current_y = float(getattr(controller, "_current_target_y", picking_position[1]))
+        h0_raw = getattr(controller, "_h0", picking_position[2])
+        h0 = float(picking_position[2] if h0_raw is None else h0_raw)
+
+    alpha = _controller_xy_alpha(event, t)
+    xy = (1.0 - alpha) * np.array([current_x, current_y]) + alpha * placing_position[:2]
+    height = _controller_target_height(event, t, h0, h1, float(placing_position[2]))
+    return np.array([xy[0], xy[1], height], dtype=float) + end_effector_offset
+
+
+def _controller_xy_alpha(event: int, t: float) -> float:
+    if event < 5:
+        return 0.0
+    if event == 5:
+        return _mix_sin(t)
+    return 1.0
+
+
+def _controller_target_height(
+    event: int,
+    t: float,
+    h0: float,
+    h1: float,
+    target_height: float,
+) -> float:
+    if event == 0:
+        return h1
+    if event == 1:
+        return _combine(h1, h0, _mix_sin(max(0.0, t)))
+    if event == 4:
+        return _combine(h0, h1, _mix_sin(max(0.0, t)))
+    if event == 5:
+        return h1
+    if event == 6:
+        return _combine(h1, target_height, _mix_sin(t))
+    if event == 8:
+        return _combine(target_height, h1, _mix_sin(t))
+    if event == 9:
+        return h1
+    return h0
+
+
+def _mix_sin(t: float) -> float:
+    return float(0.5 * (1.0 - np.cos(float(t) * np.pi)))
+
+
+def _combine(a: float, b: float, alpha: float) -> float:
+    return float((1.0 - alpha) * a + alpha * b)
 
 
 def _gripper_center_from_fingers(robot) -> np.ndarray | None:
@@ -150,21 +248,35 @@ def _has_grasped_cube(robot, cube, gripper_center: np.ndarray | None) -> bool:
     return width < 0.065 and dist < 0.11
 
 
-def _build_obs(robot, cube, place_pos: np.ndarray) -> dict[str, np.ndarray]:
+def _build_obs(
+    robot,
+    cube,
+    place_pos: np.ndarray,
+    *,
+    controller_event: int | None = None,
+    controller_t: float = 0.0,
+) -> dict[str, np.ndarray]:
     gripper_center = _gripper_center_from_fingers(robot)
     has_grasped = _has_grasped_cube(robot, cube, gripper_center)
+    task_phase = (
+        task_phase_from_event(controller_event)
+        if controller_event is not None
+        else "approach_cube"
+    )
     obs = build_observation(
         robot=robot,
         cube=cube,
         place_target=place_pos,
         gripper_center_pos=gripper_center,
         has_grasped_cube=has_grasped,
-        task_phase="approach_cube",
+        task_phase=task_phase,
+        controller_event=controller_event,
+        controller_t=controller_t,
     )
-    obs["task_phase"] = obs["task_phase"] * 0.0
-    from rl.observations import task_phase_onehot
+    if controller_event is None:
+        from rl.observations import task_phase_onehot
 
-    obs["task_phase"] = task_phase_onehot(_task_phase(obs))
+        obs["task_phase"] = task_phase_onehot(_task_phase(obs))
     return obs
 
 
@@ -223,25 +335,48 @@ def _collect() -> None:
             success = False
             steps = 0
             for step_idx in range(args.max_steps):
-                obs = _build_obs(panda, active_cube, place_pos)
+                event = _controller_event(controller)
+                event_t = _controller_t(controller)
+                obs = _build_obs(
+                    panda,
+                    active_cube,
+                    place_pos,
+                    controller_event=event,
+                    controller_t=event_t,
+                )
                 cube_pos, _ = active_cube.get_world_pose()
+                target_pos = _controller_target_before_forward(
+                    controller,
+                    np.asarray(cube_pos, dtype=float),
+                    place_pos,
+                    END_EFFECTOR_OFFSET,
+                )
+                if target_pos is None:
+                    target_pos = np.asarray(obs["ee_pos"], dtype=float)
+                expert_task_action = controller_target_action_from_target(
+                    obs["ee_pos"],
+                    target_pos,
+                    gripper_cmd=_controller_gripper_cmd(event),
+                )
                 current_joint_positions = panda.get_joint_positions()
                 expert_action = controller.forward(
                     picking_position=np.asarray(cube_pos, dtype=float),
                     placing_position=place_pos,
                     current_joint_positions=current_joint_positions,
-                    end_effector_offset=np.array([0.0, 0.005, 0.0]),
+                    end_effector_offset=END_EFFECTOR_OFFSET,
                 )
                 expert_joint_action = expert_joint_action_vector(expert_action)
                 panda.apply_action(expert_action)
                 world.step(render=args.render)
 
-                next_obs = _build_obs(panda, active_cube, place_pos)
-                expert_task_action = task_action_from_transition(
-                    obs["ee_pos"],
-                    next_obs["ee_pos"],
-                    gripper_opening_now=float(obs["gripper_width"][0]),
-                    gripper_opening_next=float(next_obs["gripper_width"][0]),
+                next_event = _controller_event(controller)
+                next_event_t = _controller_t(controller)
+                next_obs = _build_obs(
+                    panda,
+                    active_cube,
+                    place_pos,
+                    controller_event=next_event,
+                    controller_t=next_event_t,
                 )
                 success = bool(controller.is_done() or is_success(next_obs))
                 reward = compute_reward(
@@ -256,6 +391,10 @@ def _collect() -> None:
                     next_obs=next_obs,
                     policy_action=expert_task_action,
                     expert_task_action=expert_task_action,
+                    expert_target_action=expert_task_action,
+                    expert_target_position=target_pos,
+                    expert_controller_event=event,
+                    expert_controller_t=event_t,
                     expert_joint_action=expert_joint_action,
                     reward=reward,
                     done=success,

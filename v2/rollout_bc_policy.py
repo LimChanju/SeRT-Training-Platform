@@ -31,7 +31,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Roll out a BC policy in Isaac pick-and-place.")
     parser.add_argument(
         "--checkpoint",
-        default=os.path.join("v2", "policies", "bc_pick_place_v0.pt"),
+        default=os.path.join(SCRIPT_DIR, "policies", "bc_pick_place_v1.pt"),
         help="PyTorch checkpoint produced by v2/rl/train_bc.py.",
     )
     parser.add_argument("--episodes", type=int, default=3)
@@ -40,11 +40,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--render", action="store_true", help="Render the rollout window.")
     parser.add_argument("--action-scale", type=float, default=1.0, help="Multiplier for BC dx/dy/dz/dyaw.")
-    parser.add_argument(
+    orientation_group = parser.add_mutually_exclusive_group()
+    orientation_group.add_argument(
         "--fixed-orientation",
+        dest="fixed_orientation",
         action="store_true",
-        help="Use a fixed top-down gripper orientation. Default leaves orientation unconstrained.",
+        help="Use the expert's fixed top-down gripper orientation.",
     )
+    orientation_group.add_argument(
+        "--free-orientation",
+        dest="fixed_orientation",
+        action="store_false",
+        help="Leave the gripper orientation unconstrained.",
+    )
+    parser.set_defaults(fixed_orientation=True)
     parser.add_argument(
         "--max-joint-delta",
         type=float,
@@ -53,13 +62,25 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--gripper-mode",
-        choices=("rule", "policy"),
-        default="rule",
+        choices=("event", "rule", "policy"),
+        default="event",
         help="Use distance-based gripper rule or the policy gripper output.",
     )
     parser.add_argument("--close-dist", type=float, default=0.08, help="EE/cube distance to close gripper.")
     parser.add_argument("--release-dist", type=float, default=0.07, help="Cube/target distance to open gripper.")
     parser.add_argument("--success-dist", type=float, default=0.06, help="Cube/target success distance.")
+    parser.add_argument(
+        "--phase-gate-close-dist",
+        type=float,
+        default=0.066,
+        help="Hold the lowering phase until EE/cube distance is close enough for event-mode grasping.",
+    )
+    parser.add_argument(
+        "--phase-gate-max-hold",
+        type=int,
+        default=160,
+        help="Maximum extra control steps to hold a phase gate before advancing anyway.",
+    )
     parser.add_argument("--log-every", type=int, default=60)
     return parser.parse_args()
 
@@ -97,8 +118,16 @@ import torch  # noqa: E402
 from isaacsim.core.utils.rotations import euler_angles_to_quat  # noqa: E402
 from omni.isaac.franka.controllers import RMPFlowController  # noqa: E402
 
-from actions import ACTION_DIM, MAX_EE_DELTA_M, MAX_YAW_DELTA_RAD, clip_action  # noqa: E402
+from actions import (  # noqa: E402
+    ACTION_DIM,
+    CONTROLLER_TARGET_ACTION_VERSION,
+    MAX_EE_DELTA_M,
+    MAX_YAW_DELTA_RAD,
+    clip_action,
+    controller_target_from_action,
+)
 from observations import OBSERVATION_DIM, build_observation, flatten_observation, task_phase_onehot  # noqa: E402
+from rl.pick_place_phase import advance_pick_place_event, event_gripper_command, task_phase_from_event  # noqa: E402
 from policies import MLPPolicy, MLPRegressor  # noqa: E402
 from rewards import is_success  # noqa: E402
 
@@ -112,6 +141,7 @@ class PolicyRunner:
         self.device = _select_device(device_name)
         checkpoint = _torch_load(checkpoint_path, self.device)
         self.target_version = str(checkpoint.get("target_version", "task_space_action_v0"))
+        self.action_version = str(checkpoint.get("action_version", "action_v0_task_space"))
         self.obs_mean = _tensor_to_numpy(checkpoint["obs_mean"]).reshape(1, -1)
         self.obs_std = _tensor_to_numpy(checkpoint["obs_std"]).reshape(1, -1)
         self.target_mean = None
@@ -125,22 +155,21 @@ class PolicyRunner:
             self.target_min = _tensor_to_numpy(checkpoint["target_min"]).reshape(1, -1)
             self.target_max = _tensor_to_numpy(checkpoint["target_max"]).reshape(1, -1)
         hidden_dims = tuple(int(value) for value in checkpoint.get("hidden_dims", (256, 256)))
-        obs_dim = int(checkpoint.get("obs_dim", OBSERVATION_DIM))
+        self.obs_dim = int(checkpoint.get("obs_dim", OBSERVATION_DIM))
         action_dim = int(checkpoint.get("action_dim", ACTION_DIM))
-        if obs_dim != OBSERVATION_DIM:
-            raise ValueError(f"Checkpoint obs dim {obs_dim} != runtime obs dim {OBSERVATION_DIM}")
         if self.is_joint_policy:
             model_cls = MLPRegressor
         else:
             model_cls = MLPPolicy
         if not self.is_joint_policy and action_dim != ACTION_DIM:
             raise ValueError(f"Checkpoint action dim {action_dim} != runtime action dim {ACTION_DIM}")
-        self.model = model_cls(obs_dim, action_dim, hidden_dims=hidden_dims).to(self.device)
+        self.model = model_cls(self.obs_dim, action_dim, hidden_dims=hidden_dims).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
         print(
             f"[BCRollout] loaded checkpoint={checkpoint_path} device={self.device} "
-            f"torch={torch.__version__} target={self.target_version} hidden_dims={hidden_dims}",
+            f"torch={torch.__version__} target={self.target_version} action={self.action_version} "
+            f"obs_dim={self.obs_dim} hidden_dims={hidden_dims}",
             flush=True,
         )
         if self.device.type == "cuda":
@@ -148,6 +177,7 @@ class PolicyRunner:
 
     def predict(self, obs: dict[str, np.ndarray]) -> np.ndarray:
         obs_policy = flatten_observation(obs).reshape(1, -1).astype(np.float32)
+        obs_policy = _align_obs_dim(obs_policy, self.obs_dim)
         obs_norm = (obs_policy - self.obs_mean) / np.maximum(self.obs_std, 1e-6)
         with torch.no_grad():
             tensor = torch.from_numpy(obs_norm.astype(np.float32)).to(self.device)
@@ -194,6 +224,15 @@ def _tensor_to_numpy(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float32)
 
 
+def _align_obs_dim(obs_policy: np.ndarray, expected_dim: int) -> np.ndarray:
+    if obs_policy.shape[1] == expected_dim:
+        return obs_policy
+    if obs_policy.shape[1] > expected_dim:
+        return obs_policy[:, :expected_dim]
+    pad = np.zeros((obs_policy.shape[0], expected_dim - obs_policy.shape[1]), dtype=obs_policy.dtype)
+    return np.concatenate([obs_policy, pad], axis=1)
+
+
 def _task_phase(obs: dict[str, np.ndarray]) -> str:
     ee_cube_dist = float(np.linalg.norm(obs["ee_to_cube"]))
     cube_target_dist = float(np.linalg.norm(obs["cube_to_place_target"]))
@@ -229,18 +268,33 @@ def _has_grasped_cube(robot, cube, gripper_center: np.ndarray | None) -> bool:
     return width < 0.065 and dist < 0.11
 
 
-def _build_obs(robot, cube, place_pos: np.ndarray) -> dict[str, np.ndarray]:
+def _build_obs(
+    robot,
+    cube,
+    place_pos: np.ndarray,
+    *,
+    controller_event: int | None = None,
+    controller_t: float = 0.0,
+) -> dict[str, np.ndarray]:
     gripper_center = _gripper_center_from_fingers(robot)
     has_grasped = _has_grasped_cube(robot, cube, gripper_center)
+    task_phase = (
+        task_phase_from_event(controller_event)
+        if controller_event is not None
+        else "approach_cube"
+    )
     obs = build_observation(
         robot=robot,
         cube=cube,
         place_target=place_pos,
         gripper_center_pos=gripper_center,
         has_grasped_cube=has_grasped,
-        task_phase="approach_cube",
+        task_phase=task_phase,
+        controller_event=controller_event,
+        controller_t=controller_t,
     )
-    obs["task_phase"] = task_phase_onehot(_task_phase(obs))
+    if controller_event is None:
+        obs["task_phase"] = task_phase_onehot(_task_phase(obs))
     return obs
 
 
@@ -273,26 +327,12 @@ def _policy_gripper_should_close(action: np.ndarray, was_closed: bool) -> bool:
 def _merge_gripper_action(robot, arm_action, gripper_command: str | None):
     if gripper_command is None:
         return arm_action
-    gripper_action = robot.gripper.forward(action=gripper_command)
-    arm_positions = getattr(arm_action, "joint_positions", None)
-    gripper_positions = getattr(gripper_action, "joint_positions", None)
-    if gripper_positions is None:
-        return arm_action
-    if arm_positions is None:
-        positions = [None] * len(gripper_positions)
-    else:
-        positions = list(arm_positions)
-        if len(positions) < len(gripper_positions):
-            positions.extend([None] * (len(gripper_positions) - len(positions)))
-    for joint_name in ("panda_finger_joint1", "panda_finger_joint2"):
-        try:
-            idx = robot.dof_names.index(joint_name)
-        except ValueError:
-            continue
-        if idx < len(gripper_positions):
-            positions[idx] = gripper_positions[idx]
-    arm_action.joint_positions = positions
-    return arm_action
+    # Franka RMPFlow returns a 7-DOF arm action while gripper.forward() returns
+    # an action scoped to the gripper controller. Trying to splice finger joints
+    # into the 7-DOF arm action can make the articulation controller index past
+    # the available action array. PickPlaceController also sends gripper-only
+    # actions during close/open events, so mirror that behavior here.
+    return robot.gripper.forward(action=gripper_command)
 
 
 def _joint_action_from_prediction(
@@ -321,14 +361,18 @@ def _target_from_action(
     *,
     yaw: float,
     action_scale: float,
+    action_version: str,
     table_top_z: float,
     fixed_orientation: bool,
 ) -> tuple[np.ndarray, np.ndarray | None, float]:
     ee_pos = np.asarray(obs["ee_pos"], dtype=float)
     scale = float(action_scale)
-    delta_pos = np.asarray(action[:3], dtype=float) * MAX_EE_DELTA_M * scale
+    if action_version == CONTROLLER_TARGET_ACTION_VERSION:
+        target_pos = controller_target_from_action(ee_pos, action, action_scale=scale)
+    else:
+        delta_pos = np.asarray(action[:3], dtype=float) * MAX_EE_DELTA_M * scale
+        target_pos = ee_pos + delta_pos
     next_yaw = float(yaw + float(action[3]) * MAX_YAW_DELTA_RAD * scale)
-    target_pos = ee_pos + delta_pos
     target_pos = np.array(
         [
             np.clip(target_pos[0], 0.20, 0.75),
@@ -387,6 +431,9 @@ def _run() -> None:
         place_target.set_world_pose(position=place_pos)
         active_cube = pick_targets[episode_idx % len(pick_targets)]
         gripper_closed = False
+        phase_event = 0
+        phase_t = 0.0
+        phase_hold_steps = 0
         yaw = 0.0
         success = False
         final_dist = float("inf")
@@ -395,7 +442,13 @@ def _run() -> None:
         print(f"[BCRollout] episode={episode_idx:04d} active_cube={active_cube.name}", flush=True)
 
         for step_idx in range(args.max_steps):
-            obs = _build_obs(panda, active_cube, place_pos)
+            obs = _build_obs(
+                panda,
+                active_cube,
+                place_pos,
+                controller_event=phase_event,
+                controller_t=phase_t,
+            )
             policy_action = runner.predict(obs)
             if runner.is_joint_policy:
                 target_pos = None
@@ -406,10 +459,18 @@ def _run() -> None:
                     policy_action,
                     yaw=yaw,
                     action_scale=args.action_scale,
+                    action_version=runner.action_version,
                     table_top_z=table_top_z,
                     fixed_orientation=args.fixed_orientation,
                 )
-            if args.gripper_mode == "rule":
+            gripper_command = None
+            if args.gripper_mode == "event":
+                gripper_closed = event_gripper_command(phase_event, gripper_closed)
+                if phase_event == 3:
+                    gripper_command = "close"
+                elif phase_event == 7:
+                    gripper_command = "open"
+            elif args.gripper_mode == "rule":
                 prev_gripper_closed = gripper_closed
                 gripper_closed = _rule_gripper_should_close(
                     obs,
@@ -420,12 +481,12 @@ def _run() -> None:
             else:
                 prev_gripper_closed = gripper_closed
                 gripper_closed = _policy_gripper_should_close(policy_action, gripper_closed)
-            if gripper_closed and not prev_gripper_closed:
-                gripper_command = "close"
-            elif not gripper_closed and prev_gripper_closed:
-                gripper_command = "open"
-            else:
-                gripper_command = None
+
+            if args.gripper_mode != "event":
+                if gripper_closed and not prev_gripper_closed:
+                    gripper_command = "close"
+                elif not gripper_closed and prev_gripper_closed:
+                    gripper_command = "open"
 
             if runner.is_joint_policy:
                 template_action = rmp_controller.forward(
@@ -447,16 +508,39 @@ def _run() -> None:
             panda.apply_action(control_action)
             world.step(render=args.render)
 
-            next_obs = _build_obs(panda, active_cube, place_pos)
+            next_obs = _build_obs(
+                panda,
+                active_cube,
+                place_pos,
+                controller_event=phase_event,
+                controller_t=phase_t,
+            )
             final_dist = float(np.linalg.norm(next_obs["cube_to_place_target"]))
             final_ee_cube = float(np.linalg.norm(next_obs["ee_to_cube"]))
             final_grasped = bool(next_obs["has_grasped_cube"][0] > 0.5)
             success = is_success(next_obs, threshold_m=args.success_dist)
+            next_event, next_t = advance_pick_place_event(phase_event, phase_t)
+            hold_lowering_for_grasp = (
+                args.gripper_mode == "event"
+                and phase_event == 1
+                and next_event != phase_event
+                and final_ee_cube > args.phase_gate_close_dist
+                and phase_hold_steps < args.phase_gate_max_hold
+            )
+            if hold_lowering_for_grasp:
+                phase_hold_steps += 1
+            else:
+                if next_event != phase_event:
+                    phase_hold_steps = 0
+                phase_event, phase_t = next_event, next_t
+
             if args.log_every > 0 and (step_idx == 0 or (step_idx + 1) % args.log_every == 0):
                 print(
                     f"[BCRollout] ep={episode_idx:04d} step={step_idx + 1:04d} "
+                    f"event={phase_event:02d}:{phase_t:.3f} "
                     f"cube_target={final_dist:.3f} ee_cube={final_ee_cube:.3f} "
                     f"grasp={int(final_grasped)} grip_closed={int(gripper_closed)} "
+                    f"hold={phase_hold_steps} "
                     f"policy={np.round(policy_action, 3)}",
                     flush=True,
                 )
@@ -476,5 +560,8 @@ def _run() -> None:
 
 try:
     _run()
+except BaseException as exc:
+    print(f"[BCRollout] terminated by {type(exc).__name__}: {exc}", flush=True)
+    raise
 finally:
     simulation_app.close()

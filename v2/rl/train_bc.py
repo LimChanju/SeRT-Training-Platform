@@ -27,12 +27,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BC policy from expert HDF5 trajectories.")
     parser.add_argument(
         "--data",
-        default=os.path.join("v2", "trajectories", "expert_pick_place_v0.hdf5"),
+        default=os.path.join(V2_DIR, "trajectories", "expert_pick_place_v1.hdf5"),
         help="Input HDF5 trajectory file.",
     )
     parser.add_argument(
         "--output",
-        default=os.path.join("v2", "policies", "bc_pick_place_v0.pt"),
+        default=os.path.join(V2_DIR, "policies", "bc_pick_place_v1.pt"),
         help="Output PyTorch checkpoint.",
     )
     parser.add_argument("--epochs", type=int, default=100)
@@ -43,6 +43,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--hidden-dims", default="256,256")
+    parser.add_argument(
+        "--target-dataset",
+        default="expert_task_action",
+        choices=("expert_task_action", "expert_target_action"),
+        help="Dataset under each episode's actions group to imitate.",
+    )
     parser.add_argument(
         "--install-missing-deps",
         action="store_true",
@@ -85,11 +91,11 @@ def _ensure_training_deps(args: argparse.Namespace) -> None:
             sys.path.insert(0, ISAAC_TORCH_BUNDLE)
         import torch  # noqa: F401
 
-from rl import ACTION_DIM, ACTION_VERSION, OBSERVATION_DIM, OBSERVATION_VERSION  # noqa: E402
+from rl import ACTION_DIM, ACTION_VERSION, OBSERVATION_VERSION  # noqa: E402
 from rl.rewards import REWARD_VERSION  # noqa: E402
 
 
-def _load_dataset(path: str) -> tuple[np.ndarray, np.ndarray, dict]:
+def _load_dataset(path: str, target_dataset: str) -> tuple[np.ndarray, np.ndarray, dict]:
     import h5py
 
     obs_chunks = []
@@ -101,7 +107,10 @@ def _load_dataset(path: str) -> tuple[np.ndarray, np.ndarray, dict]:
         for episode_name in sorted(episodes.keys()):
             group = episodes[episode_name]
             obs = np.asarray(group["obs_policy"], dtype=np.float32)
-            actions = np.asarray(group["actions/expert_task_action"], dtype=np.float32)
+            action_path = f"actions/{target_dataset}"
+            if action_path not in group:
+                raise KeyError(f"{episode_name}: missing dataset '{action_path}'")
+            actions = np.asarray(group[action_path], dtype=np.float32)
             if obs.shape[0] != actions.shape[0]:
                 raise ValueError(
                     f"{episode_name}: obs/action length mismatch "
@@ -115,6 +124,7 @@ def _load_dataset(path: str) -> tuple[np.ndarray, np.ndarray, dict]:
     obs_all = np.concatenate(obs_chunks, axis=0).astype(np.float32)
     action_all = np.concatenate(action_chunks, axis=0).astype(np.float32)
     metadata["transitions"] = int(obs_all.shape[0])
+    metadata["target_dataset"] = target_dataset
     return obs_all, action_all, metadata
 
 
@@ -151,9 +161,8 @@ def _train(args: argparse.Namespace) -> None:
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    obs_np, actions_np, data_meta = _load_dataset(args.data)
-    if obs_np.shape[1] != OBSERVATION_DIM:
-        raise ValueError(f"Expected obs dim {OBSERVATION_DIM}, got {obs_np.shape[1]}")
+    obs_np, actions_np, data_meta = _load_dataset(args.data, args.target_dataset)
+    obs_dim = int(obs_np.shape[1])
     if actions_np.shape[1] != ACTION_DIM:
         raise ValueError(f"Expected action dim {ACTION_DIM}, got {actions_np.shape[1]}")
 
@@ -188,14 +197,14 @@ def _train(args: argparse.Namespace) -> None:
 
     device = _select_device(args.device)
     hidden_dims = _parse_hidden_dims(args.hidden_dims)
-    model = MLPPolicy(OBSERVATION_DIM, ACTION_DIM, hidden_dims=hidden_dims).to(device)
+    model = MLPPolicy(obs_dim, ACTION_DIM, hidden_dims=hidden_dims).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.MSELoss()
     history = []
 
     print(
         f"[TrainBC] data={args.data} transitions={len(dataset)} episodes={data_meta['episodes']} "
-        f"device={device} torch={torch.__version__}"
+        f"target={args.target_dataset} obs_dim={obs_dim} device={device} torch={torch.__version__}"
     )
     if device.type == "cuda":
         print(f"[TrainBC] cuda={torch.cuda.get_device_name(0)}")
@@ -233,11 +242,11 @@ def _train(args: argparse.Namespace) -> None:
         "model_state_dict": model.cpu().state_dict(),
         "obs_mean": torch.from_numpy(obs_mean.squeeze(0)),
         "obs_std": torch.from_numpy(obs_std.squeeze(0)),
-        "obs_dim": OBSERVATION_DIM,
+        "obs_dim": obs_dim,
         "action_dim": ACTION_DIM,
         "hidden_dims": hidden_dims,
         "observation_version": OBSERVATION_VERSION,
-        "action_version": ACTION_VERSION,
+        "action_version": data_meta.get("action_version", ACTION_VERSION),
         "reward_version": REWARD_VERSION,
         "source_data": os.path.abspath(args.data),
         "data_metadata": data_meta,

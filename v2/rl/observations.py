@@ -6,8 +6,9 @@ from typing import Mapping
 import numpy as np
 
 
-OBSERVATION_VERSION = "obs_v0_state"
+OBSERVATION_VERSION = "obs_v1_state_controller_phase"
 TASK_PHASES = ("approach_cube", "grasp_cube", "move_to_target", "release_cube")
+CONTROLLER_EVENT_COUNT = 10
 MISSING_DISTANCE_M = 10.0
 DEFAULT_NEAR_HUMAN_THRESHOLD_M = 0.12
 
@@ -50,6 +51,8 @@ OBSERVATION_FIELDS: tuple[ObservationField, ...] = (
     ObservationField("drop_throw_recent", (1,), "Binary flag for recent drop or throw event."),
     ObservationField("has_grasped_cube", (1,), "Binary flag for current grasp estimate."),
     ObservationField("task_phase", (4,), "One-hot task phase."),
+    ObservationField("controller_event", (CONTROLLER_EVENT_COUNT,), "One-hot PickPlaceController event."),
+    ObservationField("controller_t", (1,), "PickPlaceController event progress in [0, 1]."),
 )
 
 OBSERVATION_DIM = sum(field.dim for field in OBSERVATION_FIELDS)
@@ -109,9 +112,11 @@ def build_observation(
     drop_throw_recent: bool = False,
     has_grasped_cube: bool = False,
     task_phase: str | int = "approach_cube",
+    controller_event: int | None = None,
+    controller_t: float = 0.0,
     near_human_threshold_m: float = DEFAULT_NEAR_HUMAN_THRESHOLD_M,
 ) -> dict[str, np.ndarray]:
-    """Build the v0 state observation from Isaac runtime objects.
+    """Build the state observation from Isaac runtime objects.
 
     The function is intentionally free of Isaac imports so it can be imported by
     trajectory tooling and unit tests outside SimulationApp. Runtime objects only
@@ -175,6 +180,8 @@ def build_observation(
     obs["drop_throw_recent"] = _flag(drop_throw_recent)
     obs["has_grasped_cube"] = _flag(has_grasped_cube)
     obs["task_phase"] = task_phase_onehot(task_phase)
+    obs["controller_event"] = controller_event_onehot(controller_event)
+    obs["controller_t"] = np.array([np.clip(float(controller_t), 0.0, 1.0)], dtype=np.float32)
     validate_observation(obs)
     return obs
 
@@ -189,6 +196,16 @@ def task_phase_onehot(phase: str | int) -> np.ndarray:
         onehot[TASK_PHASES.index(str(phase).strip().lower())] = 1.0
     except ValueError:
         pass
+    return onehot
+
+
+def controller_event_onehot(event: int | None) -> np.ndarray:
+    onehot = np.zeros(CONTROLLER_EVENT_COUNT, dtype=np.float32)
+    if event is None:
+        return onehot
+    event_idx = int(event)
+    if 0 <= event_idx < CONTROLLER_EVENT_COUNT:
+        onehot[event_idx] = 1.0
     return onehot
 
 

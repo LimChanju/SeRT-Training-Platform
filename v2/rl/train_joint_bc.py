@@ -89,7 +89,7 @@ def _ensure_training_deps(args: argparse.Namespace) -> None:
         import torch  # noqa: F401
 
 
-from observations import OBSERVATION_DIM, OBSERVATION_VERSION  # noqa: E402
+from observations import OBSERVATION_VERSION  # noqa: E402
 
 
 def _load_dataset(path: str) -> tuple[np.ndarray, np.ndarray, dict]:
@@ -161,8 +161,7 @@ def _train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     obs_np, target_np, data_meta = _load_dataset(args.data)
-    if obs_np.shape[1] != OBSERVATION_DIM:
-        raise ValueError(f"Expected obs dim {OBSERVATION_DIM}, got {obs_np.shape[1]}")
+    obs_dim = int(obs_np.shape[1])
     if target_np.shape[1] != TARGET_DIM:
         raise ValueError(f"Expected target dim {TARGET_DIM}, got {target_np.shape[1]}")
 
@@ -193,7 +192,7 @@ def _train(args: argparse.Namespace) -> None:
 
     device = _select_device(args.device)
     hidden_dims = _parse_hidden_dims(args.hidden_dims)
-    model = MLPRegressor(OBSERVATION_DIM, TARGET_DIM, hidden_dims=hidden_dims).to(device)
+    model = MLPRegressor(obs_dim, TARGET_DIM, hidden_dims=hidden_dims).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_fn = nn.MSELoss()
     history = []
@@ -201,7 +200,7 @@ def _train(args: argparse.Namespace) -> None:
     print(
         f"[TrainJointBC] data={args.data} kept={data_meta['kept_transitions']} "
         f"dropped_nonfinite={data_meta['dropped_nonfinite']} episodes={data_meta['episodes']} "
-        f"device={device} torch={torch.__version__}"
+        f"obs_dim={obs_dim} device={device} torch={torch.__version__}"
     )
     if device.type == "cuda":
         print(f"[TrainJointBC] cuda={torch.cuda.get_device_name(0)}")
@@ -245,7 +244,7 @@ def _train(args: argparse.Namespace) -> None:
         "target_std": torch.from_numpy(target_std.squeeze(0)),
         "target_min": torch.from_numpy(target_min.squeeze(0)),
         "target_max": torch.from_numpy(target_max.squeeze(0)),
-        "obs_dim": OBSERVATION_DIM,
+        "obs_dim": obs_dim,
         "action_dim": TARGET_DIM,
         "hidden_dims": hidden_dims,
         "observation_version": OBSERVATION_VERSION,
