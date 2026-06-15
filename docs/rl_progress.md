@@ -239,6 +239,20 @@ Failure-mode shift:
 
 Interpretation: PPO preserved overall success rate and reduced release-outside-target failures, but introduced more grasp-establishment failures. Seed-level comparison showed 4 PPO recoveries and 4 PPO regressions.
 
+### Grasp Failure Debugging
+
+Added `v2/debug_rollout_seeds.py` for step-level rollout diagnostics on selected `episode:seed` pairs. This matters because `evaluate_rollout_policy.py` changes the active cube by episode index, so seed-only reproduction can inspect the wrong cube.
+
+Current PPO grasp-regression episodes:
+
+```text
+10:21, 25:36, 34:45, 41:52
+```
+
+The debug comparison shows that BC succeeds on these same episode/seed pairs with `min_ee_cube_event_1_3` around `0.0575 m`, while PPO fails with `min_ee_cube_event_1_3` around `0.069-0.088 m`. PPO then advances through the close/pick phase without establishing a grasp.
+
+Working diagnosis: PPO grasp regressions are caused by insufficient close-phase approach before event progression. The next fix should target event 1-3 grasp stability, for example by tightening/holding the phase gate or adding a grasp-phase penalty when EE-cube distance stays too large.
+
 ## Current Status
 
 Working:
@@ -252,6 +266,7 @@ Working:
 - initial RL environment wrapper
 - PPO fine-tuning script
 - BC vs PPO rollout comparison report
+- seed-level grasp failure debugger
 
 Still experimental:
 

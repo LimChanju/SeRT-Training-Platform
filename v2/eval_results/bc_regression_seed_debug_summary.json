@@ -1,0 +1,114 @@
+{
+  "checkpoint": "/home/railabchan/isaac_vr_project/v2/policies/bc_pick_place_v1_100eps.pt",
+  "config": {
+    "episode_specs": [
+      {
+        "episode": 10,
+        "seed": 21,
+        "active_cube_index": 1
+      },
+      {
+        "episode": 25,
+        "seed": 36,
+        "active_cube_index": 1
+      },
+      {
+        "episode": 34,
+        "seed": 45,
+        "active_cube_index": 1
+      },
+      {
+        "episode": 41,
+        "seed": 52,
+        "active_cube_index": 2
+      }
+    ],
+    "max_steps": 1200,
+    "success_dist": 0.06,
+    "phase_gate_close_dist": 0.066,
+    "phase_gate_max_hold": 160,
+    "gripper_mode": "event"
+  },
+  "summaries": [
+    {
+      "seed": 21,
+      "episode": 10,
+      "active_cube_index": 1,
+      "active_cube": "cube_1",
+      "success": true,
+      "truncated": false,
+      "steps": 786,
+      "final_event": 6,
+      "final_cube_target_dist": 0.059531379491090775,
+      "final_ee_cube_dist": 0.05747587978839874,
+      "min_cube_target_dist": 0.059531379491090775,
+      "min_ee_cube_dist": 0.05747469142079353,
+      "min_ee_cube_event_1_3": 0.0574781708419323,
+      "min_ee_cube_pre_close": 0.0574781708419323,
+      "first_close_event_step": 486,
+      "ee_cube_at_first_close_event": 0.0682043582201004,
+      "grasped_any": true,
+      "first_grasp_step": 487
+    },
+    {
+      "seed": 36,
+      "episode": 25,
+      "active_cube_index": 1,
+      "active_cube": "cube_1",
+      "success": true,
+      "truncated": false,
+      "steps": 784,
+      "final_event": 6,
+      "final_cube_target_dist": 0.059870004653930664,
+      "final_ee_cube_dist": 0.057431794703006744,
+      "min_cube_target_dist": 0.059870004653930664,
+      "min_ee_cube_dist": 0.057430919259786606,
+      "min_ee_cube_event_1_3": 0.05743098258972168,
+      "min_ee_cube_pre_close": 0.05743098258972168,
+      "first_close_event_step": 486,
+      "ee_cube_at_first_close_event": 0.06840067356824875,
+      "grasped_any": true,
+      "first_grasp_step": 487
+    },
+    {
+      "seed": 45,
+      "episode": 34,
+      "active_cube_index": 1,
+      "active_cube": "cube_1",
+      "success": true,
+      "truncated": false,
+      "steps": 787,
+      "final_event": 6,
+      "final_cube_target_dist": 0.059706397354602814,
+      "final_ee_cube_dist": 0.05743023380637169,
+      "min_cube_target_dist": 0.059706397354602814,
+      "min_ee_cube_dist": 0.05742700770497322,
+      "min_ee_cube_event_1_3": 0.05742700770497322,
+      "min_ee_cube_pre_close": 0.05742700770497322,
+      "first_close_event_step": 486,
+      "ee_cube_at_first_close_event": 0.06695389002561569,
+      "grasped_any": true,
+      "first_grasp_step": 487
+    },
+    {
+      "seed": 52,
+      "episode": 41,
+      "active_cube_index": 2,
+      "active_cube": "cube_2",
+      "success": true,
+      "truncated": false,
+      "steps": 955,
+      "final_event": 8,
+      "final_cube_target_dist": 0.058750350028276443,
+      "final_ee_cube_dist": 0.12454280257225037,
+      "min_cube_target_dist": 0.058750350028276443,
+      "min_ee_cube_dist": 0.05720255896449089,
+      "min_ee_cube_event_1_3": 0.05747101083397865,
+      "min_ee_cube_pre_close": 0.05747101083397865,
+      "first_close_event_step": 486,
+      "ee_cube_at_first_close_event": 0.07004434615373611,
+      "grasped_any": true,
+      "first_grasp_step": 487
+    }
+  ]
+}
