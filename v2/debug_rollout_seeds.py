@@ -50,8 +50,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--action-scale", type=float, default=1.0)
     parser.add_argument("--gripper-mode", choices=("event", "rule", "policy"), default="event")
     parser.add_argument("--success-dist", type=float, default=0.06)
-    parser.add_argument("--phase-gate-close-dist", type=float, default=0.066)
-    parser.add_argument("--phase-gate-max-hold", type=int, default=160)
+    parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
+    parser.add_argument("--phase-gate-max-hold", type=int, default=320)
     parser.add_argument(
         "--output-csv",
         default=os.path.join(SCRIPT_DIR, "eval_results", "debug_rollout_seeds_steps.csv"),

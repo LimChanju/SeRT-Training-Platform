@@ -72,13 +72,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--phase-gate-close-dist",
         type=float,
-        default=0.066,
+        default=0.075,
         help="Hold the lowering phase until EE/cube distance is close enough for event-mode grasping.",
     )
     parser.add_argument(
         "--phase-gate-max-hold",
         type=int,
-        default=160,
+        default=320,
         help="Maximum extra control steps to hold a phase gate before advancing anyway.",
     )
     parser.add_argument("--log-every", type=int, default=60)

@@ -6,7 +6,8 @@ import numpy as np
 
 
 LEGACY_REWARD_VERSION = "reward_v0_hri_errp"
-REWARD_VERSION = "reward_v1_placement_hri_errp"
+PLACEMENT_REWARD_VERSION = "reward_v1_placement_hri_errp"
+REWARD_VERSION = "reward_v2_grasp_stability_hri_errp"
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,9 @@ class RewardWeights:
     ee_to_cube_progress: float = 2.0
     cube_to_target_progress: float = 1.5
     carrying_cube_to_target_progress: float = 7.0
+    grasp_phase_distance_penalty: float = 0.35
+    missed_grasp_transition_penalty: float = 2.0
+    grasp_phase_target_dist: float = 0.058
     grasp_bonus: float = 0.03
     target_zone_bonus: float = 0.15
     success_bonus: float = 15.0
@@ -44,7 +48,7 @@ def compute_reward(
     success_dist: float = 0.06,
     weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
 ) -> RewardResult:
-    """Compute reward v1 from consecutive observations.
+    """Compute reward v2 from consecutive observations.
 
     Formula:
 
@@ -52,6 +56,8 @@ def compute_reward(
           w1 * (d_ee_cube[t-1] - d_ee_cube[t])
         + w2 * (d_cube_goal[t-1] - d_cube_goal[t])
         + w3 * grasp_or_post_grasp * (d_cube_goal[t-1] - d_cube_goal[t])
+        - wg * grasp_phase * no_grasp * max(0, d_ee_cube[t] - d_grasp) / d_grasp
+        - wm * entered_post_grasp_without_grasp
         + bg * grasp
         + bz * target_zone
         + bs * success
@@ -79,9 +85,20 @@ def compute_reward(
     has_grasped = _scalar_field(obs, "has_grasped_cube")
     event = _controller_event(obs)
     post_grasp_phase = float(max(event, prev_event) >= 4)
+    grasp_phase = float(event in (1, 2, 3) and has_grasped <= 0.5)
     placement_active = max(has_grasped, prev_has_grasped, post_grasp_phase)
+    normalized_grasp_error = max(0.0, ee_cube_dist - weights.grasp_phase_target_dist) / max(
+        weights.grasp_phase_target_dist,
+        1e-6,
+    )
     normalized_target_error = max(0.0, cube_target_dist - float(success_dist)) / max(float(success_dist), 1e-6)
     target_zone = placement_active * float(cube_target_dist <= float(success_dist))
+    entered_post_grasp_without_grasp = float(
+        prev_obs is not None
+        and prev_event <= 3
+        and event >= 4
+        and max(has_grasped, prev_has_grasped) <= 0.5
+    )
     release_after_pick = (
         prev_obs is not None
         and prev_has_grasped > 0.5
@@ -99,6 +116,12 @@ def compute_reward(
         "cube_to_target_progress": weights.cube_to_target_progress * cube_target_progress,
         "carrying_cube_to_target_progress": (
             weights.carrying_cube_to_target_progress * placement_active * cube_target_progress
+        ),
+        "grasp_phase_distance_penalty": (
+            -weights.grasp_phase_distance_penalty * grasp_phase * normalized_grasp_error
+        ),
+        "missed_grasp_transition_penalty": (
+            -weights.missed_grasp_transition_penalty * entered_post_grasp_without_grasp
         ),
         "grasp_bonus": weights.grasp_bonus * has_grasped,
         "target_zone_bonus": weights.target_zone_bonus * target_zone,
@@ -124,6 +147,8 @@ def reward_component_names() -> tuple[str, ...]:
         "ee_to_cube_progress",
         "cube_to_target_progress",
         "carrying_cube_to_target_progress",
+        "grasp_phase_distance_penalty",
+        "missed_grasp_transition_penalty",
         "grasp_bonus",
         "target_zone_bonus",
         "success_bonus",
@@ -141,6 +166,9 @@ def reward_weights_dict(weights: RewardWeights = DEFAULT_REWARD_WEIGHTS) -> dict
         "ee_to_cube_progress": weights.ee_to_cube_progress,
         "cube_to_target_progress": weights.cube_to_target_progress,
         "carrying_cube_to_target_progress": weights.carrying_cube_to_target_progress,
+        "grasp_phase_distance_penalty": weights.grasp_phase_distance_penalty,
+        "missed_grasp_transition_penalty": weights.missed_grasp_transition_penalty,
+        "grasp_phase_target_dist": weights.grasp_phase_target_dist,
         "grasp_bonus": weights.grasp_bonus,
         "target_zone_bonus": weights.target_zone_bonus,
         "success_bonus": weights.success_bonus,

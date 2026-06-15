@@ -1,6 +1,6 @@
 # RL Platform Progress
 
-Updated: 2026-06-15
+Updated: 2026-06-16
 
 ## Current Goal
 
@@ -19,7 +19,7 @@ Build a learning platform for HRI-aware robot pick-and-place in Isaac Sim. The c
 - Expert: Isaac/Franka PickPlaceController backed by RMPFlow
 - Policy action: 5D task-space command
 - Observation: 84D state vector with controller phase information
-- Reward: v1 placement-focused HRI/ErrP-compatible shaped reward
+- Reward: v2 grasp-stability + placement-focused HRI/ErrP-compatible shaped reward
 
 ## Implemented Components
 
@@ -95,7 +95,7 @@ cuda: NVIDIA GeForce RTX 4090
 checkpoint: v2/policies/bc_pick_place_v1_100eps.pt
 ```
 
-### Reward v1
+### Reward v1/v2
 
 Failure analysis showed that failed BC rollout episodes usually grasped the cube but released it outside the success radius. The default reward was therefore moved from `reward_v0_hri_errp` to `reward_v1_placement_hri_errp`.
 
@@ -109,6 +109,12 @@ Main changes:
 - kept human proximity, collision, and ErrP penalties in the reward.
 
 `IsaacPickPlaceEnv` also exposes an optional release gate. It is disabled by default to preserve baseline comparability, but RL runs can set `release_gate_dist` to delay opening the gripper until the cube is inside the target radius. RL runs can also set `require_release_for_success=True` so an episode only succeeds after the cube has been released inside the target radius.
+
+The default reward was then moved to `reward_v2_grasp_stability_hri_errp` after PPO-v1 failure analysis showed four failures where the policy entered the grasp phase but never established a grasp. Reward v2 adds:
+
+- a grasp-phase distance penalty while the gripper is not yet holding the cube,
+- a one-shot penalty when the controller leaves the grasp phase without ever grasping,
+- the existing placement/release shaping from reward v1.
 
 ### Rollout Fixes
 
@@ -198,12 +204,12 @@ Default RL behavior:
 - rejects actor updates that drift too far from the BC actor,
 - keeps the BC baseline success condition unless `--require-release-for-success` is passed.
 
-Starter command for the first PPO fine-tuning pass:
+Starter command for the current PPO fine-tuning pass:
 
 ```bash
 ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
   --bc-checkpoint v2/policies/bc_pick_place_v1_100eps.pt \
-  --output v2/policies/ppo_pick_place_v1.pt \
+  --output v2/policies/ppo_pick_place_v2.pt \
   --total-steps 20000 \
   --rollout-steps 1024 \
   --log-std-init -8.0 \
@@ -215,9 +221,56 @@ ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
 
 Controller-target actions are very sensitive to per-step noise and unconstrained PPO updates. A 1-episode parity check with `--log-std-init -8.0` reproduced BC success, while larger noise or actor drift broke the grasp/place sequence.
 
-After the stable pass is confirmed, run a stricter placement/release experiment by adding `--release-gate-dist 0.06 --require-release-for-success`.
+After the stable pass is confirmed, run a stricter placement/release evaluation with release gating:
+
+```bash
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/evaluate_rollout_policy.py" \
+  --checkpoint v2/policies/ppo_pick_place_v2.pt \
+  --episodes 50 \
+  --max-steps 1200 \
+  --seed 11 \
+  --device cuda \
+  --release-gate-dist 0.06 \
+  --release-gate-max-hold 360 \
+  --output-json v2/eval_results/ppo_pick_place_v2_releasegate_rollout_eval.json \
+  --output-csv v2/eval_results/ppo_pick_place_v2_releasegate_rollout_eval.csv \
+  --log-every 5
+```
 
 Smoke verification passed with an 8-step CPU run, and the resulting PPO actor checkpoint loaded successfully in `v2/evaluate_rollout_policy.py`.
+
+### PPO v2 Results
+
+The best confirmed PPO result so far is `ppo_pick_place_v2.pt` evaluated with release gating:
+
+```text
+PPO-v1 baseline:          45/50 success = 0.900
+PPO-v2 + release gate:    48/50 success = 0.960
+Success delta:            +0.060
+Mean step delta:          -80.1 steps
+Mean final distance delta:-0.0366 m
+```
+
+Failure analysis:
+
+```text
+PPO-v1 failures:
+  grasp_never_established = 4
+  released_outside_success_radius = 1
+
+PPO-v2 + release gate failures:
+  grasp_never_established = 2
+  released_outside_success_radius = 0
+```
+
+The release gate is important because PPO-v2 without it improved grasp behavior but introduced more release-outside-target failures. The release gate removes those release failures by holding event 6 until the cube is close enough to the target or the hold limit is reached.
+
+An experimental early-close grasp gate was also tested. It fixed one remaining no-grasp seed locally, but the 50-episode evaluation dropped to 46/50 by creating release placement regressions. It remains disabled by default.
+
+Current next target:
+
+- improve the two remaining `grasp_never_established` seeds without destabilizing release placement,
+- prefer reward/policy improvements over hard-coded early close unless the full 50-episode evaluation improves.
 
 ### BC vs PPO Rollout Comparison
 

@@ -56,8 +56,29 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(fixed_orientation=True)
     parser.add_argument("--gripper-mode", choices=("event", "rule", "policy"), default="event")
     parser.add_argument("--success-dist", type=float, default=0.06)
-    parser.add_argument("--phase-gate-close-dist", type=float, default=0.066)
-    parser.add_argument("--phase-gate-max-hold", type=int, default=160)
+    parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
+    parser.add_argument("--phase-gate-max-hold", type=int, default=320)
+    parser.add_argument(
+        "--release-gate-dist",
+        type=float,
+        default=-1.0,
+        help="Hold release until this cube-target distance. Negative disables release gating.",
+    )
+    parser.add_argument("--release-gate-max-hold", type=int, default=240)
+    success_group = parser.add_mutually_exclusive_group()
+    success_group.add_argument(
+        "--require-release-for-success",
+        dest="require_release_for_success",
+        action="store_true",
+        help="Count success only after the cube has been released inside the target radius.",
+    )
+    success_group.add_argument(
+        "--allow-success-before-release",
+        dest="require_release_for_success",
+        action="store_false",
+        help="Count success when the cube reaches the target radius, even before release.",
+    )
+    parser.set_defaults(require_release_for_success=False)
     parser.add_argument("--log-every", type=int, default=1, help="Episode logging interval. 0 disables logs.")
     parser.add_argument("--output-json", default=default_json, help="Path to save summary and per-episode JSON.")
     parser.add_argument("--output-csv", default=default_csv, help="Path to save per-episode CSV.")
@@ -217,6 +238,7 @@ def _run() -> None:
     np.random.seed(args.seed)
     started_at = time.time()
     runner = PolicyRunner(args.checkpoint, args.device)
+    release_gate_dist = None if args.release_gate_dist < 0.0 else float(args.release_gate_dist)
     env = IsaacPickPlaceEnv(
         PickPlaceEnvConfig(
             max_episode_steps=args.max_steps,
@@ -227,6 +249,9 @@ def _run() -> None:
             gripper_mode=args.gripper_mode,
             phase_gate_close_dist=args.phase_gate_close_dist,
             phase_gate_max_hold=args.phase_gate_max_hold,
+            release_gate_dist=release_gate_dist,
+            release_gate_max_hold=args.release_gate_max_hold,
+            require_release_for_success=args.require_release_for_success,
             observation_mode="flat",
             seed=args.seed,
             render=args.render,
@@ -318,6 +343,9 @@ def _run() -> None:
             "success_dist": args.success_dist,
             "phase_gate_close_dist": args.phase_gate_close_dist,
             "phase_gate_max_hold": args.phase_gate_max_hold,
+            "release_gate_dist": release_gate_dist,
+            "release_gate_max_hold": args.release_gate_max_hold,
+            "require_release_for_success": args.require_release_for_success,
         },
         "policy": runner.metadata,
         "summary": summary,

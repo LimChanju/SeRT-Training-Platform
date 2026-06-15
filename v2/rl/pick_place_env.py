@@ -34,8 +34,9 @@ class PickPlaceEnvConfig:
     gripper_mode: GripperMode = "event"
     close_dist: float = 0.08
     release_dist: float = 0.07
-    phase_gate_close_dist: float = 0.066
-    phase_gate_max_hold: int = 160
+    phase_gate_close_dist: float = 0.075
+    phase_gate_max_hold: int = 320
+    early_close_on_grasp_gate: bool = False
     release_gate_dist: float | None = None
     release_gate_max_hold: int = 240
     require_release_for_success: bool = False
@@ -264,6 +265,19 @@ class IsaacPickPlaceEnv:
 
     def _gripper_command(self, action: np.ndarray, obs: dict[str, np.ndarray]) -> str | None:
         if self.config.gripper_mode == "event":
+            if (
+                self.config.early_close_on_grasp_gate
+                and self.phase_event in (1, 2)
+                and not self.gripper_closed
+                and _rule_gripper_should_close(
+                    obs,
+                    self.gripper_closed,
+                    close_dist=self.config.phase_gate_close_dist,
+                    release_dist=self.config.release_dist,
+                )
+            ):
+                self.gripper_closed = True
+                return "close"
             self.gripper_closed = event_gripper_command(self.phase_event, self.gripper_closed)
             if self.phase_event == 3:
                 return "close"
@@ -301,9 +315,10 @@ class IsaacPickPlaceEnv:
         cube_target_dist = float(np.linalg.norm(obs["cube_to_place_target"]))
         hold_lowering_for_grasp = (
             self.config.gripper_mode == "event"
-            and self.phase_event == 1
+            and self.phase_event in (1, 2)
             and next_event != self.phase_event
             and ee_cube_dist > self.config.phase_gate_close_dist
+            and float(obs["has_grasped_cube"][0]) <= 0.5
             and self.phase_hold_steps < self.config.phase_gate_max_hold
         )
         hold_release_for_target = (

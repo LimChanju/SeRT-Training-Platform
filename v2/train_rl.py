@@ -35,7 +35,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a PPO policy in Isaac pick-and-place.")
     parser.add_argument(
         "--output",
-        default=os.path.join(SCRIPT_DIR, "policies", "ppo_pick_place_v1.pt"),
+        default=os.path.join(SCRIPT_DIR, "policies", "ppo_pick_place_v2.pt"),
         help="Output actor checkpoint. It is compatible with evaluate_rollout_policy.py.",
     )
     parser.add_argument(
@@ -106,8 +106,8 @@ def _parse_args() -> argparse.Namespace:
         help="Use the BC baseline success condition: cube near target is enough even before release.",
     )
     parser.set_defaults(require_release_for_success=False)
-    parser.add_argument("--phase-gate-close-dist", type=float, default=0.066)
-    parser.add_argument("--phase-gate-max-hold", type=int, default=160)
+    parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
+    parser.add_argument("--phase-gate-max-hold", type=int, default=320)
     parser.add_argument("--save-every-updates", type=int, default=5)
     return parser.parse_args()
 
