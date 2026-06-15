@@ -192,8 +192,9 @@ Default RL behavior:
 - initializes the actor from `v2/policies/bc_pick_place_v1_100eps.pt`,
 - reuses BC observation normalization,
 - uses reward v1,
-- uses small Gaussian exploration noise for BC warm-start stability,
+- uses near-deterministic Gaussian exploration noise for BC warm-start stability,
 - scales rewards before PPO value/advantage updates,
+- regularizes the actor toward the loaded BC actor,
 - keeps the BC baseline success condition unless `--require-release-for-success` is passed.
 
 Starter command for the first PPO fine-tuning pass:
@@ -204,12 +205,14 @@ ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
   --output v2/policies/ppo_pick_place_v1.pt \
   --total-steps 20000 \
   --rollout-steps 1024 \
-  --log-std-init -3.5 \
+  --log-std-init -8.0 \
   --reward-scale 0.05 \
   --device cuda
 ```
 
-After the stable pass is confirmed, run a stricter placement/release experiment by adding `--require-release-for-success`.
+Controller-target actions are very sensitive to per-step noise. A 1-episode parity check with `--log-std-init -8.0` reproduced BC success, while larger noise broke the grasp/place sequence.
+
+After the stable pass is confirmed, run a stricter placement/release experiment by adding `--release-gate-dist 0.06 --require-release-for-success`.
 
 Smoke verification passed with an 8-step CPU run, and the resulting PPO actor checkpoint loaded successfully in `v2/evaluate_rollout_policy.py`.
 
