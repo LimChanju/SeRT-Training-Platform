@@ -1,6 +1,6 @@
 # RL Platform Progress
 
-Updated: 2026-06-13
+Updated: 2026-06-15
 
 ## Current Goal
 
@@ -159,7 +159,7 @@ The wrapper owns:
 - Panda robot setup
 - RMPFlow control
 - policy observation construction
-- v0 reward computation
+- v1 reward computation
 - event-mode gripper control
 - phase gating
 - pseudo-ErrP feedback placeholder
@@ -181,6 +181,33 @@ for _ in range(1200):
 
 By default, observations are returned as flattened policy vectors. Set `observation_mode="dict"` in `PickPlaceEnvConfig` to receive the structured observation dictionary.
 
+## PPO Fine-Tuning
+
+Added `v2/train_rl.py`, a minimal PPO trainer that runs directly on `IsaacPickPlaceEnv` without adding Stable-Baselines or Gymnasium as hard dependencies.
+
+The PPO actor uses the same `MLPPolicy` class as BC, so the saved PPO actor checkpoint is compatible with `v2/evaluate_rollout_policy.py`.
+
+Default RL behavior:
+
+- initializes the actor from `v2/policies/bc_pick_place_v1_100eps.pt`,
+- reuses BC observation normalization,
+- uses reward v1,
+- enables a release gate at the target radius,
+- requires the cube to be released inside the target radius before the episode counts as success.
+
+Starter command:
+
+```bash
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
+  --bc-checkpoint v2/policies/bc_pick_place_v1_100eps.pt \
+  --output v2/policies/ppo_pick_place_v1.pt \
+  --total-steps 20000 \
+  --rollout-steps 1024 \
+  --device cuda
+```
+
+Smoke verification passed with an 8-step CPU run, and the resulting PPO actor checkpoint loaded successfully in `v2/evaluate_rollout_policy.py`.
+
 ## Current Status
 
 Working:
@@ -192,20 +219,20 @@ Working:
 - BC rollout in Isaac Sim
 - rollout fixed-orientation/gripper event fixes
 - initial RL environment wrapper
+- PPO fine-tuning script
 
 Still experimental:
 
 - pseudo-ErrP mapping weights
 - final release-gate setting for RL training
 - EEG replay integration
-- RL algorithm integration
 - human/avatar asset linkage
 - gripper camera occlusion metric
 
 ## Recommended Next Steps
 
-1. Run a larger BC rollout evaluation, for example 30 or 50 episodes, and save success rate, mean steps, final cube-target distance, and grasp rate.
-2. Add an evaluation script that writes rollout metrics to JSON or CSV.
-3. Connect `IsaacPickPlaceEnv` to an RL algorithm, starting with a simple off-policy method or PPO baseline.
+1. Run a short PPO smoke training run and evaluate the resulting actor checkpoint with `v2/evaluate_rollout_policy.py`.
+2. Compare BC vs PPO on 50 episodes using success rate, mean steps, final cube-target distance, and failure analysis.
+3. Tune reward v1 weights and release-gate settings if PPO learns to hover, hold too long, or release late.
 4. Add pseudo-ErrP to the wrapper reward path using collision, near-human distance, and occlusion flags.
 5. Replace pseudo-ErrP with EEG replay feedback once the replay dataset and time-event mapping are ready.
