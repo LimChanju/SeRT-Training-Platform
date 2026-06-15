@@ -219,6 +219,26 @@ After the stable pass is confirmed, run a stricter placement/release experiment 
 
 Smoke verification passed with an 8-step CPU run, and the resulting PPO actor checkpoint loaded successfully in `v2/evaluate_rollout_policy.py`.
 
+### BC vs PPO Rollout Comparison
+
+Added `v2/compare_rollout_analyses.py` to compare rollout JSON files and failure-analysis JSON files.
+
+Current 50-episode comparison:
+
+```text
+BC success_rate:  0.900
+PPO success_rate: 0.900
+PPO mean_steps delta: -37.3
+PPO mean_final_cube_target_dist delta: +0.0511 m
+```
+
+Failure-mode shift:
+
+- BC failures: `released_outside_success_radius=5`
+- PPO failures: `released_outside_success_radius=1`, `grasp_never_established=4`
+
+Interpretation: PPO preserved overall success rate and reduced release-outside-target failures, but introduced more grasp-establishment failures. Seed-level comparison showed 4 PPO recoveries and 4 PPO regressions.
+
 ## Current Status
 
 Working:
@@ -231,19 +251,21 @@ Working:
 - rollout fixed-orientation/gripper event fixes
 - initial RL environment wrapper
 - PPO fine-tuning script
+- BC vs PPO rollout comparison report
 
 Still experimental:
 
 - pseudo-ErrP mapping weights
 - final release-gate setting for RL training
+- grasp stability during PPO fine-tuning
 - EEG replay integration
 - human/avatar asset linkage
 - gripper camera occlusion metric
 
 ## Recommended Next Steps
 
-1. Run a short PPO smoke training run and evaluate the resulting actor checkpoint with `v2/evaluate_rollout_policy.py`.
-2. Compare BC vs PPO on 50 episodes using success rate, mean steps, final cube-target distance, and failure analysis.
-3. Tune reward v1 weights and release-gate settings if PPO learns to hover, hold too long, or release late.
+1. Add grasp-stability pressure for event-mode PPO, especially around event 1-3 close timing.
+2. Re-run PPO with the grasp-stability change and compare against the current BC/PPO report.
+3. Tune reward v1 weights and release-gate settings only after grasp stability no longer regresses.
 4. Add pseudo-ErrP to the wrapper reward path using collision, near-human distance, and occlusion flags.
 5. Replace pseudo-ErrP with EEG replay feedback once the replay dataset and time-event mapping are ready.
