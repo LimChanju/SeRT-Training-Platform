@@ -19,7 +19,7 @@ Build a learning platform for HRI-aware robot pick-and-place in Isaac Sim. The c
 - Expert: Isaac/Franka PickPlaceController backed by RMPFlow
 - Policy action: 5D task-space command
 - Observation: 84D state vector with controller phase information
-- Reward: v0 HRI/ErrP-compatible shaped reward
+- Reward: v1 placement-focused HRI/ErrP-compatible shaped reward
 
 ## Implemented Components
 
@@ -29,7 +29,7 @@ The trajectory format now records transition data suitable for offline learning.
 
 - Observation version: `obs_v1_state_controller_phase`
 - Action version: `action_v1_controller_target_delta`
-- Reward version: `reward_v0_hri_errp`
+- Reward version in the first saved expert dataset: `reward_v0_hri_errp`
 - Schema version: `trajectory_v0_transitions`
 
 Each transition stores:
@@ -94,6 +94,21 @@ torch: 2.5.1+cu118
 cuda: NVIDIA GeForce RTX 4090
 checkpoint: v2/policies/bc_pick_place_v1_100eps.pt
 ```
+
+### Reward v1
+
+Failure analysis showed that failed BC rollout episodes usually grasped the cube but released it outside the success radius. The default reward was therefore moved from `reward_v0_hri_errp` to `reward_v1_placement_hri_errp`.
+
+Main changes:
+
+- reduced the per-step grasp bonus, because holding the cube for a long time was over-rewarded,
+- added extra cube-to-target progress while carrying or after the grasp phase,
+- added a normalized placement error penalty after the grasp phase,
+- added a target-zone bonus,
+- added a one-shot penalty for releasing outside the target radius,
+- kept human proximity, collision, and ErrP penalties in the reward.
+
+`IsaacPickPlaceEnv` also exposes an optional release gate. It is disabled by default to preserve baseline comparability, but RL runs can set `release_gate_dist` to delay opening the gripper until the cube is inside the target radius. RL runs can also set `require_release_for_success=True` so an episode only succeeds after the cube has been released inside the target radius.
 
 ### Rollout Fixes
 
@@ -181,6 +196,7 @@ Working:
 Still experimental:
 
 - pseudo-ErrP mapping weights
+- final release-gate setting for RL training
 - EEG replay integration
 - RL algorithm integration
 - human/avatar asset linkage

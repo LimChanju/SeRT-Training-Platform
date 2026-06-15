@@ -5,15 +5,20 @@ from dataclasses import dataclass
 import numpy as np
 
 
-REWARD_VERSION = "reward_v0_hri_errp"
+LEGACY_REWARD_VERSION = "reward_v0_hri_errp"
+REWARD_VERSION = "reward_v1_placement_hri_errp"
 
 
 @dataclass(frozen=True)
 class RewardWeights:
     ee_to_cube_progress: float = 2.0
-    cube_to_target_progress: float = 3.0
-    grasp_bonus: float = 0.2
-    success_bonus: float = 10.0
+    cube_to_target_progress: float = 1.5
+    carrying_cube_to_target_progress: float = 7.0
+    grasp_bonus: float = 0.03
+    target_zone_bonus: float = 0.15
+    success_bonus: float = 15.0
+    placement_error_penalty: float = 0.08
+    release_outside_target_penalty: float = 4.0
     action_penalty: float = 0.01
     near_human_penalty: float = 0.5
     human_collision_penalty: float = 5.0
@@ -36,17 +41,22 @@ def compute_reward(
     *,
     errp_feedback: float = 0.0,
     success: bool = False,
+    success_dist: float = 0.06,
     weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
 ) -> RewardResult:
-    """Compute reward v0 from consecutive observations.
+    """Compute reward v1 from consecutive observations.
 
     Formula:
 
         r_t =
           w1 * (d_ee_cube[t-1] - d_ee_cube[t])
         + w2 * (d_cube_goal[t-1] - d_cube_goal[t])
+        + w3 * grasp_or_post_grasp * (d_cube_goal[t-1] - d_cube_goal[t])
         + bg * grasp
+        + bz * target_zone
         + bs * success
+        - lp * grasp_or_post_grasp * max(0, d_cube_goal[t] - d_success) / d_success
+        - lr * release_outside_target
         - la * ||a_t||_2
         - ln * near_human
         - lc * human_robot_collision
@@ -58,11 +68,27 @@ def compute_reward(
     if prev_obs is None:
         ee_cube_progress = 0.0
         cube_target_progress = 0.0
+        prev_has_grasped = 0.0
+        prev_event = -1
     else:
         ee_cube_progress = _norm_field(prev_obs, "ee_to_cube") - ee_cube_dist
         cube_target_progress = _norm_field(prev_obs, "cube_to_place_target") - cube_target_dist
+        prev_has_grasped = _scalar_field(prev_obs, "has_grasped_cube")
+        prev_event = _controller_event(prev_obs)
 
     has_grasped = _scalar_field(obs, "has_grasped_cube")
+    event = _controller_event(obs)
+    post_grasp_phase = float(max(event, prev_event) >= 4)
+    placement_active = max(has_grasped, prev_has_grasped, post_grasp_phase)
+    normalized_target_error = max(0.0, cube_target_dist - float(success_dist)) / max(float(success_dist), 1e-6)
+    target_zone = placement_active * float(cube_target_dist <= float(success_dist))
+    release_after_pick = (
+        prev_obs is not None
+        and prev_has_grasped > 0.5
+        and has_grasped <= 0.5
+        and max(event, prev_event) >= 7
+    )
+    release_outside_target = float(release_after_pick and cube_target_dist > float(success_dist))
     near_human = _scalar_field(obs, "near_human")
     human_collision = _scalar_field(obs, "human_robot_collision")
     action_norm = float(np.linalg.norm(np.asarray(action, dtype=float).reshape(-1)))
@@ -71,8 +97,14 @@ def compute_reward(
     components = {
         "ee_to_cube_progress": weights.ee_to_cube_progress * ee_cube_progress,
         "cube_to_target_progress": weights.cube_to_target_progress * cube_target_progress,
+        "carrying_cube_to_target_progress": (
+            weights.carrying_cube_to_target_progress * placement_active * cube_target_progress
+        ),
         "grasp_bonus": weights.grasp_bonus * has_grasped,
+        "target_zone_bonus": weights.target_zone_bonus * target_zone,
         "success_bonus": weights.success_bonus * (1.0 if success else 0.0),
+        "placement_error_penalty": -weights.placement_error_penalty * placement_active * normalized_target_error,
+        "release_outside_target_penalty": -weights.release_outside_target_penalty * release_outside_target,
         "action_penalty": -weights.action_penalty * action_norm,
         "near_human_penalty": -weights.near_human_penalty * near_human,
         "human_collision_penalty": -weights.human_collision_penalty * human_collision,
@@ -91,8 +123,12 @@ def reward_component_names() -> tuple[str, ...]:
     return (
         "ee_to_cube_progress",
         "cube_to_target_progress",
+        "carrying_cube_to_target_progress",
         "grasp_bonus",
+        "target_zone_bonus",
         "success_bonus",
+        "placement_error_penalty",
+        "release_outside_target_penalty",
         "action_penalty",
         "near_human_penalty",
         "human_collision_penalty",
@@ -104,8 +140,12 @@ def reward_weights_dict(weights: RewardWeights = DEFAULT_REWARD_WEIGHTS) -> dict
     return {
         "ee_to_cube_progress": weights.ee_to_cube_progress,
         "cube_to_target_progress": weights.cube_to_target_progress,
+        "carrying_cube_to_target_progress": weights.carrying_cube_to_target_progress,
         "grasp_bonus": weights.grasp_bonus,
+        "target_zone_bonus": weights.target_zone_bonus,
         "success_bonus": weights.success_bonus,
+        "placement_error_penalty": weights.placement_error_penalty,
+        "release_outside_target_penalty": weights.release_outside_target_penalty,
         "action_penalty": weights.action_penalty,
         "near_human_penalty": weights.near_human_penalty,
         "human_collision_penalty": weights.human_collision_penalty,
@@ -119,3 +159,13 @@ def _norm_field(obs: dict[str, np.ndarray], name: str) -> float:
 
 def _scalar_field(obs: dict[str, np.ndarray], name: str) -> float:
     return float(np.asarray(obs[name], dtype=float).reshape(-1)[0])
+
+
+def _controller_event(obs: dict[str, np.ndarray]) -> int:
+    value = obs.get("controller_event")
+    if value is None:
+        return -1
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    if arr.size == 0 or float(np.max(arr)) <= 0.0:
+        return -1
+    return int(np.argmax(arr))

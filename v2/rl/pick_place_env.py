@@ -36,6 +36,9 @@ class PickPlaceEnvConfig:
     release_dist: float = 0.07
     phase_gate_close_dist: float = 0.066
     phase_gate_max_hold: int = 160
+    release_gate_dist: float | None = None
+    release_gate_max_hold: int = 240
+    require_release_for_success: bool = False
     observation_mode: ObservationMode = "flat"
     seed: int = 11
     render: bool = False
@@ -184,7 +187,7 @@ class IsaacPickPlaceEnv:
 
         next_obs = self._build_obs()
         self._advance_phase(next_obs)
-        success = is_success(next_obs, threshold_m=self.config.success_dist)
+        success = self._is_success(next_obs)
         truncated = self.step_count >= self.config.max_episode_steps and not success
         errp_value = self._pseudo_errp_feedback(next_obs) if errp_feedback is None else float(errp_feedback)
         reward_result = compute_reward(
@@ -193,6 +196,7 @@ class IsaacPickPlaceEnv:
             action,
             errp_feedback=errp_value,
             success=success,
+            success_dist=self.config.success_dist,
             weights=self.config.reward_weights,
         )
         self._last_obs = next_obs
@@ -294,6 +298,7 @@ class IsaacPickPlaceEnv:
     def _advance_phase(self, obs: dict[str, np.ndarray]) -> None:
         next_event, next_t = advance_pick_place_event(self.phase_event, self.phase_t)
         ee_cube_dist = float(np.linalg.norm(obs["ee_to_cube"]))
+        cube_target_dist = float(np.linalg.norm(obs["cube_to_place_target"]))
         hold_lowering_for_grasp = (
             self.config.gripper_mode == "event"
             and self.phase_event == 1
@@ -301,7 +306,15 @@ class IsaacPickPlaceEnv:
             and ee_cube_dist > self.config.phase_gate_close_dist
             and self.phase_hold_steps < self.config.phase_gate_max_hold
         )
-        if hold_lowering_for_grasp:
+        hold_release_for_target = (
+            self.config.gripper_mode == "event"
+            and self.config.release_gate_dist is not None
+            and self.phase_event == 6
+            and next_event != self.phase_event
+            and cube_target_dist > float(self.config.release_gate_dist)
+            and self.phase_hold_steps < self.config.release_gate_max_hold
+        )
+        if hold_lowering_for_grasp or hold_release_for_target:
             self.phase_hold_steps += 1
             return
         if next_event != self.phase_event:
@@ -318,6 +331,14 @@ class IsaacPickPlaceEnv:
         )
         return float(any(float(np.asarray(obs[name]).reshape(-1)[0]) > 0.5 for name in flags))
 
+    def _is_success(self, obs: dict[str, np.ndarray]) -> bool:
+        if not is_success(obs, threshold_m=self.config.success_dist):
+            return False
+        if not self.config.require_release_for_success:
+            return True
+        has_grasped = bool(float(np.asarray(obs["has_grasped_cube"]).reshape(-1)[0]) > 0.5)
+        return self.phase_event >= 7 and not has_grasped
+
     def _info(
         self,
         obs: dict[str, np.ndarray],
@@ -333,7 +354,7 @@ class IsaacPickPlaceEnv:
             "controller_t": float(self.phase_t),
             "phase_hold_steps": int(self.phase_hold_steps),
             "gripper_closed": bool(self.gripper_closed),
-            "success": is_success(obs, threshold_m=self.config.success_dist),
+            "success": self._is_success(obs),
             "cube_target_dist": float(np.linalg.norm(obs["cube_to_place_target"])),
             "ee_cube_dist": float(np.linalg.norm(obs["ee_to_cube"])),
             "has_grasped_cube": bool(float(obs["has_grasped_cube"][0]) > 0.5),

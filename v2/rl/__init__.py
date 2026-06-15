@@ -32,6 +32,7 @@ from .observations import (
 )
 from .rewards import (
     DEFAULT_REWARD_WEIGHTS,
+    LEGACY_REWARD_VERSION,
     REWARD_VERSION,
     RewardResult,
     RewardWeights,
@@ -100,6 +101,7 @@ __all__ = [
     "OBSERVATION_FIELDS",
     "OBSERVATION_VERSION",
     "IsaacPickPlaceEnv",
+    "LEGACY_REWARD_VERSION",
     "PickPlaceEnvConfig",
     "REWARD_VERSION",
     "RewardResult",
