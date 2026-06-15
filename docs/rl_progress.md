@@ -195,6 +195,7 @@ Default RL behavior:
 - uses near-deterministic Gaussian exploration noise for BC warm-start stability,
 - scales rewards before PPO value/advantage updates,
 - regularizes the actor toward the loaded BC actor,
+- rejects actor updates that drift too far from the BC actor,
 - keeps the BC baseline success condition unless `--require-release-for-success` is passed.
 
 Starter command for the first PPO fine-tuning pass:
@@ -207,10 +208,12 @@ ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
   --rollout-steps 1024 \
   --log-std-init -8.0 \
   --reward-scale 0.05 \
+  --bc-action-coef 10.0 \
+  --max-bc-action-mse 0.002 \
   --device cuda
 ```
 
-Controller-target actions are very sensitive to per-step noise. A 1-episode parity check with `--log-std-init -8.0` reproduced BC success, while larger noise broke the grasp/place sequence.
+Controller-target actions are very sensitive to per-step noise and unconstrained PPO updates. A 1-episode parity check with `--log-std-init -8.0` reproduced BC success, while larger noise or actor drift broke the grasp/place sequence.
 
 After the stable pass is confirmed, run a stricter placement/release experiment by adding `--release-gate-dist 0.06 --require-release-for-success`.
 

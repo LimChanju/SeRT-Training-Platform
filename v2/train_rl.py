@@ -50,19 +50,25 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--render", action="store_true", help="Render the training window.")
     parser.add_argument("--hidden-dims", default="256,256")
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--clip-ratio", type=float, default=0.2)
-    parser.add_argument("--update-epochs", type=int, default=5)
+    parser.add_argument("--clip-ratio", type=float, default=0.05)
+    parser.add_argument("--update-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--entropy-coef", type=float, default=0.0)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument(
         "--bc-action-coef",
         type=float,
-        default=0.05,
+        default=10.0,
         help="Keep the actor close to the loaded BC actor on PPO minibatch observations.",
+    )
+    parser.add_argument(
+        "--max-bc-action-mse",
+        type=float,
+        default=0.002,
+        help="Reject an actor update if it drifts farther than this MSE from the loaded BC actor.",
     )
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument(
@@ -243,7 +249,8 @@ def _train() -> None:
         f"[TrainPPO] total_steps={args.total_steps} rollout_steps={args.rollout_steps} "
         f"device={device} torch={torch.__version__} reward={REWARD_VERSION} "
         f"reward_scale={args.reward_scale} log_std_init={args.log_std_init} "
-        f"release_gate_dist={release_gate_dist} bc_action_coef={args.bc_action_coef}",
+        f"release_gate_dist={release_gate_dist} bc_action_coef={args.bc_action_coef} "
+        f"max_bc_action_mse={args.max_bc_action_mse}",
         flush=True,
     )
     if device.type == "cuda":
@@ -324,7 +331,8 @@ def _train() -> None:
                 f"episodes={len(episode_stats)} recent_success={update_record['recent_success_rate']:.3f} "
                 f"recent_return={update_record['recent_return']:.2f} "
                 f"pi={metrics['policy_loss']:.4f} vf={metrics['value_loss']:.4f} "
-                f"bc={metrics['bc_action_loss']:.6f} entropy={metrics['entropy']:.3f}",
+                f"bc={metrics['bc_action_loss']:.6f} reject={int(metrics['update_rejected'])} "
+                f"entropy={metrics['entropy']:.3f}",
                 flush=True,
             )
             if args.save_every_updates > 0 and update_idx % args.save_every_updates == 0:
@@ -436,6 +444,7 @@ def _ppo_update(
     advantages = (advantages - advantages.mean()) / torch.clamp(advantages.std(), min=1e-6)
 
     n = obs_tensor.shape[0]
+    actor_before = _clone_actor_state(model) if bc_actor is not None and args.max_bc_action_mse > 0.0 else None
     losses = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "bc_action_loss": 0.0}
     updates = 0
     for _ in range(args.update_epochs):
@@ -472,7 +481,29 @@ def _ppo_update(
             losses["bc_action_loss"] += float(bc_action_loss.item())
             updates += 1
 
-    return {key: value / max(1, updates) for key, value in losses.items()}
+    metrics = {key: value / max(1, updates) for key, value in losses.items()}
+    metrics["update_rejected"] = 0.0
+    if bc_actor is not None and args.max_bc_action_mse > 0.0:
+        final_bc_loss = _actor_bc_mse(model, bc_actor, obs_tensor)
+        metrics["bc_action_loss"] = final_bc_loss
+        if final_bc_loss > float(args.max_bc_action_mse):
+            if actor_before is not None:
+                model.actor.load_state_dict(actor_before)
+            metrics["update_rejected"] = 1.0
+            metrics["bc_action_loss"] = _actor_bc_mse(model, bc_actor, obs_tensor)
+    return metrics
+
+
+def _clone_actor_state(model: ActorCritic) -> dict[str, torch.Tensor]:
+    return {key: value.detach().clone() for key, value in model.actor.state_dict().items()}
+
+
+def _actor_bc_mse(model: ActorCritic, bc_actor: MLPPolicy, obs_tensor: torch.Tensor) -> float:
+    with torch.no_grad():
+        policy_action = model.actor(obs_tensor)
+        bc_action = bc_actor(obs_tensor)
+        loss = torch.mean((policy_action - bc_action) ** 2)
+    return float(loss.detach().cpu().item())
 
 
 def _sample_action(
