@@ -179,9 +179,15 @@ def _select_device(requested: str):
 def _resolve_project_path(path: str) -> str:
     if os.path.isabs(path):
         return path
-    cwd_path = os.path.abspath(path)
-    if os.path.exists(cwd_path):
-        return cwd_path
+    project_path = os.path.abspath(os.path.join(PROJECT_DIR, path))
+    if os.path.exists(project_path):
+        return project_path
+    return os.path.abspath(path)
+
+
+def _resolve_output_path(path: str) -> str:
+    if not path or os.path.isabs(path):
+        return path
     return os.path.abspath(os.path.join(PROJECT_DIR, path))
 
 
@@ -317,8 +323,10 @@ def _run() -> None:
         "summary": summary,
         "episodes": rows,
     }
-    _write_json(args.output_json, result)
-    _write_csv(args.output_csv, rows)
+    output_json = _resolve_output_path(args.output_json)
+    output_csv = _resolve_output_path(args.output_csv)
+    _write_json(output_json, result)
+    _write_csv(output_csv, rows)
     print(
         f"[EvalRollout] success_rate={summary['success_rate']:.3f} "
         f"successes={summary['successes']}/{summary['episodes']} "
@@ -326,8 +334,8 @@ def _run() -> None:
         f"mean_final_cube_target_dist={summary['mean_final_cube_target_dist']:.4f}",
         flush=True,
     )
-    print(f"[EvalRollout] saved json={args.output_json}", flush=True)
-    print(f"[EvalRollout] saved csv={args.output_csv}", flush=True)
+    print(f"[EvalRollout] saved json={output_json}", flush=True)
+    print(f"[EvalRollout] saved csv={output_csv}", flush=True)
 
 
 def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:

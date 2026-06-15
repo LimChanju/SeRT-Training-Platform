@@ -205,10 +205,10 @@ def _select_device(requested: str):
 def _resolve_project_path(path: str) -> str:
     if os.path.isabs(path):
         return path
-    cwd_path = os.path.abspath(path)
-    if os.path.exists(cwd_path):
-        return cwd_path
-    return os.path.abspath(os.path.join(PROJECT_DIR, path))
+    project_path = os.path.abspath(os.path.join(PROJECT_DIR, path))
+    if os.path.exists(project_path):
+        return project_path
+    return os.path.abspath(path)
 
 
 def _torch_load(path: str, device):
