@@ -56,19 +56,39 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-ratio", type=float, default=0.2)
     parser.add_argument("--update-epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--entropy-coef", type=float, default=0.005)
+    parser.add_argument("--entropy-coef", type=float, default=0.001)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
-    parser.add_argument("--log-std-init", type=float, default=-1.2)
+    parser.add_argument(
+        "--log-std-init",
+        type=float,
+        default=-3.5,
+        help="Initial Gaussian exploration std in log space. BC warm-starts need small action noise.",
+    )
+    parser.add_argument(
+        "--reward-scale",
+        type=float,
+        default=0.05,
+        help="Scale rewards before PPO advantage/value updates. Raw episode returns are still logged.",
+    )
     parser.add_argument("--action-scale", type=float, default=1.0)
     parser.add_argument("--success-dist", type=float, default=0.06)
     parser.add_argument("--release-gate-dist", type=float, default=0.06)
     parser.add_argument("--release-gate-max-hold", type=int, default=240)
-    parser.add_argument(
-        "--allow-success-before-release",
+    success_group = parser.add_mutually_exclusive_group()
+    success_group.add_argument(
+        "--require-release-for-success",
+        dest="require_release_for_success",
         action="store_true",
-        help="Use the legacy success condition: cube near target is enough even before release.",
+        help="Count success only after the cube has been released inside the target radius.",
     )
+    success_group.add_argument(
+        "--allow-success-before-release",
+        dest="require_release_for_success",
+        action="store_false",
+        help="Use the BC baseline success condition: cube near target is enough even before release.",
+    )
+    parser.set_defaults(require_release_for_success=False)
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.066)
     parser.add_argument("--phase-gate-max-hold", type=int, default=160)
     parser.add_argument("--save-every-updates", type=int, default=5)
@@ -173,6 +193,7 @@ def _make_mlp(input_dim: int, output_dim: int, hidden_dims: tuple[int, ...]) -> 
 
 def _train() -> None:
     started_at = time.time()
+    output_path = _resolve_output_path(args.output)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = _select_device(args.device)
@@ -190,7 +211,7 @@ def _train() -> None:
             phase_gate_max_hold=args.phase_gate_max_hold,
             release_gate_dist=release_gate_dist,
             release_gate_max_hold=args.release_gate_max_hold,
-            require_release_for_success=not args.allow_success_before_release,
+            require_release_for_success=args.require_release_for_success,
             observation_mode="flat",
             seed=args.seed,
             render=args.render,
@@ -208,11 +229,13 @@ def _train() -> None:
 
     print(
         f"[TrainPPO] total_steps={args.total_steps} rollout_steps={args.rollout_steps} "
-        f"device={device} torch={torch.__version__} reward={REWARD_VERSION}",
+        f"device={device} torch={torch.__version__} reward={REWARD_VERSION} "
+        f"reward_scale={args.reward_scale} log_std_init={args.log_std_init}",
         flush=True,
     )
     if device.type == "cuda":
         print(f"[TrainPPO] cuda={torch.cuda.get_device_name(0)}", flush=True)
+    print(f"[TrainPPO] output={output_path}", flush=True)
     if bc_meta:
         print(f"[TrainPPO] initialized actor from BC checkpoint: {bc_meta['path']}", flush=True)
 
@@ -291,13 +314,13 @@ def _train() -> None:
                 flush=True,
             )
             if args.save_every_updates > 0 and update_idx % args.save_every_updates == 0:
-                _save_checkpoint(args.output, model, obs_mean, obs_std, hidden_dims, history, episode_stats, bc_meta)
+                _save_checkpoint(output_path, model, obs_mean, obs_std, hidden_dims, history, episode_stats, bc_meta)
     finally:
         env.close()
 
-    _save_checkpoint(args.output, model, obs_mean, obs_std, hidden_dims, history, episode_stats, bc_meta)
-    _save_history(args.output, history, episode_stats, started_at)
-    print(f"[TrainPPO] saved checkpoint: {args.output}", flush=True)
+    _save_checkpoint(output_path, model, obs_mean, obs_std, hidden_dims, history, episode_stats, bc_meta)
+    _save_history(output_path, history, episode_stats, started_at)
+    print(f"[TrainPPO] saved checkpoint: {output_path}", flush=True)
 
 
 def _collect_rollout(
@@ -332,7 +355,7 @@ def _collect_rollout(
         obs_buf.append(np.asarray(obs, dtype=np.float32))
         action_buf.append(np.asarray(action, dtype=np.float32))
         log_prob_buf.append(float(log_prob))
-        reward_buf.append(float(reward))
+        reward_buf.append(float(reward) * float(args.reward_scale))
         done_buf.append(float(done))
         value_buf.append(float(value))
 
@@ -597,6 +620,12 @@ def _resolve_project_path(path: str) -> str:
     cwd_path = os.path.abspath(path)
     if os.path.exists(cwd_path):
         return cwd_path
+    return os.path.abspath(os.path.join(PROJECT_DIR, path))
+
+
+def _resolve_output_path(path: str) -> str:
+    if os.path.isabs(path):
+        return path
     return os.path.abspath(os.path.join(PROJECT_DIR, path))
 
 
