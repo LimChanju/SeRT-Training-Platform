@@ -8,7 +8,8 @@ import numpy as np
 LEGACY_REWARD_VERSION = "reward_v0_hri_errp"
 PLACEMENT_REWARD_VERSION = "reward_v1_placement_hri_errp"
 GRASP_STABILITY_REWARD_VERSION = "reward_v2_grasp_stability_hri_errp"
-REWARD_VERSION = "reward_v3_release_precision_hri_errp"
+RELEASE_PRECISION_REWARD_VERSION = "reward_v3_release_precision_hri_errp"
+REWARD_VERSION = "reward_v4_post_release_stability_hri_errp"
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,11 @@ class RewardWeights:
     near_target_hold_bonus: float = 0.05
     near_target_regression_penalty: float = 2.0
     near_target_exit_penalty: float = 0.8
-    release_outside_target_penalty: float = 4.0
+    release_inside_target_bonus: float = 2.0
+    release_outside_target_penalty: float = 6.0
+    post_release_hold_bonus: float = 0.08
+    post_release_error_penalty: float = 0.6
+    post_release_regression_penalty: float = 1.5
     action_penalty: float = 0.01
     near_human_penalty: float = 0.5
     human_collision_penalty: float = 5.0
@@ -54,7 +59,7 @@ def compute_reward(
     success_dist: float = 0.06,
     weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
 ) -> RewardResult:
-    """Compute reward v3 from consecutive observations.
+    """Compute reward v4 from consecutive observations.
 
     Formula:
 
@@ -72,7 +77,11 @@ def compute_reward(
         + bh * near_target_hold
         - br * near_target * max(0, d_cube_goal[t] - d_cube_goal[t-1]) / d_success
         - be * exited_near_target_band
+        + bi * released_inside_target
         - lr * release_outside_target
+        + bpr * post_release_inside_target
+        - lpr * post_release_outside_error
+        - lrr * post_release_regression
         - la * ||a_t||_2
         - ln * near_human
         - lc * human_robot_collision
@@ -129,7 +138,12 @@ def compute_reward(
         and has_grasped <= 0.5
         and max(event, prev_event) >= 7
     )
+    release_inside_target = float(release_after_pick and cube_target_dist <= float(success_dist))
     release_outside_target = float(release_after_pick and cube_target_dist > float(success_dist))
+    post_release_phase = placement_active * float(max(event, prev_event) >= 7 and has_grasped <= 0.5)
+    post_release_inside_target = post_release_phase * float(cube_target_dist <= float(success_dist))
+    post_release_outside_error = post_release_phase * normalized_target_error
+    post_release_regression = post_release_phase * near_target_regression
     near_human = _scalar_field(obs, "near_human")
     human_collision = _scalar_field(obs, "human_robot_collision")
     action_norm = float(np.linalg.norm(np.asarray(action, dtype=float).reshape(-1)))
@@ -159,7 +173,13 @@ def compute_reward(
             -weights.near_target_regression_penalty * near_target_active * near_target_regression
         ),
         "near_target_exit_penalty": -weights.near_target_exit_penalty * exited_near_target_band,
+        "release_inside_target_bonus": weights.release_inside_target_bonus * release_inside_target,
         "release_outside_target_penalty": -weights.release_outside_target_penalty * release_outside_target,
+        "post_release_hold_bonus": weights.post_release_hold_bonus * post_release_inside_target,
+        "post_release_error_penalty": -weights.post_release_error_penalty * post_release_outside_error,
+        "post_release_regression_penalty": (
+            -weights.post_release_regression_penalty * post_release_regression
+        ),
         "action_penalty": -weights.action_penalty * action_norm,
         "near_human_penalty": -weights.near_human_penalty * near_human,
         "human_collision_penalty": -weights.human_collision_penalty * human_collision,
@@ -189,7 +209,11 @@ def reward_component_names() -> tuple[str, ...]:
         "near_target_hold_bonus",
         "near_target_regression_penalty",
         "near_target_exit_penalty",
+        "release_inside_target_bonus",
         "release_outside_target_penalty",
+        "post_release_hold_bonus",
+        "post_release_error_penalty",
+        "post_release_regression_penalty",
         "action_penalty",
         "near_human_penalty",
         "human_collision_penalty",
@@ -214,7 +238,11 @@ def reward_weights_dict(weights: RewardWeights = DEFAULT_REWARD_WEIGHTS) -> dict
         "near_target_hold_bonus": weights.near_target_hold_bonus,
         "near_target_regression_penalty": weights.near_target_regression_penalty,
         "near_target_exit_penalty": weights.near_target_exit_penalty,
+        "release_inside_target_bonus": weights.release_inside_target_bonus,
         "release_outside_target_penalty": weights.release_outside_target_penalty,
+        "post_release_hold_bonus": weights.post_release_hold_bonus,
+        "post_release_error_penalty": weights.post_release_error_penalty,
+        "post_release_regression_penalty": weights.post_release_regression_penalty,
         "action_penalty": weights.action_penalty,
         "near_human_penalty": weights.near_human_penalty,
         "human_collision_penalty": weights.human_collision_penalty,

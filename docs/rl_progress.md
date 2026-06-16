@@ -19,7 +19,7 @@ Build a learning platform for HRI-aware robot pick-and-place in Isaac Sim. The c
 - Expert: Isaac/Franka PickPlaceController backed by RMPFlow
 - Policy action: 5D task-space command
 - Observation: 84D state vector with controller phase information
-- Reward: v3 release-precision + grasp-stability + placement-focused HRI/ErrP-compatible shaped reward
+- Reward: v4 post-release stability + release precision + grasp-stability + placement-focused HRI/ErrP-compatible shaped reward
 
 ## Implemented Components
 
@@ -95,7 +95,7 @@ cuda: NVIDIA GeForce RTX 4090
 checkpoint: v2/policies/bc_pick_place_v1_100eps.pt
 ```
 
-### Reward v1/v2/v3
+### Reward v1/v2/v3/v4
 
 Failure analysis showed that failed BC rollout episodes usually grasped the cube but released it outside the success radius. The default reward was therefore moved from `reward_v0_hri_errp` to `reward_v1_placement_hri_errp`.
 
@@ -122,6 +122,13 @@ The default reward is now `reward_v3_release_precision_hri_errp`. This was added
 - a small hold bonus inside the `0.065 m` near-target band,
 - a normalized penalty when cube-target distance increases inside that band,
 - a one-shot penalty when the cube exits the near-target band.
+
+The default reward is now `reward_v4_post_release_stability_hri_errp`. This was added after the stricter `--require-release-for-success` evaluation exposed one remaining case where the cube reached the target neighborhood, was released, and then drifted outside the success radius. Reward v4 adds:
+
+- a one-shot bonus for releasing inside the target radius,
+- a stronger one-shot penalty for releasing outside the target radius,
+- post-release hold bonus while the cube remains inside the success radius,
+- post-release placement error and regression penalties when the cube drifts away after release.
 
 ### Rollout Fixes
 
@@ -411,6 +418,50 @@ remaining failure: episode=4 seed=15, reached target at 0.0527 m then drifted to
 
 Interpretation: reward v3 fixes release-gated placement for the standard success condition, but the stricter HRI-facing condition still needs one more layer of post-release settle/stability pressure.
 
+### Residual PPO Reward v4 Result
+
+Reward v4 was tested with the same residual setup, release gating, and the strict release-required success condition:
+
+```text
+checkpoint: ppo_pick_place_v7_residual_rewardv4_strict_best.pt
+reward: reward_v4_post_release_stability_hri_errp
+residual_scale: 0.1
+log_std_init: -4.5
+bc_action_coef: 0.1
+max_bc_action_mse: 0.01
+train success condition: require_release_for_success=True
+eval: 50 episodes, seed=11, release_gate_dist=0.06, release_gate_max_hold=360, require_release_for_success=True
+result: 50/50 success = 1.00
+grasp_rate: 1.0
+mean_steps: 786.5
+mean_final_cube_target_dist: 0.0299 m
+failures: 0
+```
+
+Compared with the v6 strict evaluation:
+
+```text
+Residual PPO v6 + reward v3 strict:
+  49/50 success
+  mean_steps: 821.3
+  mean_final_cube_target_dist: 0.0434 m
+  remaining failure: reached target, then drifted outside success radius after release.
+
+Residual PPO v7 + reward v4 strict:
+  50/50 success
+  mean_steps: 786.5
+  mean_final_cube_target_dist: 0.0299 m
+  failures: 0
+```
+
+Seed-level comparison shows 1 recovery and 0 regressions. Reward v4 is therefore the current best strict HRI-facing reward/policy setting.
+
+Current best validated policy checkpoint:
+
+```text
+v2/policies/ppo_pick_place_v7_residual_rewardv4_strict_best.pt
+```
+
 ### BC vs PPO Rollout Comparison
 
 Added `v2/compare_rollout_analyses.py` to compare rollout JSON files and failure-analysis JSON files.
@@ -458,24 +509,22 @@ Working:
 - initial RL environment wrapper
 - PPO fine-tuning script
 - residual PPO training mode
-- reward v3 release-precision shaping
-- 50/50 release-gated rollout evaluation for residual PPO v6
+- reward v4 post-release stability shaping
+- 50/50 strict release-required rollout evaluation for residual PPO v7
 - BC vs PPO rollout comparison report
 - seed-level grasp failure debugger
 
 Still experimental:
 
 - pseudo-ErrP mapping weights
-- final release-gate setting for HRI-facing evaluation
 - EEG replay integration
 - human/avatar asset linkage
 - gripper camera occlusion metric
 
 ## Recommended Next Steps
 
-1. Add post-release settle/stability pressure for the remaining strict-evaluation drift case.
-2. Re-run strict evaluation with `--require-release-for-success` and compare against the current 49/50 result.
-3. Add pseudo-ErrP signals to the wrapper reward path using collision, near-human distance, and occlusion flags.
-4. Evaluate whether reward v3 still holds when pseudo-human state is active instead of empty.
-5. Add gripper-camera occlusion metrics into observation/logging before using them as reward terms.
-6. Replace pseudo-ErrP with EEG replay feedback once the replay dataset and time-event mapping are ready.
+1. Add pseudo-ErrP signals to the wrapper reward path using collision, near-human distance, and occlusion flags.
+2. Evaluate whether reward v4 still holds when pseudo-human state is active instead of empty.
+3. Add gripper-camera occlusion metrics into observation/logging before using them as reward terms.
+4. Run a small ablation: BC only vs PPO reward v3 vs PPO reward v4 under the same strict success condition.
+5. Replace pseudo-ErrP with EEG replay feedback once the replay dataset and time-event mapping are ready.
