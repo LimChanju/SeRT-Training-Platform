@@ -1,0 +1,134 @@
+{
+  "labels": {
+    "baseline": "Residual PPO v5",
+    "candidate": "Residual PPO v6 reward v3"
+  },
+  "baseline_summary": {
+    "episodes": 50,
+    "successes": 47,
+    "success_rate": 0.9399999976158142,
+    "truncated_rate": 0.05999999865889549,
+    "grasp_rate": 1.0,
+    "mean_steps": 679.3400268554688,
+    "std_steps": 151.39968872070312,
+    "mean_total_reward": -144.01454162597656,
+    "std_total_reward": 19.30119514465332,
+    "mean_final_cube_target_dist": 0.060534682124853134,
+    "std_final_cube_target_dist": 0.0038656452670693398,
+    "mean_min_cube_target_dist": 0.059994425624608994,
+    "std_min_cube_target_dist": 0.0011172057129442692
+  },
+  "candidate_summary": {
+    "episodes": 50,
+    "successes": 50,
+    "success_rate": 1.0,
+    "truncated_rate": 0.0,
+    "grasp_rate": 1.0,
+    "mean_steps": 673.52001953125,
+    "std_steps": 133.05941772460938,
+    "mean_total_reward": -142.75839233398438,
+    "std_total_reward": 17.546188354492188,
+    "mean_final_cube_target_dist": 0.05957282707095146,
+    "std_final_cube_target_dist": 0.0007101304363459349,
+    "mean_min_cube_target_dist": 0.05957282707095146,
+    "std_min_cube_target_dist": 0.0007101304363459349
+  },
+  "metric_deltas_candidate_minus_baseline": {
+    "success_rate": 0.06000000238418579,
+    "truncated_rate": -0.05999999865889549,
+    "grasp_rate": 0.0,
+    "mean_steps": -5.82000732421875,
+    "mean_total_reward": 1.2561492919921875,
+    "mean_final_cube_target_dist": -0.0009618550539016724,
+    "mean_min_cube_target_dist": -0.00042159855365753174
+  },
+  "baseline_failure_summary": {
+    "episodes": 50,
+    "successes": 47,
+    "failures": 3,
+    "success_rate": 0.94,
+    "failure_categories": {
+      "released_outside_success_radius": 3
+    }
+  },
+  "candidate_failure_summary": {
+    "episodes": 50,
+    "successes": 50,
+    "failures": 0,
+    "success_rate": 1.0,
+    "failure_categories": {}
+  },
+  "failure_category_delta_candidate_minus_baseline": {
+    "released_outside_success_radius": -3
+  },
+  "paired_episode_changes": {
+    "shared_seed_count": 50,
+    "counts": {
+      "both_success": 47,
+      "candidate_recovery": 3
+    },
+    "mean_step_delta": -5.820000171661377,
+    "mean_final_dist_delta": -0.0009618609910830855,
+    "regressions": [],
+    "recoveries": [
+      {
+        "seed": 24,
+        "episode_baseline": 13,
+        "episode_candidate": 13,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.0628632977604866,
+        "candidate_final_dist": 0.05993623286485672,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 628,
+        "step_delta": -572
+      },
+      {
+        "seed": 47,
+        "episode_baseline": 36,
+        "episode_candidate": 36,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.08574545383453369,
+        "candidate_final_dist": 0.059496354311704636,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 613,
+        "step_delta": -587
+      },
+      {
+        "seed": 60,
+        "episode_baseline": 49,
+        "episode_candidate": 49,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.0692661926150322,
+        "candidate_final_dist": 0.05980641767382622,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 627,
+        "step_delta": -573
+      }
+    ],
+    "both_failures": []
+  },
+  "interpretation": [
+    "Residual PPO v6 reward v3 improved overall success rate by 0.060.",
+    "Residual PPO v6 reward v3 finished successful/failed rollouts faster on average by 5.8 steps.",
+    "Residual PPO v6 reward v3 reduced release-outside-target failures.",
+    "Seed-level comparison shows 3 recoveries and 0 regressions."
+  ],
+  "inputs": {
+    "baseline_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v5_residual_best_releasegate_rollout_eval.json",
+    "candidate_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v6_residual_rewardv3_best_releasegate_rollout_eval.json",
+    "baseline_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v5_residual_best_releasegate_failure_analysis.json",
+    "candidate_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v6_residual_rewardv3_best_releasegate_failure_analysis.json"
+  }
+}

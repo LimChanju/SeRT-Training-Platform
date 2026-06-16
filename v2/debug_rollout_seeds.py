@@ -126,6 +126,8 @@ class PolicyRunner:
         self.device = _select_device(device_name)
         checkpoint = _torch_load(self.checkpoint_path, self.device)
         self.action_version = str(checkpoint.get("action_version", "action_v1_controller_target_delta"))
+        self.policy_mode = str(checkpoint.get("policy_mode", "direct"))
+        self.residual_scale = float(checkpoint.get("residual_scale", 1.0))
         self.obs_mean = _tensor_to_numpy(checkpoint["obs_mean"]).reshape(1, -1)
         self.obs_std = np.maximum(_tensor_to_numpy(checkpoint["obs_std"]).reshape(1, -1), 1e-6)
 
@@ -138,20 +140,78 @@ class PolicyRunner:
         self.model = MLPPolicy(self.obs_dim, action_dim, hidden_dims=hidden_dims).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
+        self.base_model = None
+        self.base_obs_mean = None
+        self.base_obs_std = None
+        self.base_obs_dim = None
+        self.base_checkpoint_path = ""
+        if self.policy_mode == "residual":
+            self._load_residual_base(checkpoint)
         print(
             f"[DebugRollout] loaded checkpoint={self.checkpoint_path} device={self.device} "
-            f"action={self.action_version} obs_dim={self.obs_dim}",
+            f"action={self.action_version} obs_dim={self.obs_dim} policy_mode={self.policy_mode}",
             flush=True,
         )
 
     def predict(self, obs: np.ndarray) -> np.ndarray:
+        residual_or_action = self._predict_model(
+            self.model,
+            obs,
+            self.obs_mean,
+            self.obs_std,
+            self.obs_dim,
+        )
+        if self.policy_mode == "residual":
+            if self.base_model is None or self.base_obs_mean is None or self.base_obs_std is None:
+                raise RuntimeError("Residual policy checkpoint is missing a loadable source BC checkpoint.")
+            base_action = self._predict_model(
+                self.base_model,
+                obs,
+                self.base_obs_mean,
+                self.base_obs_std,
+                int(self.base_obs_dim),
+            )
+            return clip_action(base_action + float(self.residual_scale) * residual_or_action)
+        return residual_or_action
+
+    def _predict_model(
+        self,
+        model: MLPPolicy,
+        obs: np.ndarray,
+        obs_mean: np.ndarray,
+        obs_std: np.ndarray,
+        obs_dim: int,
+    ) -> np.ndarray:
         obs_policy = np.asarray(obs, dtype=np.float32).reshape(1, -1)
-        obs_policy = _align_obs_dim(obs_policy, self.obs_dim)
-        obs_norm = (obs_policy - self.obs_mean) / self.obs_std
+        obs_policy = _align_obs_dim(obs_policy, obs_dim)
+        obs_norm = (obs_policy - obs_mean) / obs_std
         with torch.no_grad():
             tensor = torch.from_numpy(obs_norm.astype(np.float32)).to(self.device)
-            action = self.model(tensor).detach().cpu().numpy()[0]
+            action = model(tensor).detach().cpu().numpy()[0]
         return clip_action(action)
+
+    def _load_residual_base(self, checkpoint: dict[str, Any]) -> None:
+        source_path = str(checkpoint.get("source_bc_checkpoint", ""))
+        if not source_path:
+            raise ValueError("Residual checkpoint is missing source_bc_checkpoint metadata.")
+        self.base_checkpoint_path = _resolve_project_path(source_path)
+        base_checkpoint = _torch_load(self.base_checkpoint_path, self.device)
+        base_hidden_dims = tuple(int(value) for value in base_checkpoint.get("hidden_dims", (256, 256)))
+        self.base_obs_dim = int(base_checkpoint.get("obs_dim", OBSERVATION_DIM))
+        base_action_dim = int(base_checkpoint.get("action_dim", ACTION_DIM))
+        if base_action_dim != ACTION_DIM:
+            raise ValueError(
+                f"Residual base checkpoint action dim {base_action_dim} != runtime action dim {ACTION_DIM}"
+            )
+        self.base_obs_mean = _tensor_to_numpy(base_checkpoint["obs_mean"]).reshape(1, -1)
+        self.base_obs_std = np.maximum(_tensor_to_numpy(base_checkpoint["obs_std"]).reshape(1, -1), 1e-6)
+        self.base_model = MLPPolicy(
+            int(self.base_obs_dim),
+            base_action_dim,
+            hidden_dims=base_hidden_dims,
+        ).to(self.device)
+        self.base_model.load_state_dict(base_checkpoint["model_state_dict"])
+        self.base_model.eval()
 
 
 def _run() -> None:

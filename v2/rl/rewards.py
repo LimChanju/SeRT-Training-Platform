@@ -7,7 +7,8 @@ import numpy as np
 
 LEGACY_REWARD_VERSION = "reward_v0_hri_errp"
 PLACEMENT_REWARD_VERSION = "reward_v1_placement_hri_errp"
-REWARD_VERSION = "reward_v2_grasp_stability_hri_errp"
+GRASP_STABILITY_REWARD_VERSION = "reward_v2_grasp_stability_hri_errp"
+REWARD_VERSION = "reward_v3_release_precision_hri_errp"
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,11 @@ class RewardWeights:
     target_zone_bonus: float = 0.15
     success_bonus: float = 15.0
     placement_error_penalty: float = 0.08
+    near_target_dist: float = 0.065
+    near_target_progress_bonus: float = 0.8
+    near_target_hold_bonus: float = 0.05
+    near_target_regression_penalty: float = 2.0
+    near_target_exit_penalty: float = 0.8
     release_outside_target_penalty: float = 4.0
     action_penalty: float = 0.01
     near_human_penalty: float = 0.5
@@ -48,7 +54,7 @@ def compute_reward(
     success_dist: float = 0.06,
     weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
 ) -> RewardResult:
-    """Compute reward v2 from consecutive observations.
+    """Compute reward v3 from consecutive observations.
 
     Formula:
 
@@ -62,6 +68,10 @@ def compute_reward(
         + bz * target_zone
         + bs * success
         - lp * grasp_or_post_grasp * max(0, d_cube_goal[t] - d_success) / d_success
+        + bp * near_target * max(0, d_cube_goal[t-1] - d_cube_goal[t]) / d_success
+        + bh * near_target_hold
+        - br * near_target * max(0, d_cube_goal[t] - d_cube_goal[t-1]) / d_success
+        - be * exited_near_target_band
         - lr * release_outside_target
         - la * ||a_t||_2
         - ln * near_human
@@ -93,6 +103,20 @@ def compute_reward(
     )
     normalized_target_error = max(0.0, cube_target_dist - float(success_dist)) / max(float(success_dist), 1e-6)
     target_zone = placement_active * float(cube_target_dist <= float(success_dist))
+    near_target_dist = max(float(weights.near_target_dist), float(success_dist))
+    placement_precision_phase = placement_active * float(event in (5, 6, 7) or prev_event in (5, 6, 7))
+    near_target_band = float(cube_target_dist <= near_target_dist)
+    if prev_obs is None:
+        was_near_target_band = 0.0
+    else:
+        was_near_target_band = float(_norm_field(prev_obs, "cube_to_place_target") <= near_target_dist)
+    near_target_active = placement_precision_phase * max(near_target_band, was_near_target_band)
+    near_target_hold = placement_precision_phase * near_target_band
+    near_target_progress = max(0.0, cube_target_progress) / max(float(success_dist), 1e-6)
+    near_target_regression = max(0.0, -cube_target_progress) / max(float(success_dist), 1e-6)
+    exited_near_target_band = placement_precision_phase * float(
+        was_near_target_band > 0.5 and near_target_band <= 0.5
+    )
     entered_post_grasp_without_grasp = float(
         prev_obs is not None
         and prev_event <= 3
@@ -127,6 +151,14 @@ def compute_reward(
         "target_zone_bonus": weights.target_zone_bonus * target_zone,
         "success_bonus": weights.success_bonus * (1.0 if success else 0.0),
         "placement_error_penalty": -weights.placement_error_penalty * placement_active * normalized_target_error,
+        "near_target_progress_bonus": (
+            weights.near_target_progress_bonus * near_target_active * near_target_progress
+        ),
+        "near_target_hold_bonus": weights.near_target_hold_bonus * near_target_hold,
+        "near_target_regression_penalty": (
+            -weights.near_target_regression_penalty * near_target_active * near_target_regression
+        ),
+        "near_target_exit_penalty": -weights.near_target_exit_penalty * exited_near_target_band,
         "release_outside_target_penalty": -weights.release_outside_target_penalty * release_outside_target,
         "action_penalty": -weights.action_penalty * action_norm,
         "near_human_penalty": -weights.near_human_penalty * near_human,
@@ -153,6 +185,10 @@ def reward_component_names() -> tuple[str, ...]:
         "target_zone_bonus",
         "success_bonus",
         "placement_error_penalty",
+        "near_target_progress_bonus",
+        "near_target_hold_bonus",
+        "near_target_regression_penalty",
+        "near_target_exit_penalty",
         "release_outside_target_penalty",
         "action_penalty",
         "near_human_penalty",
@@ -173,6 +209,11 @@ def reward_weights_dict(weights: RewardWeights = DEFAULT_REWARD_WEIGHTS) -> dict
         "target_zone_bonus": weights.target_zone_bonus,
         "success_bonus": weights.success_bonus,
         "placement_error_penalty": weights.placement_error_penalty,
+        "near_target_dist": weights.near_target_dist,
+        "near_target_progress_bonus": weights.near_target_progress_bonus,
+        "near_target_hold_bonus": weights.near_target_hold_bonus,
+        "near_target_regression_penalty": weights.near_target_regression_penalty,
+        "near_target_exit_penalty": weights.near_target_exit_penalty,
         "release_outside_target_penalty": weights.release_outside_target_penalty,
         "action_penalty": weights.action_penalty,
         "near_human_penalty": weights.near_human_penalty,

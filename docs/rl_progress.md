@@ -19,7 +19,7 @@ Build a learning platform for HRI-aware robot pick-and-place in Isaac Sim. The c
 - Expert: Isaac/Franka PickPlaceController backed by RMPFlow
 - Policy action: 5D task-space command
 - Observation: 84D state vector with controller phase information
-- Reward: v2 grasp-stability + placement-focused HRI/ErrP-compatible shaped reward
+- Reward: v3 release-precision + grasp-stability + placement-focused HRI/ErrP-compatible shaped reward
 
 ## Implemented Components
 
@@ -95,7 +95,7 @@ cuda: NVIDIA GeForce RTX 4090
 checkpoint: v2/policies/bc_pick_place_v1_100eps.pt
 ```
 
-### Reward v1/v2
+### Reward v1/v2/v3
 
 Failure analysis showed that failed BC rollout episodes usually grasped the cube but released it outside the success radius. The default reward was therefore moved from `reward_v0_hri_errp` to `reward_v1_placement_hri_errp`.
 
@@ -115,6 +115,13 @@ The default reward was then moved to `reward_v2_grasp_stability_hri_errp` after 
 - a grasp-phase distance penalty while the gripper is not yet holding the cube,
 - a one-shot penalty when the controller leaves the grasp phase without ever grasping,
 - the existing placement/release shaping from reward v1.
+
+The default reward is now `reward_v3_release_precision_hri_errp`. This was added after residual PPO eliminated catastrophic no-grasp failures but still missed some episodes by reaching the target neighborhood and then drifting just outside the success radius before release. Reward v3 adds:
+
+- near-target progress shaping during event 5-7 placement/release behavior,
+- a small hold bonus inside the `0.065 m` near-target band,
+- a normalized penalty when cube-target distance increases inside that band,
+- a one-shot penalty when the cube exits the near-target band.
 
 ### Rollout Fixes
 
@@ -165,7 +172,7 @@ The wrapper owns:
 - Panda robot setup
 - RMPFlow control
 - policy observation construction
-- v1 reward computation
+- current reward computation
 - event-mode gripper control
 - phase gating
 - pseudo-ErrP feedback placeholder
@@ -197,14 +204,14 @@ Default RL behavior:
 
 - initializes the actor from `v2/policies/bc_pick_place_v1_100eps.pt`,
 - reuses BC observation normalization,
-- uses reward v1,
+- uses the current reward implementation,
 - uses near-deterministic Gaussian exploration noise for BC warm-start stability,
 - scales rewards before PPO value/advantage updates,
 - regularizes the actor toward the loaded BC actor,
 - rejects actor updates that drift too far from the BC actor,
 - keeps the BC baseline success condition unless `--require-release-for-success` is passed.
 
-Starter command for the current PPO fine-tuning pass:
+Starter command from the early direct-PPO fine-tuning pass:
 
 ```bash
 ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
@@ -221,7 +228,7 @@ ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
 
 Controller-target actions are very sensitive to per-step noise and unconstrained PPO updates. A 1-episode parity check with `--log-std-init -8.0` reproduced BC success, while larger noise or actor drift broke the grasp/place sequence.
 
-After the stable pass is confirmed, run a stricter placement/release evaluation with release gating:
+The stricter placement/release evaluation used release gating:
 
 ```bash
 ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/evaluate_rollout_policy.py" \
@@ -241,7 +248,7 @@ Smoke verification passed with an 8-step CPU run, and the resulting PPO actor ch
 
 ### PPO v2 Results
 
-The best confirmed PPO result so far is `ppo_pick_place_v2.pt` evaluated with release gating:
+At this stage, the best direct-PPO result was `ppo_pick_place_v2.pt` evaluated with release gating:
 
 ```text
 PPO-v1 baseline:          45/50 success = 0.900
@@ -267,7 +274,7 @@ The release gate is important because PPO-v2 without it improved grasp behavior 
 
 An experimental early-close grasp gate was also tested. It fixed one remaining no-grasp seed locally, but the 50-episode evaluation dropped to 46/50 by creating release placement regressions. It remains disabled by default.
 
-Current next target:
+The next target after this result was:
 
 - improve the two remaining `grasp_never_established` seeds without destabilizing release placement,
 - prefer reward/policy improvements over hard-coded early close unless the full 50-episode evaluation improves.
@@ -306,7 +313,7 @@ PPO-v2 with BC action blended only on events 1,2,3:
   47/50, below PPO-v2; it fixed neither the system cleanly nor the phase coupling.
 ```
 
-Current conclusion: the best validated checkpoint remains `ppo_pick_place_v2.pt` with release gating at `48/50`. The remaining issue is phase-coupled PPO drift, not simply data count or a single gripper threshold. The next substantial fix should change the training objective or environment interface so PPO cannot improve reward by slightly distorting the expert phase timing. Candidate approaches:
+Interim conclusion before residual PPO: the best validated checkpoint was `ppo_pick_place_v2.pt` with release gating at `48/50`. The remaining issue was phase-coupled PPO drift, not simply data count or a single gripper threshold. The next substantial fix needed to change the training objective or environment interface so PPO could not improve reward by slightly distorting the expert phase timing. Candidate approaches:
 
 - train/evaluate a phase-conditioned residual policy where BC remains the nominal controller and PPO outputs only a small residual,
 - add a trust-region or KL/MSE constraint evaluated on a fixed validation anchor set, not only on current rollout states,
@@ -355,12 +362,54 @@ Residual PPO v5:
 
 Increasing `release_gate_max_hold` from 360 to 720 did not help; it dropped to 46/50. The residual direction is still promising because it removes the catastrophic no-grasp failures, but the next improvement should target release/placement precision instead of grasp stability.
 
-Next candidate:
+### Residual PPO Reward v3 Result
 
-- keep residual PPO,
-- add placement/release-focused training or evaluation constraints,
-- consider requiring success after release for the final HRI-safe policy,
-- tune residual scale and reward around event 5-7 rather than event 1-3.
+Reward v3 was tested with the same residual setup and release-gated 50-episode evaluation:
+
+```text
+checkpoint: ppo_pick_place_v6_residual_rewardv3_best.pt
+reward: reward_v3_release_precision_hri_errp
+residual_scale: 0.1
+log_std_init: -4.5
+bc_action_coef: 0.1
+max_bc_action_mse: 0.01
+eval: 50 episodes, seed=11, release_gate_dist=0.06, release_gate_max_hold=360
+result: 50/50 success = 1.00
+grasp_rate: 1.0
+mean_steps: 673.5
+mean_final_cube_target_dist: 0.0596 m
+```
+
+This directly targets the v5 failure mode:
+
+```text
+Residual PPO v5:
+  47/50 success
+  failures are small release/placement misses after grasp.
+
+Residual PPO v6 + reward v3:
+  50/50 success
+  no failures in the 50-episode release-gated evaluation.
+```
+
+Current best validated policy checkpoint:
+
+```text
+v2/policies/ppo_pick_place_v6_residual_rewardv3_best.pt
+```
+
+A stricter evaluation was also run with `--require-release-for-success`, so the episode only succeeds after the cube is released inside the target radius:
+
+```text
+eval: 50 episodes, seed=11, release_gate_dist=0.06, release_gate_max_hold=360, require_release_for_success=True
+result: 49/50 success = 0.98
+grasp_rate: 1.0
+mean_steps: 821.3
+mean_final_cube_target_dist: 0.0434 m
+remaining failure: episode=4 seed=15, reached target at 0.0527 m then drifted to 0.0706 m after release
+```
+
+Interpretation: reward v3 fixes release-gated placement for the standard success condition, but the stricter HRI-facing condition still needs one more layer of post-release settle/stability pressure.
 
 ### BC vs PPO Rollout Comparison
 
@@ -394,7 +443,7 @@ Current PPO grasp-regression episodes:
 
 The debug comparison shows that BC succeeds on these same episode/seed pairs with `min_ee_cube_event_1_3` around `0.0575 m`, while PPO fails with `min_ee_cube_event_1_3` around `0.069-0.088 m`. PPO then advances through the close/pick phase without establishing a grasp.
 
-Working diagnosis: PPO grasp regressions are caused by insufficient close-phase approach before event progression. The next fix should target event 1-3 grasp stability, for example by tightening/holding the phase gate or adding a grasp-phase penalty when EE-cube distance stays too large.
+Working diagnosis from the direct-PPO phase: PPO grasp regressions were caused by insufficient close-phase approach before event progression. This motivated residual PPO, where BC remains the nominal controller and PPO only learns a small correction.
 
 ## Current Status
 
@@ -408,22 +457,25 @@ Working:
 - rollout fixed-orientation/gripper event fixes
 - initial RL environment wrapper
 - PPO fine-tuning script
+- residual PPO training mode
+- reward v3 release-precision shaping
+- 50/50 release-gated rollout evaluation for residual PPO v6
 - BC vs PPO rollout comparison report
 - seed-level grasp failure debugger
 
 Still experimental:
 
 - pseudo-ErrP mapping weights
-- final release-gate setting for RL training
-- grasp stability during PPO fine-tuning
+- final release-gate setting for HRI-facing evaluation
 - EEG replay integration
 - human/avatar asset linkage
 - gripper camera occlusion metric
 
 ## Recommended Next Steps
 
-1. Add grasp-stability pressure for event-mode PPO, especially around event 1-3 close timing.
-2. Re-run PPO with the grasp-stability change and compare against the current BC/PPO report.
-3. Tune reward v1 weights and release-gate settings only after grasp stability no longer regresses.
-4. Add pseudo-ErrP to the wrapper reward path using collision, near-human distance, and occlusion flags.
-5. Replace pseudo-ErrP with EEG replay feedback once the replay dataset and time-event mapping are ready.
+1. Add post-release settle/stability pressure for the remaining strict-evaluation drift case.
+2. Re-run strict evaluation with `--require-release-for-success` and compare against the current 49/50 result.
+3. Add pseudo-ErrP signals to the wrapper reward path using collision, near-human distance, and occlusion flags.
+4. Evaluate whether reward v3 still holds when pseudo-human state is active instead of empty.
+5. Add gripper-camera occlusion metrics into observation/logging before using them as reward terms.
+6. Replace pseudo-ErrP with EEG replay feedback once the replay dataset and time-event mapping are ready.

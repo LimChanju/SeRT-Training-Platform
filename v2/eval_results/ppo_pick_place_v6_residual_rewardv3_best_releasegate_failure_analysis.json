@@ -1,0 +1,113 @@
+{
+  "input_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v6_residual_rewardv3_best_releasegate_rollout_eval.json",
+  "success_dist": 0.06,
+  "summary": {
+    "episodes": 50,
+    "successes": 50,
+    "failures": 0,
+    "success_rate": 1.0,
+    "failure_categories": {}
+  },
+  "overall_stats": {
+    "count": 50,
+    "mean_steps": 673.52001953125,
+    "std_steps": 133.05941772460938,
+    "min_steps": 595.0,
+    "max_steps": 1153.0,
+    "mean_total_reward": -142.75839233398438,
+    "std_total_reward": 17.546188354492188,
+    "min_total_reward": -180.18687438964844,
+    "max_total_reward": -112.57582092285156,
+    "mean_final_cube_target_dist": 0.05957282707095146,
+    "std_final_cube_target_dist": 0.0007101304363459349,
+    "min_final_cube_target_dist": 0.0553550161421299,
+    "max_final_cube_target_dist": 0.05999046936631203,
+    "mean_min_cube_target_dist": 0.05957282707095146,
+    "std_min_cube_target_dist": 0.0007101304363459349,
+    "min_min_cube_target_dist": 0.0553550161421299,
+    "max_min_cube_target_dist": 0.05999046936631203,
+    "mean_final_ee_cube_dist": 0.06320542842149734,
+    "std_final_ee_cube_dist": 0.012179771438241005,
+    "min_final_ee_cube_dist": 0.05850396677851677,
+    "max_final_ee_cube_dist": 0.11339908838272095,
+    "mean_min_ee_cube_dist": 0.06001586839556694,
+    "std_min_ee_cube_dist": 0.001516707125119865,
+    "min_min_ee_cube_dist": 0.05849302187561989,
+    "max_min_ee_cube_dist": 0.06476863473653793,
+    "mean_placement_margin_m": -0.00042717382893897593,
+    "std_placement_margin_m": 0.0007101304363459349,
+    "min_placement_margin_m": -0.004644983913749456,
+    "max_placement_margin_m": -9.530634088150691e-06,
+    "mean_best_placement_margin_m": -0.00042717382893897593,
+    "std_best_placement_margin_m": 0.0007101304363459349,
+    "min_best_placement_margin_m": -0.004644983913749456,
+    "max_best_placement_margin_m": -9.530634088150691e-06,
+    "grasp_rate": 1.0,
+    "truncated_rate": 0.0
+  },
+  "success_stats": {
+    "count": 50,
+    "mean_steps": 673.52001953125,
+    "std_steps": 133.05941772460938,
+    "min_steps": 595.0,
+    "max_steps": 1153.0,
+    "mean_total_reward": -142.75839233398438,
+    "std_total_reward": 17.546188354492188,
+    "min_total_reward": -180.18687438964844,
+    "max_total_reward": -112.57582092285156,
+    "mean_final_cube_target_dist": 0.05957282707095146,
+    "std_final_cube_target_dist": 0.0007101304363459349,
+    "min_final_cube_target_dist": 0.0553550161421299,
+    "max_final_cube_target_dist": 0.05999046936631203,
+    "mean_min_cube_target_dist": 0.05957282707095146,
+    "std_min_cube_target_dist": 0.0007101304363459349,
+    "min_min_cube_target_dist": 0.0553550161421299,
+    "max_min_cube_target_dist": 0.05999046936631203,
+    "mean_final_ee_cube_dist": 0.06320542842149734,
+    "std_final_ee_cube_dist": 0.012179771438241005,
+    "min_final_ee_cube_dist": 0.05850396677851677,
+    "max_final_ee_cube_dist": 0.11339908838272095,
+    "mean_min_ee_cube_dist": 0.06001586839556694,
+    "std_min_ee_cube_dist": 0.001516707125119865,
+    "min_min_ee_cube_dist": 0.05849302187561989,
+    "max_min_ee_cube_dist": 0.06476863473653793,
+    "mean_placement_margin_m": -0.00042717382893897593,
+    "std_placement_margin_m": 0.0007101304363459349,
+    "min_placement_margin_m": -0.004644983913749456,
+    "max_placement_margin_m": -9.530634088150691e-06,
+    "mean_best_placement_margin_m": -0.00042717382893897593,
+    "std_best_placement_margin_m": 0.0007101304363459349,
+    "min_best_placement_margin_m": -0.004644983913749456,
+    "max_best_placement_margin_m": -9.530634088150691e-06,
+    "grasp_rate": 1.0,
+    "truncated_rate": 0.0
+  },
+  "failure_stats": {
+    "count": 0
+  },
+  "failure_by_cube": {
+    "cube_0": {
+      "episodes": 17,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "mean_final_cube_target_dist": 0.059644678498015684
+    },
+    "cube_1": {
+      "episodes": 17,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "mean_final_cube_target_dist": 0.059731470092254525
+    },
+    "cube_2": {
+      "episodes": 16,
+      "failures": 0,
+      "failure_rate": 0.0,
+      "mean_final_cube_target_dist": 0.05932792415842414
+    }
+  },
+  "worst_failures": [],
+  "all_failures": [],
+  "recommendations": [
+    "No failures observed in this rollout evaluation."
+  ]
+}
