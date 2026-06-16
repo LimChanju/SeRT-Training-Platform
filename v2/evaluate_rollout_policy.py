@@ -59,12 +59,38 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
     parser.add_argument("--phase-gate-max-hold", type=int, default=320)
     parser.add_argument(
+        "--early-close-on-grasp-gate",
+        action="store_true",
+        help="Close the gripper as soon as the grasp gate distance is reached during grasp approach.",
+    )
+    parser.add_argument(
+        "--fast-forward-grasp-gate",
+        action="store_true",
+        help="When early close triggers, jump the event clock to close_gripper to avoid lingering in approach.",
+    )
+    parser.add_argument(
         "--release-gate-dist",
         type=float,
         default=-1.0,
         help="Hold release until this cube-target distance. Negative disables release gating.",
     )
     parser.add_argument("--release-gate-max-hold", type=int, default=240)
+    parser.add_argument(
+        "--blend-bc-checkpoint",
+        default="",
+        help="Optional BC checkpoint to blend into the evaluated policy for selected controller events.",
+    )
+    parser.add_argument(
+        "--blend-bc-events",
+        default="",
+        help="Comma-separated controller events that should use the BC blend, e.g. '1,2,3'.",
+    )
+    parser.add_argument(
+        "--blend-bc-alpha",
+        type=float,
+        default=1.0,
+        help="Blend weight for --blend-bc-checkpoint. 1.0 means replace policy action with BC action.",
+    )
     success_group = parser.add_mutually_exclusive_group()
     success_group.add_argument(
         "--require-release-for-success",
@@ -129,6 +155,8 @@ class PolicyRunner:
         checkpoint = _torch_load(self.checkpoint_path, self.device)
         self.target_version = str(checkpoint.get("target_version", "task_space_action_v0"))
         self.action_version = str(checkpoint.get("action_version", "action_v0_task_space"))
+        self.policy_mode = str(checkpoint.get("policy_mode", "direct"))
+        self.residual_scale = float(checkpoint.get("residual_scale", 1.0))
         if self.target_version == "expert_arm_joint_action_v0":
             raise ValueError("evaluate_rollout_policy.py currently supports 5D task-space policies only.")
 
@@ -154,10 +182,20 @@ class PolicyRunner:
         self.model = MLPPolicy(self.obs_dim, action_dim, hidden_dims=hidden_dims).to(self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
+        self.base_model = None
+        self.base_obs_mean = None
+        self.base_obs_std = None
+        self.base_obs_dim = None
+        self.base_checkpoint_path = ""
+        if self.policy_mode == "residual":
+            self._load_residual_base(checkpoint)
         self.metadata = {
             "checkpoint": self.checkpoint_path,
             "target_version": self.target_version,
             "action_version": self.action_version,
+            "policy_mode": self.policy_mode,
+            "residual_scale": self.residual_scale,
+            "source_bc_checkpoint": self.base_checkpoint_path,
             "observation_version": str(checkpoint.get("observation_version", "")),
             "reward_version": str(checkpoint.get("reward_version", "")),
             "obs_dim": self.obs_dim,
@@ -168,25 +206,77 @@ class PolicyRunner:
         }
         print(
             f"[EvalRollout] loaded checkpoint={self.checkpoint_path} device={self.device} "
-            f"torch={torch.__version__} action={self.action_version} obs_dim={self.obs_dim}",
+            f"torch={torch.__version__} action={self.action_version} obs_dim={self.obs_dim} "
+            f"policy_mode={self.policy_mode}",
             flush=True,
         )
         if self.device.type == "cuda":
             print(f"[EvalRollout] cuda={torch.cuda.get_device_name(0)}", flush=True)
 
     def predict(self, obs: np.ndarray) -> np.ndarray:
+        residual_or_action = self._predict_model(
+            self.model,
+            obs,
+            self.obs_mean,
+            self.obs_std,
+            self.obs_dim,
+        )
+        if self.policy_mode == "residual":
+            if self.base_model is None or self.base_obs_mean is None or self.base_obs_std is None:
+                raise RuntimeError("Residual policy checkpoint is missing a loadable source BC checkpoint.")
+            base_action = self._predict_model(
+                self.base_model,
+                obs,
+                self.base_obs_mean,
+                self.base_obs_std,
+                int(self.base_obs_dim),
+            )
+            return clip_action(base_action + float(self.residual_scale) * residual_or_action)
+        return residual_or_action
+
+    def _predict_model(
+        self,
+        model: MLPPolicy,
+        obs: np.ndarray,
+        obs_mean: np.ndarray,
+        obs_std: np.ndarray,
+        obs_dim: int,
+    ) -> np.ndarray:
         obs_policy = np.asarray(obs, dtype=np.float32).reshape(1, -1)
-        obs_policy = _align_obs_dim(obs_policy, self.obs_dim)
-        obs_norm = (obs_policy - self.obs_mean) / np.maximum(self.obs_std, 1e-6)
+        obs_policy = _align_obs_dim(obs_policy, obs_dim)
+        obs_norm = (obs_policy - obs_mean) / np.maximum(obs_std, 1e-6)
         with torch.no_grad():
             tensor = torch.from_numpy(obs_norm.astype(np.float32)).to(self.device)
-            action = self.model(tensor).detach().cpu().numpy()[0]
+            action = model(tensor).detach().cpu().numpy()[0]
         if self.target_mean is not None and self.target_std is not None:
             action = (action.reshape(1, -1) * self.target_std + self.target_mean)[0]
             if self.target_min is not None and self.target_max is not None:
                 action = np.clip(action.reshape(1, -1), self.target_min, self.target_max)[0]
             return np.asarray(action, dtype=np.float32)
         return clip_action(action)
+
+    def _load_residual_base(self, checkpoint: dict[str, Any]) -> None:
+        source_path = str(checkpoint.get("source_bc_checkpoint", ""))
+        if not source_path:
+            raise ValueError("Residual checkpoint is missing source_bc_checkpoint metadata.")
+        self.base_checkpoint_path = _resolve_project_path(source_path)
+        base_checkpoint = _torch_load(self.base_checkpoint_path, self.device)
+        base_hidden_dims = tuple(int(value) for value in base_checkpoint.get("hidden_dims", (256, 256)))
+        self.base_obs_dim = int(base_checkpoint.get("obs_dim", OBSERVATION_DIM))
+        base_action_dim = int(base_checkpoint.get("action_dim", ACTION_DIM))
+        if base_action_dim != ACTION_DIM:
+            raise ValueError(
+                f"Residual base checkpoint action dim {base_action_dim} != runtime action dim {ACTION_DIM}"
+            )
+        self.base_obs_mean = _tensor_to_numpy(base_checkpoint["obs_mean"]).reshape(1, -1)
+        self.base_obs_std = _tensor_to_numpy(base_checkpoint["obs_std"]).reshape(1, -1)
+        self.base_model = MLPPolicy(
+            int(self.base_obs_dim),
+            base_action_dim,
+            hidden_dims=base_hidden_dims,
+        ).to(self.device)
+        self.base_model.load_state_dict(base_checkpoint["model_state_dict"])
+        self.base_model.eval()
 
 
 def _select_device(requested: str):
@@ -238,6 +328,13 @@ def _run() -> None:
     np.random.seed(args.seed)
     started_at = time.time()
     runner = PolicyRunner(args.checkpoint, args.device)
+    blend_events = _parse_event_set(args.blend_bc_events)
+    blend_runner = (
+        PolicyRunner(args.blend_bc_checkpoint, args.device)
+        if args.blend_bc_checkpoint and blend_events
+        else None
+    )
+    blend_alpha = float(np.clip(args.blend_bc_alpha, 0.0, 1.0))
     release_gate_dist = None if args.release_gate_dist < 0.0 else float(args.release_gate_dist)
     env = IsaacPickPlaceEnv(
         PickPlaceEnvConfig(
@@ -249,6 +346,8 @@ def _run() -> None:
             gripper_mode=args.gripper_mode,
             phase_gate_close_dist=args.phase_gate_close_dist,
             phase_gate_max_hold=args.phase_gate_max_hold,
+            early_close_on_grasp_gate=args.early_close_on_grasp_gate,
+            fast_forward_grasp_gate=args.fast_forward_grasp_gate,
             release_gate_dist=release_gate_dist,
             release_gate_max_hold=args.release_gate_max_hold,
             require_release_for_success=args.require_release_for_success,
@@ -276,9 +375,14 @@ def _run() -> None:
             reward_components_total: dict[str, float] = {}
             terminated = False
             truncated = False
+            bc_blend_count = 0
 
             for _ in range(args.max_steps):
                 action = runner.predict(np.asarray(obs, dtype=np.float32))
+                if blend_runner is not None and int(info["controller_event"]) in blend_events:
+                    bc_action = blend_runner.predict(np.asarray(obs, dtype=np.float32))
+                    action = clip_action((1.0 - blend_alpha) * action + blend_alpha * bc_action)
+                    bc_blend_count += 1
                 obs, reward, terminated, truncated, info = env.step(action)
                 total_reward += float(reward)
                 min_cube_target_dist = min(min_cube_target_dist, float(info["cube_target_dist"]))
@@ -308,6 +412,7 @@ def _run() -> None:
                 "final_controller_event": int(info["controller_event"]),
                 "final_controller_t": float(info["controller_t"]),
                 "phase_hold_steps": int(info["phase_hold_steps"]),
+                "bc_blend_count": int(bc_blend_count),
                 "reward_components_total": reward_components_total,
             }
             rows.append(row)
@@ -343,11 +448,19 @@ def _run() -> None:
             "success_dist": args.success_dist,
             "phase_gate_close_dist": args.phase_gate_close_dist,
             "phase_gate_max_hold": args.phase_gate_max_hold,
+            "early_close_on_grasp_gate": args.early_close_on_grasp_gate,
+            "fast_forward_grasp_gate": args.fast_forward_grasp_gate,
             "release_gate_dist": release_gate_dist,
             "release_gate_max_hold": args.release_gate_max_hold,
             "require_release_for_success": args.require_release_for_success,
+            "blend_bc_checkpoint": _resolve_project_path(args.blend_bc_checkpoint)
+            if args.blend_bc_checkpoint
+            else "",
+            "blend_bc_events": sorted(blend_events),
+            "blend_bc_alpha": blend_alpha,
         },
         "policy": runner.metadata,
+        "blend_policy": blend_runner.metadata if blend_runner is not None else {},
         "summary": summary,
         "episodes": rows,
     }
@@ -397,6 +510,16 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _parse_event_set(text: str) -> set[int]:
+    events: set[int] = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        events.add(int(part))
+    return events
+
+
 def _write_json(path: str, payload: dict[str, Any]) -> None:
     if not path:
         return
@@ -427,6 +550,7 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "final_controller_event",
         "final_controller_t",
         "phase_hold_steps",
+        "bc_blend_count",
     ]
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)

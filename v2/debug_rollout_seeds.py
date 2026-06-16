@@ -53,6 +53,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
     parser.add_argument("--phase-gate-max-hold", type=int, default=320)
     parser.add_argument(
+        "--early-close-on-grasp-gate",
+        action="store_true",
+        help="Close the gripper as soon as the grasp gate distance is reached during grasp approach.",
+    )
+    parser.add_argument(
+        "--fast-forward-grasp-gate",
+        action="store_true",
+        help="When early close triggers, jump the event clock to close_gripper to avoid lingering in approach.",
+    )
+    parser.add_argument(
+        "--release-gate-dist",
+        type=float,
+        default=-1.0,
+        help="Hold release until this cube-target distance. Negative disables release gating.",
+    )
+    parser.add_argument("--release-gate-max-hold", type=int, default=240)
+    parser.add_argument(
         "--output-csv",
         default=os.path.join(SCRIPT_DIR, "eval_results", "debug_rollout_seeds_steps.csv"),
         help="Step-level CSV output.",
@@ -150,12 +167,15 @@ def _run() -> None:
             gripper_mode=args.gripper_mode,
             phase_gate_close_dist=args.phase_gate_close_dist,
             phase_gate_max_hold=args.phase_gate_max_hold,
+            early_close_on_grasp_gate=args.early_close_on_grasp_gate,
+            fast_forward_grasp_gate=args.fast_forward_grasp_gate,
+            release_gate_dist=None if args.release_gate_dist < 0.0 else float(args.release_gate_dist),
+            release_gate_max_hold=args.release_gate_max_hold,
             observation_mode="flat",
             seed=min(spec["seed"] for spec in episode_specs) if episode_specs else 0,
             render=args.render,
         )
     )
-
     rows: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     try:
@@ -193,6 +213,10 @@ def _run() -> None:
                 "success_dist": args.success_dist,
                 "phase_gate_close_dist": args.phase_gate_close_dist,
                 "phase_gate_max_hold": args.phase_gate_max_hold,
+                "early_close_on_grasp_gate": args.early_close_on_grasp_gate,
+                "fast_forward_grasp_gate": args.fast_forward_grasp_gate,
+                "release_gate_dist": None if args.release_gate_dist < 0.0 else float(args.release_gate_dist),
+                "release_gate_max_hold": args.release_gate_max_hold,
                 "gripper_mode": args.gripper_mode,
             },
             "summaries": summaries,

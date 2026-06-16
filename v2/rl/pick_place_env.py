@@ -37,6 +37,7 @@ class PickPlaceEnvConfig:
     phase_gate_close_dist: float = 0.075
     phase_gate_max_hold: int = 320
     early_close_on_grasp_gate: bool = False
+    fast_forward_grasp_gate: bool = False
     release_gate_dist: float | None = None
     release_gate_max_hold: int = 240
     require_release_for_success: bool = False
@@ -276,6 +277,10 @@ class IsaacPickPlaceEnv:
                     release_dist=self.config.release_dist,
                 )
             ):
+                if self.config.fast_forward_grasp_gate:
+                    self.phase_event = 3
+                    self.phase_t = 0.0
+                    self.phase_hold_steps = 0
                 self.gripper_closed = True
                 return "close"
             self.gripper_closed = event_gripper_command(self.phase_event, self.gripper_closed)

@@ -28,6 +28,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to collect.")
     parser.add_argument("--max-steps", type=int, default=1800, help="Maximum steps per episode.")
     parser.add_argument("--seed", type=int, default=7, help="Numpy random seed.")
+    parser.add_argument(
+        "--episode-seeds",
+        default="",
+        help=(
+            "Optional comma-separated episode:seed pairs. When set, each pair reproduces "
+            "the same cube randomization seed and active-cube assignment used by rollout "
+            "evaluation, where active_cube_index = episode %% 3."
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing HDF5 file.")
     parser.add_argument("--render", action="store_true", help="Render while collecting.")
     parser.add_argument(
@@ -248,6 +257,27 @@ def _has_grasped_cube(robot, cube, gripper_center: np.ndarray | None) -> bool:
     return width < 0.065 and dist < 0.11
 
 
+def _parse_episode_specs() -> list[dict[str, int]]:
+    specs: list[dict[str, int]] = []
+    for part in args.episode_seeds.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError("--episode-seeds entries must use episode:seed format")
+        episode_text, seed_text = part.split(":", 1)
+        episode = int(episode_text.strip())
+        seed = int(seed_text.strip())
+        specs.append(
+            {
+                "episode": episode,
+                "seed": seed,
+                "active_cube_index": episode % 3,
+            }
+        )
+    return specs
+
+
 def _build_obs(
     robot,
     cube,
@@ -282,6 +312,7 @@ def _build_obs(
 
 def _collect() -> None:
     np.random.seed(args.seed)
+    episode_specs = _parse_episode_specs()
     world = create_world()
     (
         cubes,
@@ -305,11 +336,23 @@ def _collect() -> None:
     controller = create_pick_controller(panda, end_effector_initial_height=table_top_z + 0.2)
 
     with TrajectoryRecorder(args.output, overwrite=args.overwrite) as recorder:
+        total_episodes = len(episode_specs) if episode_specs else args.episodes
         print(
-            f"[ExpertCollect] output={recorder.path} episodes={args.episodes} "
-            f"max_steps={args.max_steps} render={args.render}"
+            f"[ExpertCollect] output={recorder.path} episodes={total_episodes} "
+            f"max_steps={args.max_steps} render={args.render} "
+            f"targeted={bool(episode_specs)}"
         )
-        for episode_idx in range(args.episodes):
+        for local_episode_idx in range(total_episodes):
+            spec = episode_specs[local_episode_idx] if episode_specs else None
+            episode_idx = int(spec["episode"]) if spec is not None else local_episode_idx
+            episode_seed = int(spec["seed"]) if spec is not None else args.seed
+            active_cube_index = (
+                int(spec["active_cube_index"])
+                if spec is not None
+                else episode_idx % len(pick_targets)
+            )
+            if spec is not None:
+                np.random.seed(episode_seed)
             randomize_cubes(
                 cubes,
                 table_xy,
@@ -321,15 +364,19 @@ def _collect() -> None:
             world.reset()
             world.play()
             controller.reset(end_effector_initial_height=table_top_z + 0.2)
-            active_cube = pick_targets[episode_idx % len(pick_targets)]
+            active_cube = pick_targets[active_cube_index % len(pick_targets)]
             place_target.set_world_pose(position=place_pos)
 
             recorder.start_episode(
                 {
                     "collector": "PickPlaceController",
                     "episode_index": episode_idx,
+                    "local_episode_index": local_episode_idx,
                     "active_cube": active_cube.name,
-                    "seed": args.seed,
+                    "active_cube_index": active_cube_index,
+                    "seed": episode_seed,
+                    "base_seed": args.seed,
+                    "targeted_failure_seed": bool(spec is not None),
                 }
             )
             success = False
@@ -416,7 +463,8 @@ def _collect() -> None:
                 },
             )
             print(
-                f"[ExpertCollect] episode={episode_idx:04d} success={success} "
+                f"[ExpertCollect] episode={episode_idx:04d} local={local_episode_idx:04d} "
+                f"seed={episode_seed} active_cube={active_cube.name} success={success} "
                 f"steps={steps} group={group_name}"
             )
 

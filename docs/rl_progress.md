@@ -272,6 +272,96 @@ Current next target:
 - improve the two remaining `grasp_never_established` seeds without destabilizing release placement,
 - prefer reward/policy improvements over hard-coded early close unless the full 50-episode evaluation improves.
 
+### Remaining PPO Failure Investigation
+
+The remaining `ppo_pick_place_v2.pt` release-gate failures are:
+
+```text
+episode=27 seed=38 active_cube=cube_0 category=grasp_never_established
+episode=45 seed=56 active_cube=cube_0 category=grasp_never_established
+```
+
+BC-v1 succeeds on both same episode/seed pairs with release gating:
+
+```text
+seed=38 success=True steps=633 final_dist=0.0594 first_grasp_step=327
+seed=56 success=True steps=626 final_dist=0.0597 first_grasp_step=327
+```
+
+This means the failure is not caused by missing expert capability in the BC data. PPO fine-tuning drifts away from the BC grasp approach in a way that is small on most episodes but catastrophic on the two held-out seeds. In the raw PPO-v2 failures, event 1-3 continues until about step 976 and then the controller closes after the end effector has already moved away from the cube. The BC policy closes around step 327 on the same seeds.
+
+Tested fixes:
+
+```text
+targeted expert append:
+  fixed seed 38/56 locally, but full 50-episode BC eval dropped to 44/50.
+
+early close + fast-forward grasp gate:
+  establishes grasp on seed 38/56, but creates placement/release regressions.
+
+offline BC anchor loss during PPO:
+  smoke passed, but best 50-episode eval was 44/50, below PPO-v2.
+
+PPO-v2 with BC action blended only on events 1,2,3:
+  47/50, below PPO-v2; it fixed neither the system cleanly nor the phase coupling.
+```
+
+Current conclusion: the best validated checkpoint remains `ppo_pick_place_v2.pt` with release gating at `48/50`. The remaining issue is phase-coupled PPO drift, not simply data count or a single gripper threshold. The next substantial fix should change the training objective or environment interface so PPO cannot improve reward by slightly distorting the expert phase timing. Candidate approaches:
+
+- train/evaluate a phase-conditioned residual policy where BC remains the nominal controller and PPO outputs only a small residual,
+- add a trust-region or KL/MSE constraint evaluated on a fixed validation anchor set, not only on current rollout states,
+- separate grasp and transport policies or freeze grasp-phase behavior during PPO while training only later phases,
+- add a rollout-time phase safety monitor only as an ablation, not as the primary RL result.
+
+### Residual PPO First Pass
+
+Implemented residual PPO support:
+
+```text
+env_action = clip(BC_action + residual_scale * PPO_residual)
+```
+
+The residual actor starts near zero while the frozen BC actor provides the nominal pick-and-place action. This prevents PPO from directly overwriting the entire 5D controller-target action.
+
+First residual run:
+
+```text
+checkpoint: ppo_pick_place_v5_residual_best.pt
+residual_scale: 0.1
+log_std_init: -4.5
+bc_action_coef: 0.1
+max_bc_action_mse: 0.01
+eval: 50 episodes, seed=11, release_gate_dist=0.06, release_gate_max_hold=360
+result: 47/50 success = 0.94
+grasp_rate: 1.0
+mean_final_cube_target_dist: 0.0605 m
+```
+
+Compared with PPO-v2:
+
+```text
+PPO-v2 + release gate:
+  48/50 success
+  grasp_rate=0.96
+  mean_final_dist=0.0819 m
+  failures are large no-grasp failures.
+
+Residual PPO v5:
+  47/50 success
+  grasp_rate=1.00
+  mean_final_dist=0.0605 m
+  failures are small release/placement misses after grasp.
+```
+
+Increasing `release_gate_max_hold` from 360 to 720 did not help; it dropped to 46/50. The residual direction is still promising because it removes the catastrophic no-grasp failures, but the next improvement should target release/placement precision instead of grasp stability.
+
+Next candidate:
+
+- keep residual PPO,
+- add placement/release-focused training or evaluation constraints,
+- consider requiring success after release for the final HRI-safe policy,
+- tune residual scale and reward around event 5-7 rather than event 1-3.
+
 ### BC vs PPO Rollout Comparison
 
 Added `v2/compare_rollout_analyses.py` to compare rollout JSON files and failure-analysis JSON files.

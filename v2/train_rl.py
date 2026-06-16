@@ -39,6 +39,17 @@ def _parse_args() -> argparse.Namespace:
         help="Output actor checkpoint. It is compatible with evaluate_rollout_policy.py.",
     )
     parser.add_argument(
+        "--best-output",
+        default="",
+        help="Optional path for the best actor checkpoint. Empty uses '<output stem>_best.pt'.",
+    )
+    parser.add_argument(
+        "--best-min-episodes",
+        type=int,
+        default=5,
+        help="Do not save a best checkpoint until at least this many episodes have completed.",
+    )
+    parser.add_argument(
         "--bc-checkpoint",
         default=os.path.join(SCRIPT_DIR, "policies", "bc_pick_place_v1_100eps.pt"),
         help="Optional BC checkpoint used to initialize the actor and observation normalization.",
@@ -50,6 +61,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--render", action="store_true", help="Render the training window.")
     parser.add_argument("--hidden-dims", default="256,256")
+    parser.add_argument(
+        "--policy-mode",
+        choices=("direct", "residual"),
+        default="direct",
+        help="direct learns the full action; residual learns a correction added to the BC action.",
+    )
+    parser.add_argument(
+        "--residual-scale",
+        type=float,
+        default=0.1,
+        help="Multiplier for residual policy output when --policy-mode residual is used.",
+    )
     parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -69,6 +92,39 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=0.002,
         help="Reject an actor update if it drifts farther than this MSE from the loaded BC actor.",
+    )
+    parser.add_argument(
+        "--bc-anchor-data",
+        default="",
+        help=(
+            "Optional HDF5 expert dataset used as an offline BC anchor during PPO. "
+            "This constrains the actor on expert states, not only on the current rollout."
+        ),
+    )
+    parser.add_argument(
+        "--bc-anchor-target-dataset",
+        default="expert_target_action",
+        choices=("expert_task_action", "expert_target_action"),
+        help="Action dataset to use for --bc-anchor-data.",
+    )
+    parser.add_argument(
+        "--bc-anchor-coef",
+        type=float,
+        default=0.0,
+        help="MSE coefficient for offline expert anchor batches. Zero disables it.",
+    )
+    parser.add_argument("--bc-anchor-batch-size", type=int, default=256)
+    parser.add_argument(
+        "--bc-anchor-grasp-weight",
+        type=float,
+        default=1.0,
+        help="Extra sample weight for controller events 1-3 in the offline anchor loss.",
+    )
+    parser.add_argument(
+        "--bc-anchor-transport-weight",
+        type=float,
+        default=1.0,
+        help="Extra sample weight for controller events 4-6 in the offline anchor loss.",
     )
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument(
@@ -108,6 +164,16 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(require_release_for_success=False)
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
     parser.add_argument("--phase-gate-max-hold", type=int, default=320)
+    parser.add_argument(
+        "--early-close-on-grasp-gate",
+        action="store_true",
+        help="Close the gripper as soon as the grasp gate distance is reached during grasp approach.",
+    )
+    parser.add_argument(
+        "--fast-forward-grasp-gate",
+        action="store_true",
+        help="When early close triggers, jump the event clock to close_gripper to avoid lingering in approach.",
+    )
     parser.add_argument("--save-every-updates", type=int, default=5)
     return parser.parse_args()
 
@@ -153,6 +219,7 @@ from rl import (  # noqa: E402
     REWARD_VERSION,
     IsaacPickPlaceEnv,
     PickPlaceEnvConfig,
+    observation_slices,
 )
 from rl.policies import MLPPolicy  # noqa: E402
 
@@ -226,6 +293,8 @@ def _train() -> None:
             gripper_mode="event",
             phase_gate_close_dist=args.phase_gate_close_dist,
             phase_gate_max_hold=args.phase_gate_max_hold,
+            early_close_on_grasp_gate=args.early_close_on_grasp_gate,
+            fast_forward_grasp_gate=args.fast_forward_grasp_gate,
             release_gate_dist=release_gate_dist,
             release_gate_max_hold=args.release_gate_max_hold,
             require_release_for_success=args.require_release_for_success,
@@ -241,16 +310,28 @@ def _train() -> None:
         hidden_dims=hidden_dims,
         log_std_init=args.log_std_init,
     ).to(device)
-    obs_mean, obs_std, bc_meta = _maybe_load_bc_checkpoint(model, args.bc_checkpoint, device)
-    bc_actor = _frozen_bc_actor(model, bc_meta) if bc_meta.get("loaded_actor") else None
+    obs_mean, obs_std, bc_meta = _maybe_load_bc_checkpoint(
+        model,
+        args.bc_checkpoint,
+        device,
+        load_actor=args.policy_mode == "direct",
+    )
+    bc_actor = _load_frozen_bc_actor(args.bc_checkpoint, hidden_dims, device)
+    if args.policy_mode == "residual":
+        if bc_actor is None:
+            raise RuntimeError("--policy-mode residual requires a valid --bc-checkpoint")
+        _zero_policy_output(model.actor)
+    bc_anchor = _load_bc_anchor_dataset(args.bc_anchor_data, obs_mean, obs_std, device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     print(
         f"[TrainPPO] total_steps={args.total_steps} rollout_steps={args.rollout_steps} "
         f"device={device} torch={torch.__version__} reward={REWARD_VERSION} "
         f"reward_scale={args.reward_scale} log_std_init={args.log_std_init} "
+        f"policy_mode={args.policy_mode} residual_scale={args.residual_scale} "
         f"release_gate_dist={release_gate_dist} bc_action_coef={args.bc_action_coef} "
-        f"max_bc_action_mse={args.max_bc_action_mse}",
+        f"max_bc_action_mse={args.max_bc_action_mse} "
+        f"bc_anchor_coef={args.bc_anchor_coef}",
         flush=True,
     )
     if device.type == "cuda":
@@ -258,6 +339,12 @@ def _train() -> None:
     print(f"[TrainPPO] output={output_path}", flush=True)
     if bc_meta:
         print(f"[TrainPPO] initialized actor from BC checkpoint: {bc_meta['path']}", flush=True)
+    if bc_anchor is not None:
+        print(
+            f"[TrainPPO] offline BC anchor loaded: {bc_anchor['path']} "
+            f"transitions={bc_anchor['obs'].shape[0]} target={args.bc_anchor_target_dataset}",
+            flush=True,
+        )
 
     obs, info = env.reset(seed=args.seed)
     episode_return = 0.0
@@ -267,6 +354,8 @@ def _train() -> None:
     episode_stats: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
     last_done = False
+    best_path = _resolve_best_output_path(args.best_output, output_path)
+    best_metric = {"success_rate": -1.0, "return": -float("inf"), "update": 0}
 
     try:
         while total_steps < args.total_steps:
@@ -278,6 +367,7 @@ def _train() -> None:
                 info,
                 obs_mean,
                 obs_std,
+                bc_actor,
                 device,
                 remaining_steps=args.total_steps - total_steps,
                 episode_return=episode_return,
@@ -314,6 +404,7 @@ def _train() -> None:
                 obs_mean,
                 obs_std,
                 bc_actor,
+                bc_anchor,
                 device,
             )
             recent = episode_stats[-20:]
@@ -326,23 +417,77 @@ def _train() -> None:
                 **metrics,
             }
             history.append(update_record)
+            if _is_better_checkpoint(update_record, best_metric, args.best_min_episodes):
+                best_metric = {
+                    "success_rate": update_record["recent_success_rate"],
+                    "return": update_record["recent_return"],
+                    "update": update_record["update"],
+                }
+                _save_checkpoint(
+                    best_path,
+                    model,
+                    obs_mean,
+                    obs_std,
+                    hidden_dims,
+                    history,
+                    episode_stats,
+                    bc_meta,
+                    best_metric=best_metric,
+                )
+                print(
+                    f"[TrainPPO] saved best checkpoint: {best_path} "
+                    f"update={best_metric['update']} "
+                    f"recent_success={best_metric['success_rate']:.3f} "
+                    f"recent_return={best_metric['return']:.2f}",
+                    flush=True,
+                )
             print(
                 f"[TrainPPO] update={update_idx:04d} steps={total_steps} "
                 f"episodes={len(episode_stats)} recent_success={update_record['recent_success_rate']:.3f} "
                 f"recent_return={update_record['recent_return']:.2f} "
                 f"pi={metrics['policy_loss']:.4f} vf={metrics['value_loss']:.4f} "
-                f"bc={metrics['bc_action_loss']:.6f} reject={int(metrics['update_rejected'])} "
+                f"bc={metrics['bc_action_loss']:.6f} "
+                f"anchor={metrics['bc_anchor_loss']:.6f} "
+                f"reject={int(metrics['update_rejected'])} "
                 f"entropy={metrics['entropy']:.3f}",
                 flush=True,
             )
             if args.save_every_updates > 0 and update_idx % args.save_every_updates == 0:
-                _save_checkpoint(output_path, model, obs_mean, obs_std, hidden_dims, history, episode_stats, bc_meta)
+                _save_checkpoint(
+                    output_path,
+                    model,
+                    obs_mean,
+                    obs_std,
+                    hidden_dims,
+                    history,
+                    episode_stats,
+                    bc_meta,
+                    best_metric=best_metric,
+                )
     finally:
         env.close()
 
-    _save_checkpoint(output_path, model, obs_mean, obs_std, hidden_dims, history, episode_stats, bc_meta)
+    _save_checkpoint(
+        output_path,
+        model,
+        obs_mean,
+        obs_std,
+        hidden_dims,
+        history,
+        episode_stats,
+        bc_meta,
+        best_metric=best_metric,
+    )
     _save_history(output_path, history, episode_stats, started_at)
     print(f"[TrainPPO] saved checkpoint: {output_path}", flush=True)
+    if best_metric["update"] > 0:
+        print(
+            f"[TrainPPO] best checkpoint: {best_path} "
+            f"update={best_metric['update']} "
+            f"recent_success={best_metric['success_rate']:.3f} "
+            f"recent_return={best_metric['return']:.2f}",
+            flush=True,
+        )
 
 
 def _collect_rollout(
@@ -352,6 +497,7 @@ def _collect_rollout(
     info: dict[str, Any],
     obs_mean: np.ndarray,
     obs_std: np.ndarray,
+    bc_actor: MLPPolicy | None,
     device: torch.device,
     *,
     remaining_steps: int,
@@ -370,12 +516,19 @@ def _collect_rollout(
     steps_to_collect = min(int(args.rollout_steps), int(remaining_steps))
 
     for _ in range(steps_to_collect):
-        action, log_prob, value = _sample_action(model, obs, obs_mean, obs_std, device)
-        next_obs, reward, terminated, truncated, next_info = env.step(action)
+        train_action, env_action, log_prob, value = _sample_action(
+            model,
+            obs,
+            obs_mean,
+            obs_std,
+            bc_actor,
+            device,
+        )
+        next_obs, reward, terminated, truncated, next_info = env.step(env_action)
         done = bool(terminated or truncated)
 
         obs_buf.append(np.asarray(obs, dtype=np.float32))
-        action_buf.append(np.asarray(action, dtype=np.float32))
+        action_buf.append(np.asarray(train_action, dtype=np.float32))
         log_prob_buf.append(float(log_prob))
         reward_buf.append(float(reward) * float(args.reward_scale))
         done_buf.append(float(done))
@@ -433,6 +586,7 @@ def _ppo_update(
     obs_mean: np.ndarray,
     obs_std: np.ndarray,
     bc_actor: MLPPolicy | None,
+    bc_anchor: dict[str, Any] | None,
     device: torch.device,
 ) -> dict[str, float]:
     obs_norm = _normalize_obs(obs_np, obs_mean, obs_std)
@@ -445,7 +599,13 @@ def _ppo_update(
 
     n = obs_tensor.shape[0]
     actor_before = _clone_actor_state(model) if bc_actor is not None and args.max_bc_action_mse > 0.0 else None
-    losses = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "bc_action_loss": 0.0}
+    losses = {
+        "policy_loss": 0.0,
+        "value_loss": 0.0,
+        "entropy": 0.0,
+        "bc_action_loss": 0.0,
+        "bc_anchor_loss": 0.0,
+    }
     updates = 0
     for _ in range(args.update_epochs):
         order = torch.randperm(n, device=device)
@@ -460,13 +620,21 @@ def _ppo_update(
             entropy_mean = entropy.mean()
             bc_action_loss = torch.zeros((), device=device)
             if bc_actor is not None and args.bc_action_coef > 0.0:
-                with torch.no_grad():
-                    bc_action = bc_actor(obs_tensor[idx])
-                bc_action_loss = torch.mean((model.actor(obs_tensor[idx]) - bc_action) ** 2)
+                policy_mean = model.actor(obs_tensor[idx])
+                if args.policy_mode == "residual":
+                    bc_action_loss = torch.mean(policy_mean**2)
+                else:
+                    with torch.no_grad():
+                        bc_action = bc_actor(obs_tensor[idx])
+                    bc_action_loss = torch.mean((policy_mean - bc_action) ** 2)
+            bc_anchor_loss = torch.zeros((), device=device)
+            if bc_anchor is not None and args.bc_anchor_coef > 0.0:
+                bc_anchor_loss = _sample_bc_anchor_loss(model, bc_actor, bc_anchor, device)
             loss = (
                 policy_loss
                 + args.value_coef * value_loss
                 + args.bc_action_coef * bc_action_loss
+                + args.bc_anchor_coef * bc_anchor_loss
                 - args.entropy_coef * entropy_mean
             )
 
@@ -479,18 +647,19 @@ def _ppo_update(
             losses["value_loss"] += float(value_loss.item())
             losses["entropy"] += float(entropy_mean.item())
             losses["bc_action_loss"] += float(bc_action_loss.item())
+            losses["bc_anchor_loss"] += float(bc_anchor_loss.item())
             updates += 1
 
     metrics = {key: value / max(1, updates) for key, value in losses.items()}
     metrics["update_rejected"] = 0.0
     if bc_actor is not None and args.max_bc_action_mse > 0.0:
-        final_bc_loss = _actor_bc_mse(model, bc_actor, obs_tensor)
+        final_bc_loss = _actor_constraint_mse(model, bc_actor, obs_tensor)
         metrics["bc_action_loss"] = final_bc_loss
         if final_bc_loss > float(args.max_bc_action_mse):
             if actor_before is not None:
                 model.actor.load_state_dict(actor_before)
             metrics["update_rejected"] = 1.0
-            metrics["bc_action_loss"] = _actor_bc_mse(model, bc_actor, obs_tensor)
+            metrics["bc_action_loss"] = _actor_constraint_mse(model, bc_actor, obs_tensor)
     return metrics
 
 
@@ -498,12 +667,106 @@ def _clone_actor_state(model: ActorCritic) -> dict[str, torch.Tensor]:
     return {key: value.detach().clone() for key, value in model.actor.state_dict().items()}
 
 
-def _actor_bc_mse(model: ActorCritic, bc_actor: MLPPolicy, obs_tensor: torch.Tensor) -> float:
+def _actor_constraint_mse(model: ActorCritic, bc_actor: MLPPolicy, obs_tensor: torch.Tensor) -> float:
     with torch.no_grad():
         policy_action = model.actor(obs_tensor)
-        bc_action = bc_actor(obs_tensor)
-        loss = torch.mean((policy_action - bc_action) ** 2)
+        if args.policy_mode == "residual":
+            loss = torch.mean(policy_action**2)
+        else:
+            bc_action = bc_actor(obs_tensor)
+            loss = torch.mean((policy_action - bc_action) ** 2)
     return float(loss.detach().cpu().item())
+
+
+def _load_bc_anchor_dataset(
+    path: str,
+    obs_mean: np.ndarray,
+    obs_std: np.ndarray,
+    device: torch.device,
+) -> dict[str, Any] | None:
+    if not path or args.bc_anchor_coef <= 0.0:
+        return None
+    import h5py
+
+    resolved_path = _resolve_project_path(path)
+    obs_chunks = []
+    action_chunks = []
+    action_path = f"actions/{args.bc_anchor_target_dataset}"
+    with h5py.File(resolved_path, "r") as h5:
+        episodes = h5["episodes"]
+        for episode_name in sorted(episodes.keys()):
+            group = episodes[episode_name]
+            if action_path not in group:
+                raise KeyError(f"{episode_name}: missing dataset '{action_path}'")
+            obs = np.asarray(group["obs_policy"], dtype=np.float32)
+            actions = np.asarray(group[action_path], dtype=np.float32)
+            if obs.shape[0] != actions.shape[0]:
+                raise ValueError(
+                    f"{episode_name}: obs/action length mismatch "
+                    f"{obs.shape[0]} != {actions.shape[0]}"
+                )
+            obs_chunks.append(obs)
+            action_chunks.append(actions)
+    if not obs_chunks:
+        raise ValueError(f"No episodes found in BC anchor data: {resolved_path}")
+
+    obs_all = np.concatenate(obs_chunks, axis=0).astype(np.float32)
+    actions_all = np.clip(np.concatenate(action_chunks, axis=0).astype(np.float32), -1.0, 1.0)
+    weights = _bc_anchor_sample_weights(obs_all)
+    obs_norm = _normalize_obs(obs_all, obs_mean, obs_std)
+    return {
+        "path": resolved_path,
+        "obs": torch.from_numpy(obs_norm).to(device),
+        "actions": torch.from_numpy(actions_all).to(device),
+        "weights": torch.from_numpy(weights).to(device),
+    }
+
+
+def _bc_anchor_sample_weights(obs_np: np.ndarray) -> np.ndarray:
+    weights = np.ones((obs_np.shape[0],), dtype=np.float32)
+    slices = observation_slices()
+    event_slice = slices.get("controller_event")
+    if event_slice is None:
+        return weights
+    events = np.asarray(obs_np[:, event_slice], dtype=np.float32)
+    if events.shape[1] < 7:
+        return weights
+    event_idx = np.argmax(events, axis=1)
+    grasp_mask = np.isin(event_idx, [1, 2, 3])
+    transport_mask = np.isin(event_idx, [4, 5, 6])
+    weights[grasp_mask] = float(args.bc_anchor_grasp_weight)
+    weights[transport_mask] = np.maximum(
+        weights[transport_mask],
+        float(args.bc_anchor_transport_weight),
+    )
+    return np.maximum(weights, 1e-6).astype(np.float32)
+
+
+def _sample_bc_anchor_loss(
+    model: ActorCritic,
+    bc_actor: MLPPolicy | None,
+    bc_anchor: dict[str, Any],
+    device: torch.device,
+) -> torch.Tensor:
+    obs = bc_anchor["obs"]
+    actions = bc_anchor["actions"]
+    weights = bc_anchor["weights"]
+    n = int(obs.shape[0])
+    batch_size = max(1, min(int(args.bc_anchor_batch_size), n))
+    idx = torch.randint(0, n, (batch_size,), device=device)
+    obs_batch = obs.index_select(0, idx)
+    pred = model.actor(obs_batch)
+    if args.policy_mode == "residual":
+        if bc_actor is None:
+            return torch.zeros((), device=device)
+        with torch.no_grad():
+            base_action = bc_actor(obs_batch)
+        pred = torch.clamp(base_action + float(args.residual_scale) * pred, -1.0, 1.0)
+    target = actions.index_select(0, idx)
+    sample_weights = weights.index_select(0, idx)
+    per_sample_loss = torch.mean((pred - target) ** 2, dim=1)
+    weighted_loss = per_sample_loss * sample_weights
+    return weighted_loss.sum() / torch.clamp(sample_weights.sum(), min=1e-6)
 
 
 def _sample_action(
@@ -511,14 +774,26 @@ def _sample_action(
     obs: np.ndarray,
     obs_mean: np.ndarray,
     obs_std: np.ndarray,
+    bc_actor: MLPPolicy | None,
     device: torch.device,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, np.ndarray, float, float]:
     obs_norm = _normalize_obs(np.asarray(obs, dtype=np.float32).reshape(1, -1), obs_mean, obs_std)
     with torch.no_grad():
         tensor = torch.from_numpy(obs_norm).to(device)
-        action, log_prob, value = model.act(tensor)
+        train_action, log_prob, value = model.act(tensor)
+        env_action = train_action
+        if args.policy_mode == "residual":
+            if bc_actor is None:
+                raise RuntimeError("Residual policy mode requires a loaded BC actor.")
+            base_action = bc_actor(tensor)
+            env_action = torch.clamp(
+                base_action + float(args.residual_scale) * train_action,
+                -1.0,
+                1.0,
+            )
     return (
-        action.detach().cpu().numpy()[0].astype(np.float32),
+        train_action.detach().cpu().numpy()[0].astype(np.float32),
+        env_action.detach().cpu().numpy()[0].astype(np.float32),
         float(log_prob.detach().cpu().numpy()[0]),
         float(value.detach().cpu().numpy()[0]),
     )
@@ -562,6 +837,8 @@ def _maybe_load_bc_checkpoint(
     model: ActorCritic,
     checkpoint_path: str,
     device: torch.device,
+    *,
+    load_actor: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     obs_mean = np.zeros((1, OBSERVATION_DIM), dtype=np.float32)
     obs_std = np.ones((1, OBSERVATION_DIM), dtype=np.float32)
@@ -575,13 +852,16 @@ def _maybe_load_bc_checkpoint(
 
     checkpoint = _torch_load(path, device)
     loaded_actor = False
-    try:
-        model.actor.load_state_dict(checkpoint["model_state_dict"])
-    except RuntimeError as exc:
-        print(f"[TrainPPO] BC actor load skipped due to shape mismatch: {exc}", flush=True)
+    if load_actor:
+        try:
+            model.actor.load_state_dict(checkpoint["model_state_dict"])
+        except RuntimeError as exc:
+            print(f"[TrainPPO] BC actor load skipped due to shape mismatch: {exc}", flush=True)
+        else:
+            loaded_actor = True
+            print("[TrainPPO] BC actor weights loaded.", flush=True)
     else:
-        loaded_actor = True
-        print("[TrainPPO] BC actor weights loaded.", flush=True)
+        print("[TrainPPO] BC actor kept frozen as residual base; PPO actor starts as residual.", flush=True)
 
     if "obs_mean" in checkpoint and "obs_std" in checkpoint:
         obs_mean = _tensor_to_numpy(checkpoint["obs_mean"]).reshape(1, -1)
@@ -592,16 +872,36 @@ def _maybe_load_bc_checkpoint(
     return obs_mean.astype(np.float32), obs_std.astype(np.float32), {"path": path, "loaded_actor": loaded_actor}
 
 
-def _frozen_bc_actor(model: ActorCritic, bc_meta: dict[str, Any]) -> MLPPolicy | None:
-    if not bc_meta.get("loaded_actor"):
+def _load_frozen_bc_actor(
+    checkpoint_path: str,
+    hidden_dims: tuple[int, ...],
+    device: torch.device,
+) -> MLPPolicy | None:
+    if not checkpoint_path:
         return None
-    bc_actor = MLPPolicy(OBSERVATION_DIM, ACTION_DIM, hidden_dims=_parse_hidden_dims(args.hidden_dims))
-    bc_actor.load_state_dict({key: value.detach().cpu().clone() for key, value in model.actor.state_dict().items()})
-    bc_actor.to(next(model.parameters()).device)
+    path = _resolve_project_path(checkpoint_path)
+    if not os.path.exists(path):
+        return None
+    checkpoint = _torch_load(path, device)
+    obs_dim = int(checkpoint.get("obs_dim", OBSERVATION_DIM))
+    action_dim = int(checkpoint.get("action_dim", ACTION_DIM))
+    if action_dim != ACTION_DIM:
+        return None
+    bc_hidden_dims = tuple(int(value) for value in checkpoint.get("hidden_dims", hidden_dims))
+    bc_actor = MLPPolicy(obs_dim, action_dim, hidden_dims=bc_hidden_dims).to(device)
+    bc_actor.load_state_dict(checkpoint["model_state_dict"])
     bc_actor.eval()
     for param in bc_actor.parameters():
         param.requires_grad_(False)
     return bc_actor
+
+
+def _zero_policy_output(policy: MLPPolicy) -> None:
+    for module in reversed(policy.net):
+        if isinstance(module, nn.Linear):
+            nn.init.zeros_(module.weight)
+            nn.init.zeros_(module.bias)
+            return
 
 
 def _save_checkpoint(
@@ -613,6 +913,8 @@ def _save_checkpoint(
     history: list[dict[str, Any]],
     episode_stats: list[dict[str, Any]],
     bc_meta: dict[str, Any],
+    *,
+    best_metric: dict[str, float] | None = None,
 ) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     checkpoint = {
@@ -627,13 +929,34 @@ def _save_checkpoint(
         "observation_version": OBSERVATION_VERSION,
         "action_version": ACTION_VERSION,
         "reward_version": REWARD_VERSION,
+        "policy_mode": args.policy_mode,
+        "residual_scale": float(args.residual_scale),
         "source_bc_checkpoint": bc_meta.get("path", ""),
         "train_args": vars(args),
         "history": history,
         "episode_stats": episode_stats,
+        "best_metric": best_metric or {},
         "log_std": model.log_std.detach().cpu(),
     }
     torch.save(checkpoint, path)
+
+
+def _is_better_checkpoint(
+    update_record: dict[str, Any],
+    best_metric: dict[str, float],
+    min_episodes: int,
+) -> bool:
+    if int(update_record["episodes"]) < int(min_episodes):
+        return False
+    success_rate = float(update_record["recent_success_rate"])
+    recent_return = float(update_record["recent_return"])
+    best_success = float(best_metric["success_rate"])
+    best_return = float(best_metric["return"])
+    if success_rate > best_success + 1e-9:
+        return True
+    if abs(success_rate - best_success) <= 1e-9 and recent_return > best_return:
+        return True
+    return False
 
 
 def _save_history(
@@ -698,6 +1021,13 @@ def _resolve_output_path(path: str) -> str:
     if os.path.isabs(path):
         return path
     return os.path.abspath(os.path.join(PROJECT_DIR, path))
+
+
+def _resolve_best_output_path(best_path: str, output_path: str) -> str:
+    if best_path:
+        return _resolve_output_path(best_path)
+    stem, ext = os.path.splitext(output_path)
+    return f"{stem}_best{ext or '.pt'}"
 
 
 def _torch_load(path: str, device: torch.device):
