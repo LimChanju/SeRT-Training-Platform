@@ -52,16 +52,19 @@ BC/PPO rollout 평가를 하나의 파이프라인으로 연결한다.
 | 문서 | `docs/pipeline.md`, `docs/rl_trajectory_schema.md`, `docs/rl_progress.md` | 완료 |
 | 릴리스 태그 | `v1.0.1` latest release | 완료 |
 | 회고문 | `RETROSPECTIVE.md` | 완료 |
-| 3분 이내 영상 데모 | 아래 데모 영상 링크 | 추가 필요 |
+| 3분 이내 영상 데모 | 아래 데모 영상 링크 | 완료 |
 
 ## 데모 영상
 
-TODO: YouTube 일부 공개 또는 Google Drive 데모 영상 링크 추가
+[데모 영상 유튜브 링크](https://youtu.be/BBAQPnZaHSM?si=I-tZ5E8gA7BzGc7a)
 
 데모 영상은 Isaac Sim 환경에서 VR/햅틱 장갑을 사용하는 사람이 로봇 팔과
 같은 작업 공간에 참여하고, 로봇이 pick-and-place 작업을 수행하는 모습을
-보여준다. 이 과정에서 사람 상태, 로봇 상태, 근접/충돌 이벤트,
+보여준다. 사람과 로봇의 그리퍼를 포함한 헤드 부분이 충돌할 때, 햅틱 피드백 장갑으로 진동 피드백이 온다.
+이 과정에서 사람 상태, 로봇 상태, 근접/충돌 이벤트,
 안전 관련 상호작용 로그를 수집할 수 있다.
+
+
 
 ## 프로젝트 범위 및 제한사항
 
