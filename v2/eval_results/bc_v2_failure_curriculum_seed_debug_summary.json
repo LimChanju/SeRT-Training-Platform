@@ -1,0 +1,64 @@
+{
+  "checkpoint": "/home/railabchan/isaac_vr_project/v2/policies/bc_pick_place_v2_failure_curriculum.pt",
+  "config": {
+    "episode_specs": [
+      {
+        "episode": 27,
+        "seed": 38,
+        "active_cube_index": 0
+      },
+      {
+        "episode": 45,
+        "seed": 56,
+        "active_cube_index": 0
+      }
+    ],
+    "max_steps": 1200,
+    "success_dist": 0.06,
+    "phase_gate_close_dist": 0.075,
+    "phase_gate_max_hold": 320,
+    "gripper_mode": "event"
+  },
+  "summaries": [
+    {
+      "seed": 38,
+      "episode": 27,
+      "active_cube_index": 0,
+      "active_cube": "cube_0",
+      "success": true,
+      "truncated": false,
+      "steps": 624,
+      "final_event": 6,
+      "final_cube_target_dist": 0.05943388491868973,
+      "final_ee_cube_dist": 0.05947886034846306,
+      "min_cube_target_dist": 0.05943388491868973,
+      "min_ee_cube_dist": 0.05942658334970474,
+      "min_ee_cube_event_1_3": 0.05942658334970474,
+      "min_ee_cube_pre_close": 0.05942658334970474,
+      "first_close_event_step": 326,
+      "ee_cube_at_first_close_event": 0.06316433101892471,
+      "grasped_any": true,
+      "first_grasp_step": 327
+    },
+    {
+      "seed": 56,
+      "episode": 45,
+      "active_cube_index": 0,
+      "active_cube": "cube_0",
+      "success": true,
+      "truncated": false,
+      "steps": 622,
+      "final_event": 6,
+      "final_cube_target_dist": 0.05951128900051117,
+      "final_ee_cube_dist": 0.05973338708281517,
+      "min_cube_target_dist": 0.05951128900051117,
+      "min_ee_cube_dist": 0.05969524756073952,
+      "min_ee_cube_event_1_3": 0.05969524756073952,
+      "min_ee_cube_pre_close": 0.05969524756073952,
+      "first_close_event_step": 326,
+      "ee_cube_at_first_close_event": 0.06322287023067474,
+      "grasped_any": true,
+      "first_grasp_step": 327
+    }
+  ]
+}

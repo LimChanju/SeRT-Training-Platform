@@ -37,7 +37,8 @@ def run_pick_place(
     robot: Franka,
     pick_position: np.ndarray,
     place_position: np.ndarray,
-) -> bool:
+    return_action: bool = False,
+):
     """
     매 physics 스텝마다 호출합니다.
     완료되면 True 반환.
@@ -56,4 +57,7 @@ def run_pick_place(
     )
 
     robot.apply_action(actions)
-    return controller.is_done()
+    done = controller.is_done()
+    if return_action:
+        return done, actions
+    return done

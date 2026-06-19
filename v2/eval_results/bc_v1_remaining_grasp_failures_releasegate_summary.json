@@ -1,0 +1,68 @@
+{
+  "checkpoint": "/home/railabchan/isaac_vr_project/v2/policies/bc_pick_place_v1_100eps.pt",
+  "config": {
+    "episode_specs": [
+      {
+        "episode": 27,
+        "seed": 38,
+        "active_cube_index": 0
+      },
+      {
+        "episode": 45,
+        "seed": 56,
+        "active_cube_index": 0
+      }
+    ],
+    "max_steps": 1200,
+    "success_dist": 0.06,
+    "phase_gate_close_dist": 0.075,
+    "phase_gate_max_hold": 320,
+    "early_close_on_grasp_gate": false,
+    "fast_forward_grasp_gate": false,
+    "release_gate_dist": 0.06,
+    "release_gate_max_hold": 360,
+    "gripper_mode": "event"
+  },
+  "summaries": [
+    {
+      "seed": 38,
+      "episode": 27,
+      "active_cube_index": 0,
+      "active_cube": "cube_0",
+      "success": true,
+      "truncated": false,
+      "steps": 633,
+      "final_event": 6,
+      "final_cube_target_dist": 0.05941459909081459,
+      "final_ee_cube_dist": 0.05924132093787193,
+      "min_cube_target_dist": 0.05941459909081459,
+      "min_ee_cube_dist": 0.059210050851106644,
+      "min_ee_cube_event_1_3": 0.059210050851106644,
+      "min_ee_cube_pre_close": 0.059210050851106644,
+      "first_close_event_step": 326,
+      "ee_cube_at_first_close_event": 0.06789396703243256,
+      "grasped_any": true,
+      "first_grasp_step": 327
+    },
+    {
+      "seed": 56,
+      "episode": 45,
+      "active_cube_index": 0,
+      "active_cube": "cube_0",
+      "success": true,
+      "truncated": false,
+      "steps": 626,
+      "final_event": 6,
+      "final_cube_target_dist": 0.05970028415322304,
+      "final_ee_cube_dist": 0.05937599763274193,
+      "min_cube_target_dist": 0.05970028415322304,
+      "min_ee_cube_dist": 0.059373822063207626,
+      "min_ee_cube_event_1_3": 0.059375081211328506,
+      "min_ee_cube_pre_close": 0.059375081211328506,
+      "first_close_event_step": 326,
+      "ee_cube_at_first_close_event": 0.06860958784818649,
+      "grasped_any": true,
+      "first_grasp_step": 327
+    }
+  ]
+}

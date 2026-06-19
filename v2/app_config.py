@@ -5,6 +5,30 @@ PROJECT_DIR = os.path.dirname(BASE_DIR)
 ERRP_MARKERS_PATH = os.path.join(BASE_DIR, "errp_markers.csv")
 SESSION_SAMPLES_PATH = os.path.join(BASE_DIR, "session_samples.csv")
 SAMPLE_LOG_INTERVAL_STEPS = int(os.environ.get("SAMPLE_LOG_INTERVAL_STEPS", "1"))
+ENABLE_HRI_TRAJECTORY_RECORDING = os.environ.get(
+    "ENABLE_HRI_TRAJECTORY_RECORDING", "0"
+).lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+_hri_trajectory_path = os.environ.get(
+    "HRI_TRAJECTORY_PATH",
+    os.path.join(BASE_DIR, "trajectories", "hri_vr_expert_v0.hdf5"),
+)
+HRI_TRAJECTORY_PATH = (
+    _hri_trajectory_path
+    if os.path.isabs(_hri_trajectory_path)
+    else os.path.abspath(os.path.join(PROJECT_DIR, _hri_trajectory_path))
+)
+HRI_TRAJECTORY_OVERWRITE = os.environ.get("HRI_TRAJECTORY_OVERWRITE", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+HRI_TRAJECTORY_MAX_EPISODES = int(os.environ.get("HRI_TRAJECTORY_MAX_EPISODES", "0"))
 ENABLE_GRIPPER_CAMERA = os.environ.get("ENABLE_GRIPPER_CAMERA", "1").lower() in (
     "1",
     "true",

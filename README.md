@@ -1,5 +1,32 @@
 # Isaac VR Project
 
+## 14주차 AI OSS 최종 제출
+
+이 저장소는 인간-로봇 협업 환경을 위한 VR/Isaac Sim 기반 데이터 수집
+플랫폼을 AI OSS 최종 프로젝트로 정리한 것입니다.
+
+제출 검토용 주요 문서는 다음 링크에서 확인할 수 있습니다.
+
+| 항목 | 링크 |
+| --- | --- |
+| 최종 제출 체크리스트 | [docs/week14_final_submission.md](docs/week14_final_submission.md) |
+| 회고문 | [RETROSPECTIVE.md](RETROSPECTIVE.md) |
+| Runbook 및 롤백 계획 | [RUNBOOK.md](RUNBOOK.md) |
+| 시스템 파이프라인 | [docs/pipeline.md](docs/pipeline.md) |
+| Trajectory schema | [docs/rl_trajectory_schema.md](docs/rl_trajectory_schema.md) |
+| 관측성 대시보드 | [metrics/out/dashboard.html](metrics/out/dashboard.html) |
+| Latest release | [v1.0.1](https://github.com/railabchan/isaac_vr_project/releases/tag/v1.0.1) |
+| 데모 영상 | TODO: 3분 이내 데모 영상 링크 추가 |
+
+핵심 AI 기능은 수집된 trajectory와 안전 관련 상호작용 데이터를 활용한
+BC/PPO 기반 로봇 정책 학습 및 rollout 평가입니다. API 헬스체크는
+`api/app.py`의 `GET /health`에서 확인할 수 있습니다.
+
+참고: `v2/vr_grab.py`의 사람 큐브 grab/release 기능은 구현 시도 흔적이
+남아 있는 실험적 경로이며, 최종 제출의 완료 기능으로 주장하지 않습니다.
+최종 제출 범위는 VR/hand tracking 기반 사람 상태 수집, 로봇 pick-and-place,
+근접/충돌 이벤트 로깅, 안전 관련 피드백 라벨링, 정책 학습/evaluation입니다.
+
 ## Description
 VR 사람-로봇 협업 데이터 수집 및 분석 파이프라인 프로젝트입니다. 
 NVIDIA Isaac Sim 4.5 기반 환경에서 로봇 팔(Panda)과 VR 트래킹을 통해 실시간으로 제어되는 사용자(손/팔 실린더 프록시) 간의 물체 조작(Pick and Place) 태스크를 시뮬레이션합니다. 
