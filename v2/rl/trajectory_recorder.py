@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Mapping
 
 import h5py
 import numpy as np
@@ -52,6 +52,7 @@ class TrajectoryRecorder:
         self._episode_open = True
         self._episode_attrs = dict(metadata or {})
         self._buffers = {
+            "sim_time": [],
             "obs": {field.name: [] for field in OBSERVATION_FIELDS},
             "next_obs": {field.name: [] for field in OBSERVATION_FIELDS},
             "obs_policy": [],
@@ -68,10 +69,19 @@ class TrajectoryRecorder:
             "done": [],
             "errp_label": [],
             "errp_feedback": [],
+            "errp_uncertainty": [],
             "errp_source_code": [],
             "errp_event_step": [],
             "eeg_replay_used": [],
             "eeg_epoch_id": [],
+            "human": {
+                "head_pos": [],
+                "left_hand_pos": [],
+                "right_hand_pos": [],
+                "left_hand_vel": [],
+                "right_hand_vel": [],
+                "valid_mask": [],
+            },
         }
 
     def add_transition(
@@ -90,10 +100,13 @@ class TrajectoryRecorder:
         expert_controller_t: float = 0.0,
         errp_label: int = 0,
         errp_feedback: float = 0.0,
+        errp_uncertainty: float = 0.0,
         errp_source_code: int = 0,
         errp_event_step: int = 0,
         eeg_replay_used: int = 0,
         eeg_epoch_id: str = "",
+        sim_time: float | None = None,
+        human_state: Mapping[str, Any] | None = None,
     ) -> None:
         if not self._episode_open:
             raise RuntimeError("start_episode() must be called before add_transition()")
@@ -104,6 +117,7 @@ class TrajectoryRecorder:
             self._buffers["next_obs"][field.name].append(
                 np.asarray(next_obs[field.name], dtype=np.float32)
             )
+        self._buffers["sim_time"].append(0.0 if sim_time is None else float(sim_time))
 
         self._buffers["obs_policy"].append(flatten_observation(obs))
         self._buffers["next_obs_policy"].append(flatten_observation(next_obs))
@@ -134,10 +148,12 @@ class TrajectoryRecorder:
         self._buffers["done"].append(1 if done else 0)
         self._buffers["errp_label"].append(int(errp_label))
         self._buffers["errp_feedback"].append(float(errp_feedback))
+        self._buffers["errp_uncertainty"].append(float(errp_uncertainty))
         self._buffers["errp_source_code"].append(int(errp_source_code))
         self._buffers["errp_event_step"].append(int(errp_event_step))
         self._buffers["eeg_replay_used"].append(int(eeg_replay_used))
         self._buffers["eeg_epoch_id"].append(str(eeg_epoch_id))
+        self._append_human_state(obs, next_obs, sim_time=sim_time, human_state=human_state)
 
     def end_episode(
         self,
@@ -167,6 +183,7 @@ class TrajectoryRecorder:
         )
         self._write_obs_group(group.create_group("obs"), self._buffers["obs"])
         self._write_obs_group(group.create_group("next_obs"), self._buffers["next_obs"])
+        self._write_dataset(group, "sim_time", self._buffers["sim_time"], ())
         self._write_dataset(group, "obs_policy", self._buffers["obs_policy"], (OBSERVATION_DIM,))
         self._write_dataset(
             group,
@@ -224,6 +241,7 @@ class TrajectoryRecorder:
         errp_group = group.create_group("errp")
         self._write_dataset(errp_group, "label", self._buffers["errp_label"], ())
         self._write_dataset(errp_group, "feedback", self._buffers["errp_feedback"], ())
+        self._write_dataset(errp_group, "uncertainty", self._buffers["errp_uncertainty"], ())
         self._write_dataset(errp_group, "source_code", self._buffers["errp_source_code"], ())
         self._write_dataset(errp_group, "event_step", self._buffers["errp_event_step"], ())
         self._write_dataset(errp_group, "eeg_replay_used", self._buffers["eeg_replay_used"], ())
@@ -231,6 +249,33 @@ class TrajectoryRecorder:
             "eeg_epoch_id",
             data=np.asarray(self._buffers["eeg_epoch_id"], dtype=h5py.string_dtype("utf-8")),
         )
+        human_group = group.create_group("human")
+        self._write_dataset(human_group, "head_pos", self._buffers["human"]["head_pos"], (3,))
+        self._write_dataset(
+            human_group,
+            "left_hand_pos",
+            self._buffers["human"]["left_hand_pos"],
+            (3,),
+        )
+        self._write_dataset(
+            human_group,
+            "right_hand_pos",
+            self._buffers["human"]["right_hand_pos"],
+            (3,),
+        )
+        self._write_dataset(
+            human_group,
+            "left_hand_vel",
+            self._buffers["human"]["left_hand_vel"],
+            (3,),
+        )
+        self._write_dataset(
+            human_group,
+            "right_hand_vel",
+            self._buffers["human"]["right_hand_vel"],
+            (3,),
+        )
+        self._write_dataset(human_group, "valid_mask", self._buffers["human"]["valid_mask"], (3,))
 
         self._file.flush()
         self._episode_open = False
@@ -268,6 +313,54 @@ class TrajectoryRecorder:
         for field in OBSERVATION_FIELDS:
             self._write_dataset(group, field.name, obs_buffers[field.name], field.shape)
 
+    def _append_human_state(
+        self,
+        obs: dict[str, np.ndarray],
+        next_obs: dict[str, np.ndarray],
+        *,
+        sim_time: float | None,
+        human_state: Mapping[str, Any] | None,
+    ) -> None:
+        state = dict(human_state or {})
+        head_pos = _state_or_obs_vec3(state, "human_head_pos", obs)
+        left_pos = _state_or_obs_vec3(state, "human_left_hand_pos", obs)
+        right_pos = _state_or_obs_vec3(state, "human_right_hand_pos", obs)
+        left_vel = _state_vec3(state, "human_left_hand_vel")
+        right_vel = _state_vec3(state, "human_right_hand_vel")
+
+        if left_vel is None or right_vel is None:
+            dt = _state_float(state, "dt")
+            if dt is None:
+                next_time = _state_float(state, "next_sim_time")
+                if next_time is not None and sim_time is not None:
+                    dt = float(next_time) - float(sim_time)
+            if dt is None or dt <= 1e-6:
+                dt = 1.0
+            if left_vel is None:
+                left_vel = _velocity_from_obs(obs, next_obs, "human_left_hand_pos", dt)
+            if right_vel is None:
+                right_vel = _velocity_from_obs(obs, next_obs, "human_right_hand_pos", dt)
+
+        valid_mask = _state_vec3(state, "human_valid_mask")
+        if valid_mask is None:
+            valid_mask = np.array(
+                [
+                    _is_valid_human_position(head_pos),
+                    _is_valid_human_position(left_pos),
+                    _is_valid_human_position(right_pos),
+                ],
+                dtype=np.float32,
+            )
+        else:
+            valid_mask = np.clip(valid_mask, 0.0, 1.0)
+
+        self._buffers["human"]["head_pos"].append(head_pos)
+        self._buffers["human"]["left_hand_pos"].append(left_pos)
+        self._buffers["human"]["right_hand_pos"].append(right_pos)
+        self._buffers["human"]["left_hand_vel"].append(left_vel)
+        self._buffers["human"]["right_hand_vel"].append(right_vel)
+        self._buffers["human"]["valid_mask"].append(valid_mask.astype(np.float32))
+
     def _write_dataset(self, group, name: str, values: list, item_shape: tuple[int, ...]) -> None:
         arr = np.asarray(values, dtype=np.float32)
         if item_shape:
@@ -293,3 +386,49 @@ def _fixed_array(value, size: int) -> np.ndarray:
     if n > 0:
         result[:n] = arr[:n]
     return result
+
+
+def _state_or_obs_vec3(
+    state: Mapping[str, Any],
+    key: str,
+    obs: Mapping[str, np.ndarray],
+) -> np.ndarray:
+    value = _state_vec3(state, key)
+    if value is not None:
+        return value
+    return _fixed_array(obs.get(key, np.zeros(3, dtype=np.float32)), 3)
+
+
+def _state_vec3(state: Mapping[str, Any], key: str) -> np.ndarray | None:
+    if key not in state or state[key] is None:
+        return None
+    return _fixed_array(state[key], 3)
+
+
+def _state_float(state: Mapping[str, Any], key: str) -> float | None:
+    if key not in state or state[key] is None:
+        return None
+    try:
+        return float(np.asarray(state[key]).reshape(-1)[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _velocity_from_obs(
+    obs: Mapping[str, np.ndarray],
+    next_obs: Mapping[str, np.ndarray],
+    key: str,
+    dt: float,
+) -> np.ndarray:
+    current_pos = _fixed_array(obs.get(key, np.zeros(3, dtype=np.float32)), 3)
+    next_pos = _fixed_array(next_obs.get(key, current_pos), 3)
+    if not _is_valid_human_position(current_pos) or not _is_valid_human_position(next_pos):
+        return np.zeros(3, dtype=np.float32)
+    return ((next_pos - current_pos) / max(float(dt), 1e-6)).astype(np.float32)
+
+
+def _is_valid_human_position(value: np.ndarray) -> float:
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    if arr.size < 3 or not np.all(np.isfinite(arr[:3])):
+        return 0.0
+    return 1.0 if float(np.linalg.norm(arr[:3])) > 1e-6 else 0.0

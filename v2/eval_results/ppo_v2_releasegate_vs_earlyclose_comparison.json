@@ -1,0 +1,153 @@
+{
+  "labels": {
+    "baseline": "PPO-v2-releasegate",
+    "candidate": "PPO-v2-earlyclose-releasegate"
+  },
+  "baseline_summary": {
+    "episodes": 50,
+    "successes": 48,
+    "success_rate": 0.9599999785423279,
+    "truncated_rate": 0.03999999910593033,
+    "grasp_rate": 0.9599999785423279,
+    "mean_steps": 715.3800048828125,
+    "std_steps": 200.296875,
+    "mean_total_reward": -215.58773803710938,
+    "std_total_reward": 414.0227966308594,
+    "mean_final_cube_target_dist": 0.08194576948881149,
+    "std_final_cube_target_dist": 0.1107923611998558,
+    "mean_min_cube_target_dist": 0.07941487431526184,
+    "std_min_cube_target_dist": 0.09806491434574127
+  },
+  "candidate_summary": {
+    "episodes": 50,
+    "successes": 46,
+    "success_rate": 0.9200000166893005,
+    "truncated_rate": 0.07999999821186066,
+    "grasp_rate": 1.0,
+    "mean_steps": 678.2999877929688,
+    "std_steps": 173.59185791015625,
+    "mean_total_reward": -155.60073852539062,
+    "std_total_reward": 72.1246109008789,
+    "mean_final_cube_target_dist": 0.0705641433596611,
+    "std_final_cube_target_dist": 0.0538153313100338,
+    "mean_min_cube_target_dist": 0.06511630117893219,
+    "std_min_cube_target_dist": 0.02270265854895115
+  },
+  "metric_deltas_candidate_minus_baseline": {
+    "success_rate": -0.039999961853027344,
+    "truncated_rate": 0.03999999910593033,
+    "grasp_rate": 0.04000002145767212,
+    "mean_steps": -37.08001708984375,
+    "mean_total_reward": 59.98699951171875,
+    "mean_final_cube_target_dist": -0.01138162612915039,
+    "mean_min_cube_target_dist": -0.014298573136329651
+  },
+  "baseline_failure_summary": {
+    "episodes": 50,
+    "successes": 48,
+    "failures": 2,
+    "success_rate": 0.96,
+    "failure_categories": {
+      "grasp_never_established": 2
+    }
+  },
+  "candidate_failure_summary": {
+    "episodes": 50,
+    "successes": 46,
+    "failures": 4,
+    "success_rate": 0.92,
+    "failure_categories": {
+      "released_outside_success_radius": 4
+    }
+  },
+  "failure_category_delta_candidate_minus_baseline": {
+    "grasp_never_established": -2,
+    "released_outside_success_radius": 4
+  },
+  "paired_episode_changes": {
+    "shared_seed_count": 50,
+    "counts": {
+      "both_success": 46,
+      "both_failure": 2,
+      "candidate_regression": 2
+    },
+    "mean_step_delta": -37.08000183105469,
+    "mean_final_dist_delta": -0.011381625197827816,
+    "regressions": [
+      {
+        "seed": 43,
+        "episode_baseline": 32,
+        "episode_candidate": 32,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.05942661687731743,
+        "candidate_final_dist": 0.15163366496562958,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 620,
+        "candidate_steps": 1200,
+        "step_delta": 580
+      },
+      {
+        "seed": 52,
+        "episode_baseline": 41,
+        "episode_candidate": 41,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.05980677157640457,
+        "candidate_final_dist": 0.12832491099834442,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 612,
+        "candidate_steps": 1200,
+        "step_delta": 588
+      }
+    ],
+    "recoveries": [],
+    "both_failures": [
+      {
+        "seed": 38,
+        "episode_baseline": 27,
+        "episode_candidate": 27,
+        "category": "both_failure",
+        "baseline_success": false,
+        "candidate_success": false,
+        "baseline_final_dist": 0.5803087949752808,
+        "candidate_final_dist": 0.4302499294281006,
+        "baseline_grasped_any": false,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 1200,
+        "step_delta": 0
+      },
+      {
+        "seed": 56,
+        "episode_baseline": 45,
+        "episode_candidate": 45,
+        "category": "both_failure",
+        "baseline_success": false,
+        "candidate_success": false,
+        "baseline_final_dist": 0.6658406853675842,
+        "candidate_final_dist": 0.07480257749557495,
+        "baseline_grasped_any": false,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 1200,
+        "step_delta": 0
+      }
+    ]
+  },
+  "interpretation": [
+    "PPO-v2-earlyclose-releasegate reduced overall success rate by 0.040.",
+    "PPO-v2-earlyclose-releasegate finished successful/failed rollouts faster on average by 37.1 steps.",
+    "Seed-level comparison shows 0 recoveries and 2 regressions."
+  ],
+  "inputs": {
+    "baseline_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v2_releasegate_rollout_eval.json",
+    "candidate_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v2_earlyclose_releasegate_rollout_eval.json",
+    "baseline_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v2_releasegate_failure_analysis.json",
+    "candidate_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v2_earlyclose_releasegate_failure_analysis.json"
+  }
+}

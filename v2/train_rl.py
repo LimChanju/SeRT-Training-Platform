@@ -164,6 +164,60 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(require_release_for_success=False)
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
     parser.add_argument("--phase-gate-max-hold", type=int, default=320)
+    pseudo_errp_group = parser.add_mutually_exclusive_group()
+    pseudo_errp_group.add_argument(
+        "--pseudo-errp",
+        dest="pseudo_errp_enabled",
+        action="store_true",
+        help="Enable pseudo-ErrP feedback from configured task/HRI flags.",
+    )
+    pseudo_errp_group.add_argument(
+        "--no-pseudo-errp",
+        dest="pseudo_errp_enabled",
+        action="store_false",
+        help="Disable pseudo-ErrP feedback; reward still logs source flags in info.",
+    )
+    parser.set_defaults(pseudo_errp_enabled=True)
+    parser.add_argument(
+        "--pseudo-errp-sources",
+        default="all",
+        help=(
+            "Comma-separated pseudo-ErrP sources, 'all', or 'none'. "
+            "Known sources include human_robot_collision, near_human, collision_green, "
+            "pick_miss_recent, drop_throw_recent, gripper_camera_occluded."
+        ),
+    )
+    parser.add_argument(
+        "--human-replay-data",
+        default="",
+        help=(
+            "Optional HDF5 trajectory file containing recorded human motion. "
+            "When set, human head/hand state is replayed during PPO while the robot policy acts."
+        ),
+    )
+    parser.add_argument(
+        "--human-replay-mode",
+        choices=("step", "loop"),
+        default="step",
+        help="step holds the last human sample after the replay ends; loop repeats it.",
+    )
+    parser.add_argument(
+        "--human-replay-episode-policy",
+        choices=("cycle", "random"),
+        default="cycle",
+        help="How to choose a recorded human episode for each RL episode.",
+    )
+    parser.add_argument(
+        "--synthetic-human",
+        action="store_true",
+        help="Inject a random synthetic hand sweep near the gripper for pseudo-ErrP stress tests.",
+    )
+    parser.add_argument("--synthetic-human-episode-prob", type=float, default=0.35)
+    parser.add_argument("--synthetic-human-start-min-step", type=int, default=120)
+    parser.add_argument("--synthetic-human-start-max-step", type=int, default=520)
+    parser.add_argument("--synthetic-human-duration-steps", type=int, default=90)
+    parser.add_argument("--synthetic-human-near-dist", type=float, default=0.12)
+    parser.add_argument("--synthetic-human-collision-dist", type=float, default=0.035)
     parser.add_argument(
         "--early-close-on-grasp-gate",
         action="store_true",
@@ -218,8 +272,10 @@ from rl import (  # noqa: E402
     OBSERVATION_VERSION,
     REWARD_VERSION,
     IsaacPickPlaceEnv,
+    HumanTrajectoryReplay,
     PickPlaceEnvConfig,
     observation_slices,
+    parse_pseudo_errp_sources,
 )
 from rl.policies import MLPPolicy  # noqa: E402
 
@@ -275,6 +331,20 @@ def _make_mlp(input_dim: int, output_dim: int, hidden_dims: tuple[int, ...]) -> 
     return nn.Sequential(*layers)
 
 
+def _maybe_load_human_replay() -> HumanTrajectoryReplay | None:
+    if not args.human_replay_data:
+        return None
+    path = _resolve_project_path(args.human_replay_data)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"--human-replay-data not found: {path}")
+    return HumanTrajectoryReplay(
+        path,
+        mode=args.human_replay_mode,
+        episode_policy=args.human_replay_episode_policy,
+        seed=args.seed,
+    )
+
+
 def _train() -> None:
     started_at = time.time()
     output_path = _resolve_output_path(args.output)
@@ -282,6 +352,8 @@ def _train() -> None:
     torch.manual_seed(args.seed)
     device = _select_device(args.device)
     hidden_dims = _parse_hidden_dims(args.hidden_dims)
+    pseudo_errp_sources = parse_pseudo_errp_sources(args.pseudo_errp_sources)
+    human_replay = _maybe_load_human_replay()
 
     release_gate_dist = None if args.release_gate_dist < 0.0 else float(args.release_gate_dist)
     env = IsaacPickPlaceEnv(
@@ -301,7 +373,17 @@ def _train() -> None:
             observation_mode="flat",
             seed=args.seed,
             render=args.render,
-        )
+            pseudo_errp_enabled=args.pseudo_errp_enabled,
+            pseudo_errp_sources=pseudo_errp_sources,
+            synthetic_human_enabled=args.synthetic_human,
+            synthetic_human_episode_prob=args.synthetic_human_episode_prob,
+            synthetic_human_start_min_step=args.synthetic_human_start_min_step,
+            synthetic_human_start_max_step=args.synthetic_human_start_max_step,
+            synthetic_human_duration_steps=args.synthetic_human_duration_steps,
+            synthetic_human_near_dist=args.synthetic_human_near_dist,
+            synthetic_human_collision_dist=args.synthetic_human_collision_dist,
+        ),
+        human_state_fn=human_replay,
     )
 
     model = ActorCritic(
@@ -331,7 +413,11 @@ def _train() -> None:
         f"policy_mode={args.policy_mode} residual_scale={args.residual_scale} "
         f"release_gate_dist={release_gate_dist} bc_action_coef={args.bc_action_coef} "
         f"max_bc_action_mse={args.max_bc_action_mse} "
-        f"bc_anchor_coef={args.bc_anchor_coef}",
+        f"bc_anchor_coef={args.bc_anchor_coef} "
+        f"pseudo_errp={args.pseudo_errp_enabled} "
+        f"pseudo_errp_sources={','.join(pseudo_errp_sources) if pseudo_errp_sources else 'none'} "
+        f"human_replay={human_replay.path if human_replay is not None else 'off'} "
+        f"synthetic_human={args.synthetic_human}",
         flush=True,
     )
     if device.type == "cuda":
@@ -345,7 +431,17 @@ def _train() -> None:
             f"transitions={bc_anchor['obs'].shape[0]} target={args.bc_anchor_target_dataset}",
             flush=True,
         )
+    if human_replay is not None:
+        replay_info = human_replay.info
+        print(
+            f"[TrainPPO] human replay loaded: {replay_info.path} "
+            f"episodes={replay_info.episode_count} mode={replay_info.mode} "
+            f"episode_policy={replay_info.episode_policy}",
+            flush=True,
+        )
 
+    if human_replay is not None:
+        human_replay.reset(0, seed=args.seed)
     obs, info = env.reset(seed=args.seed)
     episode_return = 0.0
     episode_length = 0
@@ -374,6 +470,7 @@ def _train() -> None:
                 episode_length=episode_length,
                 episode_stats=episode_stats,
                 total_steps=total_steps,
+                human_replay=human_replay,
             )
             obs = rollout["last_obs"]
             info = rollout["last_info"]
@@ -466,6 +563,8 @@ def _train() -> None:
                 )
     finally:
         env.close()
+        if human_replay is not None:
+            human_replay.close()
 
     _save_checkpoint(
         output_path,
@@ -505,6 +604,7 @@ def _collect_rollout(
     episode_length: int,
     episode_stats: list[dict[str, Any]],
     total_steps: int,
+    human_replay: HumanTrajectoryReplay | None,
 ) -> dict[str, Any]:
     obs_buf = []
     action_buf = []
@@ -552,9 +652,17 @@ def _collect_rollout(
                     "cube_target_dist": float(info["cube_target_dist"]),
                     "grasped": bool(info["has_grasped_cube"]),
                     "controller_event": int(info["controller_event"]),
+                    "errp_feedback": float(info.get("errp_feedback", 0.0)),
+                    "errp_uncertainty": float(info.get("errp_uncertainty", 0.0)),
+                    "errp_label": int(info.get("errp_label", 0)),
+                    "errp_source_code": int(info.get("errp_source_code", 0)),
                 }
             )
-            obs, info = env.reset(seed=int(args.seed + len(episode_stats)))
+            next_episode_index = len(episode_stats)
+            next_seed = int(args.seed + next_episode_index)
+            if human_replay is not None:
+                human_replay.reset(next_episode_index, seed=next_seed)
+            obs, info = env.reset(seed=next_seed)
             obs = np.asarray(obs, dtype=np.float32)
             episode_return = 0.0
             episode_length = 0
@@ -931,6 +1039,13 @@ def _save_checkpoint(
         "reward_version": REWARD_VERSION,
         "policy_mode": args.policy_mode,
         "residual_scale": float(args.residual_scale),
+        "pseudo_errp_enabled": bool(args.pseudo_errp_enabled),
+        "pseudo_errp_sources": parse_pseudo_errp_sources(args.pseudo_errp_sources),
+        "human_replay_data": _resolve_project_path(args.human_replay_data)
+        if args.human_replay_data
+        else "",
+        "human_replay_mode": args.human_replay_mode,
+        "human_replay_episode_policy": args.human_replay_episode_policy,
         "source_bc_checkpoint": bc_meta.get("path", ""),
         "train_args": vars(args),
         "history": history,

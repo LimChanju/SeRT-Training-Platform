@@ -30,6 +30,33 @@ from .observations import (
     observation_slices,
     validate_observation,
 )
+from .pseudo_errp import (
+    DEFAULT_PSEUDO_ERRP_SOURCES,
+    PSEUDO_ERRP_SOURCE_CODES,
+    PseudoErrPResult,
+    extract_pseudo_errp_aux_flags,
+    parse_pseudo_errp_sources,
+    pseudo_errp_from_observation,
+)
+try:
+    from .human_replay import HumanReplayInfo, HumanTrajectoryReplay
+except ModuleNotFoundError as exc:
+    if exc.name != "h5py":
+        raise
+
+    class HumanReplayInfo:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs) -> None:
+            raise ModuleNotFoundError(
+                "h5py is required for HumanTrajectoryReplay. Install it in the active "
+                "Python environment before using --human-replay-data."
+            ) from exc
+
+    class HumanTrajectoryReplay:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs) -> None:
+            raise ModuleNotFoundError(
+                "h5py is required for HumanTrajectoryReplay. Install it in the active "
+                "Python environment before using --human-replay-data."
+            ) from exc
 from .rewards import (
     DEFAULT_REWARD_WEIGHTS,
     LEGACY_REWARD_VERSION,
@@ -94,7 +121,10 @@ __all__ = [
     "CONTROLLER_TARGET_ACTION_VERSION",
     "CONTROLLER_TARGET_MAX_DELTA_M",
     "DEFAULT_REWARD_WEIGHTS",
+    "DEFAULT_PSEUDO_ERRP_SOURCES",
     "EXPERT_JOINT_ACTION_DIM",
+    "HumanReplayInfo",
+    "HumanTrajectoryReplay",
     "MAX_EE_DELTA_M",
     "MAX_YAW_DELTA_RAD",
     "OBSERVATION_DIM",
@@ -103,6 +133,8 @@ __all__ = [
     "IsaacPickPlaceEnv",
     "LEGACY_REWARD_VERSION",
     "PickPlaceEnvConfig",
+    "PSEUDO_ERRP_SOURCE_CODES",
+    "PseudoErrPResult",
     "REWARD_VERSION",
     "RewardResult",
     "RewardWeights",
@@ -119,9 +151,12 @@ __all__ = [
     "denormalize_action",
     "empty_observation",
     "expert_joint_action_vector",
+    "extract_pseudo_errp_aux_flags",
     "flatten_observation",
     "is_success",
     "observation_slices",
+    "parse_pseudo_errp_sources",
+    "pseudo_errp_from_observation",
     "reward_component_names",
     "reward_weights_dict",
     "task_action_from_transition",

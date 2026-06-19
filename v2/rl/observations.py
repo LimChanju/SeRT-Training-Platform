@@ -115,6 +115,7 @@ def build_observation(
     controller_event: int | None = None,
     controller_t: float = 0.0,
     near_human_threshold_m: float = DEFAULT_NEAR_HUMAN_THRESHOLD_M,
+    min_hand_gripper_dist_override: float | None = None,
 ) -> dict[str, np.ndarray]:
     """Build the state observation from Isaac runtime objects.
 
@@ -168,7 +169,11 @@ def build_observation(
         hand_distances.append(float(np.linalg.norm(left_pos - gripper_pos)))
     if human_right_hand_pos is not None:
         hand_distances.append(float(np.linalg.norm(right_pos - gripper_pos)))
-    min_dist = min(hand_distances) if hand_distances else MISSING_DISTANCE_M
+    min_dist = (
+        float(min_hand_gripper_dist_override)
+        if min_hand_gripper_dist_override is not None
+        else min(hand_distances) if hand_distances else MISSING_DISTANCE_M
+    )
     obs["min_hand_gripper_dist"] = np.array([min_dist], dtype=np.float32)
 
     if near_human is None:

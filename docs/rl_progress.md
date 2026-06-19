@@ -182,7 +182,7 @@ The wrapper owns:
 - current reward computation
 - event-mode gripper control
 - phase gating
-- pseudo-ErrP feedback placeholder
+- pseudo-ErrP feedback from task/HRI event flags
 
 Basic use inside an Isaac Sim script:
 
@@ -200,6 +200,101 @@ for _ in range(1200):
 ```
 
 By default, observations are returned as flattened policy vectors. Set `observation_mode="dict"` in `PickPlaceEnvConfig` to receive the structured observation dictionary.
+
+### Pseudo-ErrP Reward Path
+
+Pseudo-ErrP feedback is now wired into the wrapper reward path without changing the 84D policy observation schema. This keeps existing BC/PPO checkpoints compatible while still allowing HRI feedback to affect reward and rollout logs.
+
+ErrP feedback is represented with three separate fields:
+
+- `errp_label`: binary thresholded label for counting/classification-style analysis.
+- `errp_feedback`: soft feedback probability/risk score in `[0, 1]`; this is what the reward uses.
+- `errp_uncertainty`: uncertainty in `[0, 1]`; values near `0.5` feedback are most uncertain, values near `0` or `1` are more certain.
+
+This is important for the research claim: the policy should not only react to an error/no-error bit, but also to uncertain human feedback. The pseudo path therefore approximates an EEG classifier output now, and can later be replaced by EEG replay probabilities.
+
+Current pseudo-ErrP sources:
+
+- `human_robot_collision`
+- `near_human`
+- `collision_green`
+- `pick_miss_recent`
+- `drop_throw_recent`
+- `gripper_camera_occluded`
+
+`near_human` is converted to a continuous risk score from `min_hand_gripper_dist`, so feedback increases as the hand approaches the gripper. Binary event sources are mapped to severity scores, and multiple sources are combined with a noisy-or probability model. `gripper_camera_occluded` is treated as an auxiliary score, not an observation field. A future camera-occlusion module can pass it through `human_state_fn` using keys such as `gripper_camera_occluded`, `camera_occluded`, or `occlusion`; the env strips that auxiliary value before calling `build_observation()` and uses it only for pseudo-ErrP feedback/logging.
+
+The env `info` dictionary now reports:
+
+- `errp_feedback`
+- `errp_uncertainty`
+- `errp_label`
+- `errp_source_code`
+- `errp_source_names`
+- `pseudo_errp_flags`
+- `pseudo_errp_source_scores`
+
+Training and evaluation scripts expose:
+
+```bash
+--pseudo-errp / --no-pseudo-errp
+--pseudo-errp-sources all
+```
+
+Rollout evaluation JSON/CSV now includes per-episode ErrP counts, soft feedback summaries, uncertainty summaries, and source codes. HDF5 trajectories also include `errp/uncertainty` for later EEG replay data.
+
+### HRI Human Replay Path
+
+The HRI training direction is to record a limited number of VR collaboration
+episodes and reuse the recorded human motion during RL. This avoids requiring a
+human participant for thousands of RL episodes.
+
+The runtime split is:
+
+- VR collection: the human wears the headset/glove and interacts with the task
+  while the expert robot performs pick-and-place.
+- RL training: the recorded human head/hand trajectory is replayed from HDF5;
+  only the robot policy is updated.
+- Feedback: pseudo-ErrP currently maps replayed human proximity/collision into
+  soft `errp_feedback` and `errp_uncertainty`. Later, the same slots can be
+  replaced by EEG replay through the EDL classifier.
+
+`TrajectoryRecorder` now writes a `/human` group per episode:
+
+- `head_pos`
+- `left_hand_pos`
+- `right_hand_pos`
+- `left_hand_vel`
+- `right_hand_vel`
+- `valid_mask`
+
+`v2/rl/human_replay.py` provides `HumanTrajectoryReplay`, which can replay the
+new `/human` group or fall back to existing `/obs/human_*` fields. The wrapper is
+passed to `IsaacPickPlaceEnv(human_state_fn=...)`, so no observation schema
+change is required.
+
+To collect HRI replay data during the normal VR runtime:
+
+```bash
+ENABLE_HRI_TRAJECTORY_RECORDING=1 \
+HRI_TRAJECTORY_PATH=v2/trajectories/hri_vr_expert_v0.hdf5 \
+./launch_isaac.sh "$PWD/v2/main.py"
+```
+
+To train or evaluate with recorded human replay:
+
+```bash
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
+  --human-replay-data v2/trajectories/hri_vr_expert_v0.hdf5 \
+  --human-replay-mode step \
+  --human-replay-episode-policy cycle
+```
+
+```bash
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/evaluate_rollout_policy.py" \
+  --checkpoint v2/policies/ppo_pick_place_v7_residual_rewardv4_strict_best.pt \
+  --human-replay-data v2/trajectories/hri_vr_expert_v0.hdf5
+```
 
 ## PPO Fine-Tuning
 
@@ -511,6 +606,7 @@ Working:
 - residual PPO training mode
 - reward v4 post-release stability shaping
 - 50/50 strict release-required rollout evaluation for residual PPO v7
+- pseudo-ErrP source routing into env reward/info
 - BC vs PPO rollout comparison report
 - seed-level grasp failure debugger
 
@@ -523,8 +619,8 @@ Still experimental:
 
 ## Recommended Next Steps
 
-1. Add pseudo-ErrP signals to the wrapper reward path using collision, near-human distance, and occlusion flags.
-2. Evaluate whether reward v4 still holds when pseudo-human state is active instead of empty.
-3. Add gripper-camera occlusion metrics into observation/logging before using them as reward terms.
-4. Run a small ablation: BC only vs PPO reward v3 vs PPO reward v4 under the same strict success condition.
-5. Replace pseudo-ErrP with EEG replay feedback once the replay dataset and time-event mapping are ready.
+1. Collect 50-100 VR HRI expert episodes with `ENABLE_HRI_TRAJECTORY_RECORDING=1`.
+2. Train PPO with `--human-replay-data` so the robot policy learns while replayed human hands/head move through the workspace.
+3. Compare BC-only, PPO without human replay, PPO with human replay, and PPO with human replay + pseudo-ErrP under the same strict success condition.
+4. Add gripper-camera occlusion metrics and pass them into `gripper_camera_occluded`.
+5. Replace pseudo-ErrP with EEG/EDL replay feedback once the replay dataset and time-event mapping are ready.

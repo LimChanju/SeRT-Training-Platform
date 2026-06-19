@@ -1,0 +1,68 @@
+{
+  "checkpoint": "/home/railabchan/isaac_vr_project/v2/policies/ppo_pick_place_v2.pt",
+  "config": {
+    "episode_specs": [
+      {
+        "episode": 27,
+        "seed": 38,
+        "active_cube_index": 0
+      },
+      {
+        "episode": 45,
+        "seed": 56,
+        "active_cube_index": 0
+      }
+    ],
+    "max_steps": 1200,
+    "success_dist": 0.06,
+    "phase_gate_close_dist": 0.075,
+    "phase_gate_max_hold": 320,
+    "early_close_on_grasp_gate": true,
+    "fast_forward_grasp_gate": true,
+    "release_gate_dist": 0.06,
+    "release_gate_max_hold": 720,
+    "gripper_mode": "event"
+  },
+  "summaries": [
+    {
+      "seed": 38,
+      "episode": 27,
+      "active_cube_index": 0,
+      "active_cube": "cube_0",
+      "success": false,
+      "truncated": true,
+      "steps": 1200,
+      "final_event": 6,
+      "final_cube_target_dist": 2.3675761222839355,
+      "final_ee_cube_dist": 2.32256817817688,
+      "min_cube_target_dist": 0.5288873910903931,
+      "min_ee_cube_dist": 0.04852341488003731,
+      "min_ee_cube_event_1_3": 0.06576304882764816,
+      "min_ee_cube_pre_close": 0.06576304882764816,
+      "first_close_event_step": 186,
+      "ee_cube_at_first_close_event": 0.06638132035732269,
+      "grasped_any": true,
+      "first_grasp_step": 201
+    },
+    {
+      "seed": 56,
+      "episode": 45,
+      "active_cube_index": 0,
+      "active_cube": "cube_0",
+      "success": false,
+      "truncated": true,
+      "steps": 1200,
+      "final_event": 6,
+      "final_cube_target_dist": 1.740874171257019,
+      "final_ee_cube_dist": 1.8674379587173462,
+      "min_cube_target_dist": 0.5509687662124634,
+      "min_ee_cube_dist": 0.07465627789497375,
+      "min_ee_cube_event_1_3": 0.07466211169958115,
+      "min_ee_cube_pre_close": 0.07466211169958115,
+      "first_close_event_step": 190,
+      "ee_cube_at_first_close_event": 0.07492709159851074,
+      "grasped_any": true,
+      "first_grasp_step": 202
+    }
+  ]
+}

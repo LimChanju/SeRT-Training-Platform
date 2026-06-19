@@ -1,0 +1,213 @@
+{
+  "labels": {
+    "baseline": "PPO-v2-releasegate",
+    "candidate": "BC-v2-curriculum"
+  },
+  "baseline_summary": {
+    "episodes": 50,
+    "successes": 48,
+    "success_rate": 0.9599999785423279,
+    "truncated_rate": 0.03999999910593033,
+    "grasp_rate": 0.9599999785423279,
+    "mean_steps": 715.3800048828125,
+    "std_steps": 200.296875,
+    "mean_total_reward": -215.58773803710938,
+    "std_total_reward": 414.0227966308594,
+    "mean_final_cube_target_dist": 0.08194576948881149,
+    "std_final_cube_target_dist": 0.1107923611998558,
+    "mean_min_cube_target_dist": 0.07941487431526184,
+    "std_min_cube_target_dist": 0.09806491434574127
+  },
+  "candidate_summary": {
+    "episodes": 50,
+    "successes": 44,
+    "success_rate": 0.8799999952316284,
+    "truncated_rate": 0.11999999731779099,
+    "grasp_rate": 1.0,
+    "mean_steps": 692.3200073242188,
+    "std_steps": 187.59439086914062,
+    "mean_total_reward": -145.8839111328125,
+    "std_total_reward": 23.702531814575195,
+    "mean_final_cube_target_dist": 0.06755676865577698,
+    "std_final_cube_target_dist": 0.03997838497161865,
+    "mean_min_cube_target_dist": 0.06191708892583847,
+    "std_min_cube_target_dist": 0.00791567750275135
+  },
+  "metric_deltas_candidate_minus_baseline": {
+    "success_rate": -0.07999998331069946,
+    "truncated_rate": 0.07999999821186066,
+    "grasp_rate": 0.04000002145767212,
+    "mean_steps": -23.05999755859375,
+    "mean_total_reward": 69.70382690429688,
+    "mean_final_cube_target_dist": -0.014389000833034515,
+    "mean_min_cube_target_dist": -0.01749778538942337
+  },
+  "baseline_failure_summary": {
+    "episodes": 50,
+    "successes": 48,
+    "failures": 2,
+    "success_rate": 0.96,
+    "failure_categories": {
+      "grasp_never_established": 2
+    }
+  },
+  "candidate_failure_summary": {
+    "episodes": 50,
+    "successes": 44,
+    "failures": 6,
+    "success_rate": 0.88,
+    "failure_categories": {
+      "released_outside_success_radius": 6
+    }
+  },
+  "failure_category_delta_candidate_minus_baseline": {
+    "grasp_never_established": -2,
+    "released_outside_success_radius": 6
+  },
+  "paired_episode_changes": {
+    "shared_seed_count": 50,
+    "counts": {
+      "both_success": 42,
+      "candidate_regression": 6,
+      "candidate_recovery": 2
+    },
+    "mean_step_delta": -23.059999465942383,
+    "mean_final_dist_delta": -0.01438899151980877,
+    "regressions": [
+      {
+        "seed": 13,
+        "episode_baseline": 2,
+        "episode_candidate": 2,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.05967770144343376,
+        "candidate_final_dist": 0.09734328091144562,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 619,
+        "candidate_steps": 1200,
+        "step_delta": 581
+      },
+      {
+        "seed": 20,
+        "episode_baseline": 9,
+        "episode_candidate": 9,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.059472959488630295,
+        "candidate_final_dist": 0.06116541102528572,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 617,
+        "candidate_steps": 1200,
+        "step_delta": 583
+      },
+      {
+        "seed": 27,
+        "episode_baseline": 16,
+        "episode_candidate": 16,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.059717077761888504,
+        "candidate_final_dist": 0.07883584499359131,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 627,
+        "candidate_steps": 1200,
+        "step_delta": 573
+      },
+      {
+        "seed": 28,
+        "episode_baseline": 17,
+        "episode_candidate": 17,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.05971260368824005,
+        "candidate_final_dist": 0.09736387431621552,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 617,
+        "candidate_steps": 1200,
+        "step_delta": 583
+      },
+      {
+        "seed": 37,
+        "episode_baseline": 26,
+        "episode_candidate": 26,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.05960647761821747,
+        "candidate_final_dist": 0.07622751593589783,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 619,
+        "candidate_steps": 1200,
+        "step_delta": 581
+      },
+      {
+        "seed": 52,
+        "episode_baseline": 41,
+        "episode_candidate": 41,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.05980677157640457,
+        "candidate_final_dist": 0.3416960835456848,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 612,
+        "candidate_steps": 1200,
+        "step_delta": 588
+      }
+    ],
+    "recoveries": [
+      {
+        "seed": 38,
+        "episode_baseline": 27,
+        "episode_candidate": 27,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.5803087949752808,
+        "candidate_final_dist": 0.05949346721172333,
+        "baseline_grasped_any": false,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 624,
+        "step_delta": -576
+      },
+      {
+        "seed": 56,
+        "episode_baseline": 45,
+        "episode_candidate": 45,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.6658406853675842,
+        "candidate_final_dist": 0.059949446469545364,
+        "baseline_grasped_any": false,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 621,
+        "step_delta": -579
+      }
+    ],
+    "both_failures": []
+  },
+  "interpretation": [
+    "BC-v2-curriculum reduced overall success rate by 0.080.",
+    "BC-v2-curriculum finished successful/failed rollouts faster on average by 23.1 steps.",
+    "Seed-level comparison shows 2 recoveries and 6 regressions."
+  ],
+  "inputs": {
+    "baseline_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v2_releasegate_rollout_eval.json",
+    "candidate_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/bc_pick_place_v2_failure_curriculum_rollout_eval.json",
+    "baseline_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v2_releasegate_failure_analysis.json",
+    "candidate_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/bc_pick_place_v2_failure_curriculum_failure_analysis.json"
+  }
+}

@@ -58,6 +58,57 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--success-dist", type=float, default=0.06)
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
     parser.add_argument("--phase-gate-max-hold", type=int, default=320)
+    pseudo_errp_group = parser.add_mutually_exclusive_group()
+    pseudo_errp_group.add_argument(
+        "--pseudo-errp",
+        dest="pseudo_errp_enabled",
+        action="store_true",
+        help="Enable pseudo-ErrP feedback from configured task/HRI flags.",
+    )
+    pseudo_errp_group.add_argument(
+        "--no-pseudo-errp",
+        dest="pseudo_errp_enabled",
+        action="store_false",
+        help="Disable pseudo-ErrP feedback while still reporting source flags.",
+    )
+    parser.set_defaults(pseudo_errp_enabled=True)
+    parser.add_argument(
+        "--pseudo-errp-sources",
+        default="all",
+        help=(
+            "Comma-separated pseudo-ErrP sources, 'all', or 'none'. "
+            "Known sources include human_robot_collision, near_human, collision_green, "
+            "pick_miss_recent, drop_throw_recent, gripper_camera_occluded."
+        ),
+    )
+    parser.add_argument(
+        "--human-replay-data",
+        default="",
+        help="Optional HDF5 trajectory file containing recorded human head/hand motion.",
+    )
+    parser.add_argument(
+        "--human-replay-mode",
+        choices=("step", "loop"),
+        default="step",
+        help="step holds the last human sample after replay ends; loop repeats it.",
+    )
+    parser.add_argument(
+        "--human-replay-episode-policy",
+        choices=("cycle", "random"),
+        default="cycle",
+        help="How to choose a recorded human episode for each rollout episode.",
+    )
+    parser.add_argument(
+        "--synthetic-human",
+        action="store_true",
+        help="Inject a random synthetic hand sweep near the gripper for pseudo-ErrP stress tests.",
+    )
+    parser.add_argument("--synthetic-human-episode-prob", type=float, default=0.35)
+    parser.add_argument("--synthetic-human-start-min-step", type=int, default=120)
+    parser.add_argument("--synthetic-human-start-max-step", type=int, default=520)
+    parser.add_argument("--synthetic-human-duration-steps", type=int, default=90)
+    parser.add_argument("--synthetic-human-near-dist", type=float, default=0.12)
+    parser.add_argument("--synthetic-human-collision-dist", type=float, default=0.035)
     parser.add_argument(
         "--early-close-on-grasp-gate",
         action="store_true",
@@ -142,7 +193,12 @@ print(f"[EvalRollout] SimulationApp headless={not args.render}", flush=True)
 
 import torch  # noqa: E402
 
-from rl import IsaacPickPlaceEnv, PickPlaceEnvConfig  # noqa: E402
+from rl import (  # noqa: E402
+    HumanTrajectoryReplay,
+    IsaacPickPlaceEnv,
+    PickPlaceEnvConfig,
+    parse_pseudo_errp_sources,
+)
 from rl.actions import ACTION_DIM, clip_action  # noqa: E402
 from rl.observations import OBSERVATION_DIM  # noqa: E402
 from rl.policies import MLPPolicy  # noqa: E402
@@ -324,6 +380,20 @@ def _align_obs_dim(obs_policy: np.ndarray, expected_dim: int) -> np.ndarray:
     return np.concatenate([obs_policy, pad], axis=1)
 
 
+def _maybe_load_human_replay() -> HumanTrajectoryReplay | None:
+    if not args.human_replay_data:
+        return None
+    path = _resolve_project_path(args.human_replay_data)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"--human-replay-data not found: {path}")
+    return HumanTrajectoryReplay(
+        path,
+        mode=args.human_replay_mode,
+        episode_policy=args.human_replay_episode_policy,
+        seed=args.seed,
+    )
+
+
 def _run() -> None:
     np.random.seed(args.seed)
     started_at = time.time()
@@ -336,6 +406,8 @@ def _run() -> None:
     )
     blend_alpha = float(np.clip(args.blend_bc_alpha, 0.0, 1.0))
     release_gate_dist = None if args.release_gate_dist < 0.0 else float(args.release_gate_dist)
+    pseudo_errp_sources = parse_pseudo_errp_sources(args.pseudo_errp_sources)
+    human_replay = _maybe_load_human_replay()
     env = IsaacPickPlaceEnv(
         PickPlaceEnvConfig(
             max_episode_steps=args.max_steps,
@@ -354,24 +426,44 @@ def _run() -> None:
             observation_mode="flat",
             seed=args.seed,
             render=args.render,
-        )
+            pseudo_errp_enabled=args.pseudo_errp_enabled,
+            pseudo_errp_sources=pseudo_errp_sources,
+            synthetic_human_enabled=args.synthetic_human,
+            synthetic_human_episode_prob=args.synthetic_human_episode_prob,
+            synthetic_human_start_min_step=args.synthetic_human_start_min_step,
+            synthetic_human_start_max_step=args.synthetic_human_start_max_step,
+            synthetic_human_duration_steps=args.synthetic_human_duration_steps,
+            synthetic_human_near_dist=args.synthetic_human_near_dist,
+            synthetic_human_collision_dist=args.synthetic_human_collision_dist,
+        ),
+        human_state_fn=human_replay,
     )
 
     rows = []
     print(
         f"[EvalRollout] checkpoint={args.checkpoint} episodes={args.episodes} "
-        f"max_steps={args.max_steps} render={args.render} gripper_mode={args.gripper_mode}",
+        f"max_steps={args.max_steps} render={args.render} gripper_mode={args.gripper_mode} "
+        f"human_replay={human_replay.path if human_replay is not None else 'off'} "
+        f"synthetic_human={args.synthetic_human}",
         flush=True,
     )
     try:
         for episode_idx in range(args.episodes):
             episode_seed = int(args.seed + episode_idx)
+            if human_replay is not None:
+                human_replay.reset(episode_idx, seed=episode_seed)
             obs, info = env.reset(seed=episode_seed)
             total_reward = 0.0
             min_cube_target_dist = float(info["cube_target_dist"])
             min_ee_cube_dist = float(info["ee_cube_dist"])
             grasped_any = bool(info["has_grasped_cube"])
             errp_count = 0
+            errp_feedback_sum = 0.0
+            errp_uncertainty_sum = 0.0
+            max_errp_feedback = 0.0
+            max_errp_uncertainty = 0.0
+            errp_source_code = 0
+            errp_source_counts: dict[str, int] = {}
             reward_components_total: dict[str, float] = {}
             terminated = False
             truncated = False
@@ -388,7 +480,16 @@ def _run() -> None:
                 min_cube_target_dist = min(min_cube_target_dist, float(info["cube_target_dist"]))
                 min_ee_cube_dist = min(min_ee_cube_dist, float(info["ee_cube_dist"]))
                 grasped_any = grasped_any or bool(info["has_grasped_cube"])
-                errp_count += int(float(info["errp_feedback"]) > 0.5)
+                errp_feedback = float(info["errp_feedback"])
+                errp_uncertainty = float(info.get("errp_uncertainty", 0.0))
+                errp_count += int(info.get("errp_label", errp_feedback >= 0.5))
+                errp_feedback_sum += errp_feedback
+                errp_uncertainty_sum += errp_uncertainty
+                max_errp_feedback = max(max_errp_feedback, errp_feedback)
+                max_errp_uncertainty = max(max_errp_uncertainty, errp_uncertainty)
+                errp_source_code |= int(info.get("errp_source_code", 0))
+                for source_name in info.get("errp_source_names", ()):
+                    errp_source_counts[source_name] = errp_source_counts.get(source_name, 0) + 1
                 for name, value in info["reward_components"].items():
                     reward_components_total[name] = reward_components_total.get(name, 0.0) + float(value)
                 if terminated or truncated:
@@ -409,6 +510,14 @@ def _run() -> None:
                 "grasped_any": bool(grasped_any),
                 "final_has_grasped": bool(info["has_grasped_cube"]),
                 "errp_count": int(errp_count),
+                "errp_feedback_sum": float(errp_feedback_sum),
+                "mean_errp_feedback": float(errp_feedback_sum / max(1, int(info["step"]))),
+                "max_errp_feedback": float(max_errp_feedback),
+                "mean_errp_uncertainty": float(errp_uncertainty_sum / max(1, int(info["step"]))),
+                "max_errp_uncertainty": float(max_errp_uncertainty),
+                "errp_source_code": int(errp_source_code),
+                "errp_sources": sorted(errp_source_counts),
+                "errp_source_counts": errp_source_counts,
                 "final_controller_event": int(info["controller_event"]),
                 "final_controller_t": float(info["controller_t"]),
                 "phase_hold_steps": int(info["phase_hold_steps"]),
@@ -431,6 +540,8 @@ def _run() -> None:
                 )
     finally:
         env.close()
+        if human_replay is not None:
+            human_replay.close()
 
     summary = _summarize(rows)
     result = {
@@ -448,6 +559,11 @@ def _run() -> None:
             "success_dist": args.success_dist,
             "phase_gate_close_dist": args.phase_gate_close_dist,
             "phase_gate_max_hold": args.phase_gate_max_hold,
+            "pseudo_errp_enabled": args.pseudo_errp_enabled,
+            "pseudo_errp_sources": list(pseudo_errp_sources),
+            "human_replay_data": human_replay.path if human_replay is not None else "",
+            "human_replay_mode": args.human_replay_mode,
+            "human_replay_episode_policy": args.human_replay_episode_policy,
             "early_close_on_grasp_gate": args.early_close_on_grasp_gate,
             "fast_forward_grasp_gate": args.fast_forward_grasp_gate,
             "release_gate_dist": release_gate_dist,
@@ -493,6 +609,23 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     min_dist = np.asarray([row["min_cube_target_dist"] for row in rows], dtype=np.float32)
     grasped = np.asarray([row["grasped_any"] for row in rows], dtype=np.float32)
     truncated = np.asarray([row["truncated"] for row in rows], dtype=np.float32)
+    errp_counts = np.asarray([row.get("errp_count", 0) for row in rows], dtype=np.float32)
+    mean_errp_feedback = np.asarray(
+        [row.get("mean_errp_feedback", 0.0) for row in rows],
+        dtype=np.float32,
+    )
+    max_errp_feedback = np.asarray(
+        [row.get("max_errp_feedback", 0.0) for row in rows],
+        dtype=np.float32,
+    )
+    mean_errp_uncertainty = np.asarray(
+        [row.get("mean_errp_uncertainty", 0.0) for row in rows],
+        dtype=np.float32,
+    )
+    max_errp_uncertainty = np.asarray(
+        [row.get("max_errp_uncertainty", 0.0) for row in rows],
+        dtype=np.float32,
+    )
     return {
         "episodes": int(len(rows)),
         "successes": int(np.sum(success)),
@@ -507,6 +640,12 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "std_final_cube_target_dist": float(np.std(final_dist)),
         "mean_min_cube_target_dist": float(np.mean(min_dist)),
         "std_min_cube_target_dist": float(np.std(min_dist)),
+        "mean_errp_count": float(np.mean(errp_counts)),
+        "max_errp_count": int(np.max(errp_counts)),
+        "mean_episode_errp_feedback": float(np.mean(mean_errp_feedback)),
+        "max_episode_errp_feedback": float(np.max(max_errp_feedback)),
+        "mean_episode_errp_uncertainty": float(np.mean(mean_errp_uncertainty)),
+        "max_episode_errp_uncertainty": float(np.max(max_errp_uncertainty)),
     }
 
 
@@ -547,6 +686,13 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "grasped_any",
         "final_has_grasped",
         "errp_count",
+        "errp_feedback_sum",
+        "mean_errp_feedback",
+        "max_errp_feedback",
+        "mean_errp_uncertainty",
+        "max_errp_uncertainty",
+        "errp_source_code",
+        "errp_sources",
         "final_controller_event",
         "final_controller_t",
         "phase_hold_steps",
@@ -556,7 +702,9 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for row in rows:
-            writer.writerow({field: row[field] for field in fields})
+            csv_row = {field: row[field] for field in fields}
+            csv_row["errp_sources"] = ",".join(row.get("errp_sources", []))
+            writer.writerow(csv_row)
 
 
 try:

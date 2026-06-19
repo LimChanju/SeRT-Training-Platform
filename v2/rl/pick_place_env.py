@@ -14,6 +14,12 @@ from .actions import (
 )
 from .observations import build_observation, flatten_observation, task_phase_onehot
 from .pick_place_phase import advance_pick_place_event, event_gripper_command, task_phase_from_event
+from .pseudo_errp import (
+    DEFAULT_PSEUDO_ERRP_SOURCES,
+    PseudoErrPResult,
+    extract_pseudo_errp_aux_flags,
+    pseudo_errp_from_observation,
+)
 from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights, compute_reward, is_success
 
 
@@ -45,6 +51,17 @@ class PickPlaceEnvConfig:
     seed: int = 11
     render: bool = False
     reward_weights: RewardWeights = field(default_factory=lambda: DEFAULT_REWARD_WEIGHTS)
+    pseudo_errp_enabled: bool = True
+    pseudo_errp_sources: tuple[str, ...] = field(
+        default_factory=lambda: DEFAULT_PSEUDO_ERRP_SOURCES
+    )
+    synthetic_human_enabled: bool = False
+    synthetic_human_episode_prob: float = 0.35
+    synthetic_human_start_min_step: int = 120
+    synthetic_human_start_max_step: int = 520
+    synthetic_human_duration_steps: int = 90
+    synthetic_human_near_dist: float = 0.12
+    synthetic_human_collision_dist: float = 0.035
 
 
 class IsaacPickPlaceEnv:
@@ -108,6 +125,13 @@ class IsaacPickPlaceEnv:
         self.gripper_closed = False
         self.yaw = 0.0
         self._last_obs: dict[str, np.ndarray] | None = None
+        self._pseudo_errp_aux_flags: dict[str, float] = {}
+        self._human_replay_aux_state: dict[str, Any] = {}
+        self._synthetic_human_active = False
+        self._synthetic_human_start_step = 0
+        self._synthetic_human_duration_steps = 0
+        self._synthetic_human_side = 1.0
+        self._synthetic_human_height_offset = 0.0
 
     @property
     def action_shape(self) -> tuple[int, ...]:
@@ -158,10 +182,12 @@ class IsaacPickPlaceEnv:
         self.phase_hold_steps = 0
         self.gripper_closed = False
         self.yaw = 0.0
+        self._reset_synthetic_human()
 
         obs = self._build_obs()
         self._last_obs = obs
-        info = self._info(obs, reward_components={}, errp_feedback=0.0)
+        errp_result = self._pseudo_errp_result(obs, override_feedback=0.0)
+        info = self._info(obs, reward_components={}, errp_result=errp_result)
         self.episode_index += 1
         return self._format_obs(obs), info
 
@@ -174,7 +200,7 @@ class IsaacPickPlaceEnv:
         if self._last_obs is None:
             raise RuntimeError("reset() must be called before step()")
 
-        action = clip_action(action)
+        action = _finite_action(action)
         target_pos, target_quat, self.yaw = self._target_from_action(action)
         gripper_command = self._gripper_command(action, self._last_obs)
 
@@ -191,12 +217,12 @@ class IsaacPickPlaceEnv:
         self._advance_phase(next_obs)
         success = self._is_success(next_obs)
         truncated = self.step_count >= self.config.max_episode_steps and not success
-        errp_value = self._pseudo_errp_feedback(next_obs) if errp_feedback is None else float(errp_feedback)
+        errp_result = self._pseudo_errp_result(next_obs, override_feedback=errp_feedback)
         reward_result = compute_reward(
             self._last_obs,
             next_obs,
             action,
-            errp_feedback=errp_value,
+            errp_feedback=errp_result.feedback,
             success=success,
             success_dist=self.config.success_dist,
             weights=self.config.reward_weights,
@@ -206,7 +232,7 @@ class IsaacPickPlaceEnv:
         info = self._info(
             next_obs,
             reward_components=reward_result.components,
-            errp_feedback=errp_value,
+            errp_result=errp_result,
         )
         return self._format_obs(next_obs), reward_result.total, success, truncated, info
 
@@ -215,8 +241,18 @@ class IsaacPickPlaceEnv:
 
     def _build_obs(self) -> dict[str, np.ndarray]:
         gripper_center = _gripper_center_from_fingers(self.robot)
+        if gripper_center is None:
+            try:
+                gripper_center, _ = self.robot.end_effector.get_world_pose()
+                gripper_center = np.asarray(gripper_center, dtype=float)
+            except Exception:
+                gripper_center = None
         has_grasped = _has_grasped_cube(self.robot, self.active_cube, gripper_center)
         human_state = dict(self.human_state_fn() if self.human_state_fn is not None else {})
+        synthetic_state = self._synthetic_human_state(gripper_center)
+        human_state = {**synthetic_state, **human_state}
+        human_state, self._pseudo_errp_aux_flags = extract_pseudo_errp_aux_flags(human_state)
+        human_state, self._human_replay_aux_state = _split_observation_human_state(human_state)
         task_phase = task_phase_from_event(self.phase_event)
         obs = build_observation(
             robot=self.robot,
@@ -233,6 +269,62 @@ class IsaacPickPlaceEnv:
             obs["task_phase"] = task_phase_onehot("approach_cube")
         return obs
 
+    def _reset_synthetic_human(self) -> None:
+        cfg = self.config
+        self._synthetic_human_active = (
+            bool(cfg.synthetic_human_enabled)
+            and float(self.rng.random()) < float(np.clip(cfg.synthetic_human_episode_prob, 0.0, 1.0))
+        )
+        start_min = max(0, int(cfg.synthetic_human_start_min_step))
+        start_max = max(start_min, int(cfg.synthetic_human_start_max_step))
+        if start_max > start_min:
+            self._synthetic_human_start_step = int(self.rng.integers(start_min, start_max + 1))
+        else:
+            self._synthetic_human_start_step = start_min
+        self._synthetic_human_duration_steps = max(1, int(cfg.synthetic_human_duration_steps))
+        self._synthetic_human_side = -1.0 if float(self.rng.random()) < 0.5 else 1.0
+        self._synthetic_human_height_offset = float(self.rng.uniform(-0.025, 0.055))
+
+    def _synthetic_human_state(self, gripper_center: np.ndarray) -> dict[str, Any]:
+        if not self._synthetic_human_active:
+            return {}
+        if gripper_center is None:
+            return {}
+        gripper_center = np.asarray(gripper_center, dtype=float).reshape(-1)
+        if gripper_center.size < 3 or not np.all(np.isfinite(gripper_center[:3])):
+            return {}
+        gripper_center = gripper_center[:3]
+        local_step = self.step_count - self._synthetic_human_start_step
+        if local_step < 0 or local_step > self._synthetic_human_duration_steps:
+            return {}
+
+        progress = float(local_step / max(1, self._synthetic_human_duration_steps))
+        cfg = self.config
+        near_dist = max(float(cfg.synthetic_human_near_dist), 1e-3)
+        collision_dist = max(float(cfg.synthetic_human_collision_dist), 1e-3)
+        min_dist = max(collision_dist * 0.5, 0.015)
+
+        # Sweep the hand across the gripper. The midpoint is closest, so some
+        # episodes produce only proximity feedback while others produce collision
+        # feedback depending on the randomized height offset.
+        lateral = self._synthetic_human_side * np.interp(progress, [0.0, 1.0], [near_dist * 1.8, -near_dist * 1.8])
+        closest = min_dist + abs(self._synthetic_human_height_offset) * 0.35
+        vertical = self._synthetic_human_height_offset
+        forward = closest * np.sin(np.pi * progress)
+        right_hand = gripper_center + np.array([lateral, forward, vertical], dtype=float)
+        left_hand = right_hand + np.array([0.22 * self._synthetic_human_side, -0.18, 0.02], dtype=float)
+        head = right_hand + np.array([0.0, -0.55, 0.55], dtype=float)
+
+        dist = float(np.linalg.norm(right_hand - gripper_center))
+        return {
+            "human_head_pos": head,
+            "human_left_hand_pos": left_hand,
+            "human_right_hand_pos": right_hand,
+            "min_hand_gripper_dist_override": dist,
+            "near_human": dist <= near_dist,
+            "human_robot_collision": dist <= collision_dist,
+        }
+
     def _format_obs(self, obs: dict[str, np.ndarray]) -> np.ndarray | dict[str, np.ndarray]:
         if self.config.observation_mode == "dict":
             return obs
@@ -248,7 +340,10 @@ class IsaacPickPlaceEnv:
             )
         else:
             target_pos = ee_pos + np.asarray(action[:3], dtype=float) * MAX_EE_DELTA_M * self.config.action_scale
-        next_yaw = float(self.yaw + float(action[3]) * MAX_YAW_DELTA_RAD * self.config.action_scale)
+        current_yaw = self.yaw if np.isfinite(self.yaw) else 0.0
+        next_yaw = float(current_yaw + float(action[3]) * MAX_YAW_DELTA_RAD * self.config.action_scale)
+        if not np.isfinite(next_yaw):
+            next_yaw = 0.0
         target_pos = np.array(
             [
                 np.clip(target_pos[0], 0.20, 0.75),
@@ -257,11 +352,9 @@ class IsaacPickPlaceEnv:
             ],
             dtype=float,
         )
-        target_quat = (
-            self._euler_angles_to_quat(np.array([0.0, np.pi, next_yaw]))
-            if self.config.fixed_orientation
-            else None
-        )
+        target_quat = None
+        if self.config.fixed_orientation:
+            target_quat = _safe_quat(self._euler_angles_to_quat(np.array([0.0, np.pi, next_yaw])))
         return target_pos, target_quat, next_yaw
 
     def _gripper_command(self, action: np.ndarray, obs: dict[str, np.ndarray]) -> str | None:
@@ -341,15 +434,19 @@ class IsaacPickPlaceEnv:
             self.phase_hold_steps = 0
         self.phase_event, self.phase_t = next_event, next_t
 
-    def _pseudo_errp_feedback(self, obs: dict[str, np.ndarray]) -> float:
-        flags = (
-            "human_robot_collision",
-            "near_human",
-            "collision_green",
-            "pick_miss_recent",
-            "drop_throw_recent",
+    def _pseudo_errp_result(
+        self,
+        obs: dict[str, np.ndarray],
+        *,
+        override_feedback: float | None = None,
+    ) -> PseudoErrPResult:
+        return pseudo_errp_from_observation(
+            obs,
+            aux_flags=self._pseudo_errp_aux_flags,
+            enabled=self.config.pseudo_errp_enabled,
+            sources=self.config.pseudo_errp_sources,
+            override_feedback=override_feedback,
         )
-        return float(any(float(np.asarray(obs[name]).reshape(-1)[0]) > 0.5 for name in flags))
 
     def _is_success(self, obs: dict[str, np.ndarray]) -> bool:
         if not is_success(obs, threshold_m=self.config.success_dist):
@@ -364,7 +461,7 @@ class IsaacPickPlaceEnv:
         obs: dict[str, np.ndarray],
         *,
         reward_components: dict[str, float],
-        errp_feedback: float,
+        errp_result: PseudoErrPResult,
     ) -> dict[str, Any]:
         return {
             "episode_index": self.current_episode_index,
@@ -378,7 +475,14 @@ class IsaacPickPlaceEnv:
             "cube_target_dist": float(np.linalg.norm(obs["cube_to_place_target"])),
             "ee_cube_dist": float(np.linalg.norm(obs["ee_to_cube"])),
             "has_grasped_cube": bool(float(obs["has_grasped_cube"][0]) > 0.5),
-            "errp_feedback": float(errp_feedback),
+            "errp_feedback": float(errp_result.feedback),
+            "errp_uncertainty": float(errp_result.uncertainty),
+            "errp_label": int(errp_result.label),
+            "errp_source_code": int(errp_result.source_code),
+            "errp_source_names": tuple(errp_result.source_names),
+            "pseudo_errp_flags": dict(errp_result.flags),
+            "pseudo_errp_source_scores": dict(errp_result.source_scores),
+            "human_replay_aux_state": dict(self._human_replay_aux_state),
             "reward_components": dict(reward_components),
             "obs_dict": obs,
         }
@@ -399,6 +503,51 @@ def _rule_gripper_should_close(
     if was_closed or has_grasped:
         return True
     return ee_cube_dist <= close_dist
+
+
+def _finite_action(action: np.ndarray) -> np.ndarray:
+    arr = np.nan_to_num(np.asarray(action, dtype=np.float32), nan=0.0, posinf=1.0, neginf=-1.0)
+    return clip_action(arr)
+
+
+_OBSERVATION_HUMAN_STATE_KEYS = {
+    "human_head_pos",
+    "human_left_hand_pos",
+    "human_right_hand_pos",
+    "human_robot_collision",
+    "near_human",
+    "collision_green",
+    "pick_miss_recent",
+    "drop_throw_recent",
+    "min_hand_gripper_dist_override",
+}
+
+
+def _split_observation_human_state(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Keep replay metadata out of build_observation's fixed keyword surface."""
+
+    obs_payload: dict[str, Any] = {}
+    aux_payload: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key in _OBSERVATION_HUMAN_STATE_KEYS:
+            obs_payload[key] = value
+        else:
+            aux_payload[key] = value
+    return obs_payload, aux_payload
+
+
+def _safe_quat(quat: np.ndarray | list[float] | tuple[float, ...]) -> np.ndarray:
+    arr = np.nan_to_num(np.asarray(quat, dtype=float).reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+    if arr.size < 4:
+        result = np.zeros(4, dtype=float)
+        result[: arr.size] = arr
+        arr = result
+    else:
+        arr = arr[:4]
+    norm = float(np.linalg.norm(arr))
+    if not np.isfinite(norm) or norm <= 1e-8:
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    return arr / norm
 
 
 def _policy_gripper_should_close(action: np.ndarray, was_closed: bool) -> bool:
