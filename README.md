@@ -16,7 +16,7 @@
 | Trajectory schema | [docs/rl_trajectory_schema.md](docs/rl_trajectory_schema.md) |
 | 관측성 대시보드 | [metrics/out/dashboard.html](metrics/out/dashboard.html) |
 | Latest release | [v1.0.1](https://github.com/railabchan/isaac_vr_project/releases/tag/v1.0.1) |
-| 데모 영상 | TODO: 3분 이내 데모 영상 링크 추가 |
+| 데모 영상 | [데모 영상 유튜브 링크](https://youtu.be/BBAQPnZaHSM?si=I-tZ5E8gA7BzGc7a) |
 
 핵심 AI 기능은 수집된 trajectory와 안전 관련 상호작용 데이터를 활용한
 BC/PPO 기반 로봇 정책 학습 및 rollout 평가입니다. API 헬스체크는
