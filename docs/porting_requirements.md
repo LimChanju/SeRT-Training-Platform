@@ -100,6 +100,64 @@ VR 데이터 수집을 하려면 SteamVR 또는 OpenXR runtime이 필요하다.
 export XR_RUNTIME_JSON=/path/to/steamxr_linux64.json
 ```
 
+## VR 연동 버전
+
+SteamVR과 ALVR은 자동 업데이트나 headset/PC streamer 버전 차이로 문제가
+생길 수 있으므로, 이식 서버에서는 아래 조합을 기준으로 맞춘다.
+
+| 항목 | 권장/확인 버전 |
+| --- | --- |
+| SteamVR | SteamVR 2.x stable |
+| SteamVR AppID | `250820` |
+| SteamVR 확인 build | `22542555` |
+| SteamVR beta channel | `previous` |
+| OpenXR runtime | SteamVR OpenXR runtime |
+| OpenXR runtime JSON | `steamxr_linux64.json` |
+| ALVR | `v20.14.1` |
+| ALVR PC streamer | `alvr_streamer_linux` `v20.14.1` |
+| ALVR headset app/APK | PC streamer와 같은 `v20.14.1` |
+| Headset | Meta Quest 3 또는 Quest 계열 |
+| Hand tracking input | UDP `5555` |
+
+SteamVR은 PyTorch처럼 정확한 semantic version으로 고정하기보다 Steam app
+manifest의 build id와 OpenXR runtime 설정을 확인하는 방식이 현실적이다.
+
+```bash
+cat ~/.steam/debian-installation/steamapps/appmanifest_250820.acf
+cat ~/.steam/debian-installation/steamapps/common/SteamVR/steamxr_linux64.json
+```
+
+`steamxr_linux64.json`은 SteamVR runtime을 가리켜야 한다.
+
+```json
+{
+  "runtime": {
+    "name": "SteamVR",
+    "library_path": "bin/linux64/vrclient.so"
+  }
+}
+```
+
+ALVR은 PC streamer와 headset app/APK 버전을 반드시 맞춘다. 현재 이 프로젝트의
+로컬 진단 스크립트는 아래 ALVR 설치 경로를 기준으로 작성되어 있다.
+
+```text
+~/.local/share/ALVR-Launcher/installations/v20.14.1/
+```
+
+SteamVR 업데이트가 `vrcompositor`를 덮어쓰면 ALVR compositor wrapper 연결이
+깨질 수 있다. 이 경우 아래 스크립트로 현재 상태를 확인한다.
+
+```bash
+python scripts/steamvr_compositor_switch.py --status
+```
+
+필요하면 ALVR wrapper를 다시 설치한다.
+
+```bash
+python scripts/steamvr_compositor_switch.py --install-alvr-wrapper
+```
+
 ## UDP 포트
 
 | 용도 | 포트 |
