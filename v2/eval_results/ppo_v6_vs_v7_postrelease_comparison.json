@@ -1,0 +1,103 @@
+{
+  "labels": {
+    "baseline": "ppo_v6_rewardv3_strict",
+    "candidate": "ppo_v7_rewardv4_strict"
+  },
+  "baseline_summary": {
+    "episodes": 50,
+    "successes": 49,
+    "success_rate": 0.9800000190734863,
+    "truncated_rate": 0.019999999552965164,
+    "grasp_rate": 1.0,
+    "mean_steps": 821.3200073242188,
+    "std_steps": 115.00772857666016,
+    "mean_total_reward": -113.90385437011719,
+    "std_total_reward": 22.224834442138672,
+    "mean_final_cube_target_dist": 0.043433502316474915,
+    "std_final_cube_target_dist": 0.01023293100297451,
+    "mean_min_cube_target_dist": 0.0388147197663784,
+    "std_min_cube_target_dist": 0.010054870508611202
+  },
+  "candidate_summary": {
+    "episodes": 50,
+    "successes": 50,
+    "success_rate": 1.0,
+    "truncated_rate": 0.0,
+    "grasp_rate": 1.0,
+    "mean_steps": 786.4600219726562,
+    "std_steps": 52.220001220703125,
+    "mean_total_reward": -103.40974426269531,
+    "std_total_reward": 20.722389221191406,
+    "mean_final_cube_target_dist": 0.02992241457104683,
+    "std_final_cube_target_dist": 0.00948779284954071,
+    "mean_min_cube_target_dist": 0.02726849727332592,
+    "std_min_cube_target_dist": 0.007299719378352165
+  },
+  "metric_deltas_candidate_minus_baseline": {
+    "success_rate": 0.019999980926513672,
+    "truncated_rate": -0.019999999552965164,
+    "grasp_rate": 0.0,
+    "mean_steps": -34.8599853515625,
+    "mean_total_reward": 10.494110107421875,
+    "mean_final_cube_target_dist": -0.013511087745428085,
+    "mean_min_cube_target_dist": -0.011546222493052483
+  },
+  "baseline_failure_summary": {
+    "episodes": 50,
+    "successes": 49,
+    "failures": 1,
+    "success_rate": 0.98,
+    "failure_categories": {
+      "reached_target_then_drifted": 1
+    }
+  },
+  "candidate_failure_summary": {
+    "episodes": 50,
+    "successes": 50,
+    "failures": 0,
+    "success_rate": 1.0,
+    "failure_categories": {}
+  },
+  "failure_category_delta_candidate_minus_baseline": {
+    "reached_target_then_drifted": -1
+  },
+  "paired_episode_changes": {
+    "shared_seed_count": 50,
+    "counts": {
+      "both_success": 49,
+      "candidate_recovery": 1
+    },
+    "mean_step_delta": -34.86000061035156,
+    "mean_final_dist_delta": -0.013511094264686108,
+    "regressions": [],
+    "recoveries": [
+      {
+        "seed": 15,
+        "episode_baseline": 4,
+        "episode_candidate": 4,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.07064950466156006,
+        "candidate_final_dist": 0.05510136857628822,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 779,
+        "step_delta": -421
+      }
+    ],
+    "both_failures": []
+  },
+  "interpretation": [
+    "ppo_v7_rewardv4_strict improved overall success rate by 0.020.",
+    "ppo_v7_rewardv4_strict finished successful/failed rollouts faster on average by 34.9 steps.",
+    "Seed-level comparison shows 1 recoveries and 0 regressions."
+  ],
+  "inputs": {
+    "baseline_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v6_residual_rewardv3_best_releasegate_require_release_rollout_eval.json",
+    "candidate_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v7_residual_rewardv4_strict_best_require_release_rollout_eval.json",
+    "baseline_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v6_residual_rewardv3_best_releasegate_require_release_failure_analysis.json",
+    "candidate_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v7_residual_rewardv4_strict_best_require_release_failure_analysis.json"
+  }
+}

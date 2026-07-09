@@ -1,0 +1,200 @@
+{
+  "labels": {
+    "baseline": "PPO-v1",
+    "candidate": "PPO-v2-releasegate"
+  },
+  "baseline_summary": {
+    "episodes": 50,
+    "successes": 45,
+    "success_rate": 0.8999999761581421,
+    "truncated_rate": 0.10000000149011612,
+    "grasp_rate": 0.9200000166893005,
+    "mean_steps": 795.52001953125,
+    "std_steps": 148.98297119140625,
+    "mean_total_reward": -56.571075439453125,
+    "std_total_reward": 159.79498291015625,
+    "mean_final_cube_target_dist": 0.1185164526104927,
+    "std_final_cube_target_dist": 0.25947296619415283,
+    "mean_min_cube_target_dist": 0.0706886500120163,
+    "std_min_cube_target_dist": 0.042197275906801224
+  },
+  "candidate_summary": {
+    "episodes": 50,
+    "successes": 48,
+    "success_rate": 0.9599999785423279,
+    "truncated_rate": 0.03999999910593033,
+    "grasp_rate": 0.9599999785423279,
+    "mean_steps": 715.3800048828125,
+    "std_steps": 200.296875,
+    "mean_total_reward": -215.58773803710938,
+    "std_total_reward": 414.0227966308594,
+    "mean_final_cube_target_dist": 0.08194576948881149,
+    "std_final_cube_target_dist": 0.1107923611998558,
+    "mean_min_cube_target_dist": 0.07941487431526184,
+    "std_min_cube_target_dist": 0.09806491434574127
+  },
+  "metric_deltas_candidate_minus_baseline": {
+    "success_rate": 0.06000000238418579,
+    "truncated_rate": -0.06000000238418579,
+    "grasp_rate": 0.039999961853027344,
+    "mean_steps": -80.1400146484375,
+    "mean_total_reward": -159.01666259765625,
+    "mean_final_cube_target_dist": -0.03657068312168121,
+    "mean_min_cube_target_dist": 0.008726224303245544
+  },
+  "baseline_failure_summary": {
+    "episodes": 50,
+    "successes": 45,
+    "failures": 5,
+    "success_rate": 0.9,
+    "failure_categories": {
+      "released_outside_success_radius": 1,
+      "grasp_never_established": 4
+    }
+  },
+  "candidate_failure_summary": {
+    "episodes": 50,
+    "successes": 48,
+    "failures": 2,
+    "success_rate": 0.96,
+    "failure_categories": {
+      "grasp_never_established": 2
+    }
+  },
+  "failure_category_delta_candidate_minus_baseline": {
+    "grasp_never_established": -2,
+    "released_outside_success_radius": -1
+  },
+  "paired_episode_changes": {
+    "shared_seed_count": 50,
+    "counts": {
+      "both_success": 43,
+      "candidate_recovery": 5,
+      "candidate_regression": 2
+    },
+    "mean_step_delta": -80.13999938964844,
+    "mean_final_dist_delta": -0.03657069802284241,
+    "regressions": [
+      {
+        "seed": 38,
+        "episode_baseline": 27,
+        "episode_candidate": 27,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.059784043580293655,
+        "candidate_final_dist": 0.5803087949752808,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": false,
+        "baseline_steps": 635,
+        "candidate_steps": 1200,
+        "step_delta": 565
+      },
+      {
+        "seed": 56,
+        "episode_baseline": 45,
+        "episode_candidate": 45,
+        "category": "candidate_regression",
+        "baseline_success": true,
+        "candidate_success": false,
+        "baseline_final_dist": 0.059871796518564224,
+        "candidate_final_dist": 0.6658406853675842,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": false,
+        "baseline_steps": 663,
+        "candidate_steps": 1200,
+        "step_delta": 537
+      }
+    ],
+    "recoveries": [
+      {
+        "seed": 13,
+        "episode_baseline": 2,
+        "episode_candidate": 2,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 1.212764024734497,
+        "candidate_final_dist": 0.05967770144343376,
+        "baseline_grasped_any": true,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 619,
+        "step_delta": -581
+      },
+      {
+        "seed": 21,
+        "episode_baseline": 10,
+        "episode_candidate": 10,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.17764677107334137,
+        "candidate_final_dist": 0.0597563236951828,
+        "baseline_grasped_any": false,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 611,
+        "step_delta": -589
+      },
+      {
+        "seed": 36,
+        "episode_baseline": 25,
+        "episode_candidate": 25,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.14240367710590363,
+        "candidate_final_dist": 0.059863559901714325,
+        "baseline_grasped_any": false,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 817,
+        "step_delta": -383
+      },
+      {
+        "seed": 45,
+        "episode_baseline": 34,
+        "episode_candidate": 34,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 0.1722821593284607,
+        "candidate_final_dist": 0.059380270540714264,
+        "baseline_grasped_any": false,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 617,
+        "step_delta": -583
+      },
+      {
+        "seed": 52,
+        "episode_baseline": 41,
+        "episode_candidate": 41,
+        "category": "candidate_recovery",
+        "baseline_success": false,
+        "candidate_success": true,
+        "baseline_final_dist": 1.534927248954773,
+        "candidate_final_dist": 0.05980677157640457,
+        "baseline_grasped_any": false,
+        "candidate_grasped_any": true,
+        "baseline_steps": 1200,
+        "candidate_steps": 612,
+        "step_delta": -588
+      }
+    ],
+    "both_failures": []
+  },
+  "interpretation": [
+    "PPO-v2-releasegate improved overall success rate by 0.060.",
+    "PPO-v2-releasegate finished successful/failed rollouts faster on average by 80.1 steps.",
+    "PPO-v2-releasegate reduced release-outside-target failures.",
+    "Seed-level comparison shows 5 recoveries and 2 regressions."
+  ],
+  "inputs": {
+    "baseline_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v1_rollout_eval.json",
+    "candidate_rollout_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v2_releasegate_rollout_eval.json",
+    "baseline_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v1_failure_analysis.json",
+    "candidate_analysis_json": "/home/railabchan/isaac_vr_project/v2/eval_results/ppo_pick_place_v2_releasegate_failure_analysis.json"
+  }
+}

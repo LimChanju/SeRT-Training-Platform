@@ -25,7 +25,7 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 echo "[Launch] Step 5: testing python import..."
 python -c "import sys; print('[Launch] Python OK:', sys.version)" || { echo "[Launch] Python failed!"; exit 1; }
 
-echo "[Launch] Step 6: running main.py..."
+echo "[Launch] Step 6: running Isaac script..."
 export PYTHONFAULTHANDLER=1
 export LD_PRELOAD="$HOME/isaac-sim-4.5.0/kit/libcarb.so"
 export RESOURCE_NAME="IsaacSim"
@@ -36,7 +36,9 @@ if [ -z "$VK_ICD_FILENAMES" ] && [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ];
 fi
 
 # XR_RUNTIME_JSON 미리 탐색 (Python glob 재귀 탐색으로 인한 hang 방지)
-if [ -z "$XR_RUNTIME_JSON" ]; then
+if [ "${ISAAC_SKIP_XR_RUNTIME_SEARCH:-0}" = "1" ] || [ "${ISAAC_SKIP_XR_RUNTIME_SEARCH:-false}" = "true" ]; then
+    echo "[Launch] Skipping XR runtime search."
+elif [ -z "$XR_RUNTIME_JSON" ]; then
     _xr_json=$(find "$HOME/.steam" "$HOME/.local/share/Steam" /usr/share/steam \
         -maxdepth 8 -name "steamxr_linux64.json" 2>/dev/null | head -1)
     if [ -n "$_xr_json" ]; then
@@ -53,7 +55,11 @@ echo "[Launch] ISAAC_XR_MODE=${ISAAC_XR_MODE:-vr}"
 echo "[Launch] ISAAC_XR_BACKEND=${ISAAC_XR_BACKEND:-SteamVR}"
 
 # SteamVR VR 세션이 완전히 열릴 때까지 대기
-echo "[Launch] Waiting 8s for SteamVR VR session to be ready..."
-sleep 8
+if [ "${ISAAC_SKIP_VR_WAIT:-0}" = "1" ] || [ "${ISAAC_SKIP_VR_WAIT:-false}" = "true" ]; then
+    echo "[Launch] Skipping SteamVR wait."
+else
+    echo "[Launch] Waiting 8s for SteamVR VR session to be ready..."
+    sleep 8
+fi
 
 exec python -u "$@"

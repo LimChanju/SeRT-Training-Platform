@@ -28,6 +28,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 dependencies = [
+    "h5py>=3.8",
     "numpy>=1.24",
 ]
 
