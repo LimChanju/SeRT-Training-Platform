@@ -99,12 +99,7 @@ def task_action_from_transition(
     gripper_opening_now: float | None = None,
     gripper_opening_next: float | None = None,
 ) -> np.ndarray:
-    """Infer normalized 5D expert task action from consecutive states.
-
-    This is mainly for collecting demonstrations from an existing expert
-    controller. The action says how the end-effector moved between two frames,
-    not which low-level joint command produced that movement.
-    """
+    """Infer normalized 5D expert task action from consecutive states."""
 
     ee_pos_now = np.asarray(ee_pos_now, dtype=float).reshape(3)
     ee_pos_next = np.asarray(ee_pos_next, dtype=float).reshape(3)

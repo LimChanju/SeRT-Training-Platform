@@ -36,6 +36,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=1200)
+    parser.add_argument(
+        "--success-target-count",
+        type=int,
+        default=1,
+        help="Number of successful cube placements to complete before ending one rollout episode.",
+    )
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--render", action="store_true", help="Render the rollout window.")
@@ -58,6 +64,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--success-dist", type=float, default=0.06)
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
     parser.add_argument("--phase-gate-max-hold", type=int, default=320)
+    parser.add_argument(
+        "--human-observation-mode",
+        choices=("policy_and_reward", "reward_only"),
+        default="policy_and_reward",
+        help=(
+            "policy_and_reward exposes replayed human state to the policy and reward. "
+            "reward_only hides human state from policy input but still uses it for pseudo-ErrP/reward."
+        ),
+    )
     pseudo_errp_group = parser.add_mutually_exclusive_group()
     pseudo_errp_group.add_argument(
         "--pseudo-errp",
@@ -99,6 +114,21 @@ def _parse_args() -> argparse.Namespace:
         help="How to choose a recorded human episode for each rollout episode.",
     )
     parser.add_argument(
+        "--human-replay-offset",
+        default="0,0,0",
+        help="World-space x,y,z offset applied to replayed human head/hand positions.",
+    )
+    parser.add_argument(
+        "--human-replay-mirror-y",
+        action="store_true",
+        help="Mirror replayed human head/hand positions across the world Y=0 plane.",
+    )
+    parser.add_argument(
+        "--visualize-human-replay",
+        action="store_true",
+        help="Show replayed head and hand positions as simple visual markers.",
+    )
+    parser.add_argument(
         "--synthetic-human",
         action="store_true",
         help="Inject a random synthetic hand sweep near the gripper for pseudo-ErrP stress tests.",
@@ -120,12 +150,22 @@ def _parse_args() -> argparse.Namespace:
         help="When early close triggers, jump the event clock to close_gripper to avoid lingering in approach.",
     )
     parser.add_argument(
+        "--strict-grasp-phase-gate",
+        action="store_true",
+        help="Do not advance out of grasp phases until a grasp is actually detected.",
+    )
+    parser.add_argument(
         "--release-gate-dist",
         type=float,
         default=-1.0,
         help="Hold release until this cube-target distance. Negative disables release gating.",
     )
     parser.add_argument("--release-gate-max-hold", type=int, default=240)
+    parser.add_argument(
+        "--strict-release-phase-gate",
+        action="store_true",
+        help="Do not advance out of release approach until the cube is inside --release-gate-dist.",
+    )
     parser.add_argument(
         "--blend-bc-checkpoint",
         default="",
@@ -200,7 +240,7 @@ from rl import (  # noqa: E402
     parse_pseudo_errp_sources,
 )
 from rl.actions import ACTION_DIM, clip_action  # noqa: E402
-from rl.observations import OBSERVATION_DIM  # noqa: E402
+from rl.observations import OBSERVATION_DIM, observation_slices  # noqa: E402
 from rl.policies import MLPPolicy  # noqa: E402
 
 
@@ -243,7 +283,7 @@ class PolicyRunner:
         self.base_obs_std = None
         self.base_obs_dim = None
         self.base_checkpoint_path = ""
-        if self.policy_mode == "residual":
+        if self.policy_mode in ("residual", "safety_residual"):
             self._load_residual_base(checkpoint)
         self.metadata = {
             "checkpoint": self.checkpoint_path,
@@ -277,12 +317,15 @@ class PolicyRunner:
             self.obs_std,
             self.obs_dim,
         )
-        if self.policy_mode == "residual":
+        if self.policy_mode in ("residual", "safety_residual"):
             if self.base_model is None or self.base_obs_mean is None or self.base_obs_std is None:
                 raise RuntimeError("Residual policy checkpoint is missing a loadable source BC checkpoint.")
+            base_obs = obs
+            if self.policy_mode == "safety_residual":
+                base_obs = _mask_human_flat_observation(np.asarray(obs, dtype=np.float32).reshape(1, -1))
             base_action = self._predict_model(
                 self.base_model,
-                obs,
+                base_obs,
                 self.base_obs_mean,
                 self.base_obs_std,
                 int(self.base_obs_dim),
@@ -371,7 +414,30 @@ def _tensor_to_numpy(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float32)
 
 
+def _mask_human_flat_observation(obs: np.ndarray) -> np.ndarray:
+    masked = _align_obs_dim(np.asarray(obs, dtype=np.float32), OBSERVATION_DIM).copy()
+    slices = observation_slices()
+    for key in (
+        "human_head_pos",
+        "human_left_hand_pos",
+        "human_right_hand_pos",
+        "ee_to_left_hand",
+        "ee_to_right_hand",
+        "human_robot_collision",
+        "near_human",
+    ):
+        field_slice = slices.get(key)
+        if field_slice is not None:
+            masked[:, field_slice] = 0.0
+    dist_slice = slices.get("min_hand_gripper_dist")
+    if dist_slice is not None:
+        masked[:, dist_slice] = 10.0
+    return masked
+
+
 def _align_obs_dim(obs_policy: np.ndarray, expected_dim: int) -> np.ndarray:
+    if obs_policy.ndim == 1:
+        obs_policy = obs_policy.reshape(1, -1)
     if obs_policy.shape[1] == expected_dim:
         return obs_policy
     if obs_policy.shape[1] > expected_dim:
@@ -391,6 +457,8 @@ def _maybe_load_human_replay() -> HumanTrajectoryReplay | None:
         mode=args.human_replay_mode,
         episode_policy=args.human_replay_episode_policy,
         seed=args.seed,
+        position_offset=_parse_vec3(args.human_replay_offset),
+        mirror_y=args.human_replay_mirror_y,
     )
 
 
@@ -398,6 +466,13 @@ def _run() -> None:
     np.random.seed(args.seed)
     started_at = time.time()
     runner = PolicyRunner(args.checkpoint, args.device)
+    if runner.policy_mode == "safety_residual" and args.human_observation_mode != "policy_and_reward":
+        print(
+            "[EvalRollout] safety_residual checkpoint requires human state in the safety stream; "
+            "overriding human_observation_mode=policy_and_reward.",
+            flush=True,
+        )
+        args.human_observation_mode = "policy_and_reward"
     blend_events = _parse_event_set(args.blend_bc_events)
     blend_runner = (
         PolicyRunner(args.blend_bc_checkpoint, args.device)
@@ -420,14 +495,18 @@ def _run() -> None:
             phase_gate_max_hold=args.phase_gate_max_hold,
             early_close_on_grasp_gate=args.early_close_on_grasp_gate,
             fast_forward_grasp_gate=args.fast_forward_grasp_gate,
+            strict_grasp_phase_gate=args.strict_grasp_phase_gate,
             release_gate_dist=release_gate_dist,
             release_gate_max_hold=args.release_gate_max_hold,
+            strict_release_phase_gate=args.strict_release_phase_gate,
             require_release_for_success=args.require_release_for_success,
             observation_mode="flat",
+            human_observation_mode=args.human_observation_mode,
             seed=args.seed,
             render=args.render,
             pseudo_errp_enabled=args.pseudo_errp_enabled,
             pseudo_errp_sources=pseudo_errp_sources,
+            visualize_human_replay=args.visualize_human_replay,
             synthetic_human_enabled=args.synthetic_human,
             synthetic_human_episode_prob=args.synthetic_human_episode_prob,
             synthetic_human_start_min_step=args.synthetic_human_start_min_step,
@@ -444,6 +523,10 @@ def _run() -> None:
         f"[EvalRollout] checkpoint={args.checkpoint} episodes={args.episodes} "
         f"max_steps={args.max_steps} render={args.render} gripper_mode={args.gripper_mode} "
         f"human_replay={human_replay.path if human_replay is not None else 'off'} "
+        f"human_observation_mode={args.human_observation_mode} "
+        f"human_replay_offset={args.human_replay_offset} "
+        f"human_replay_mirror_y={args.human_replay_mirror_y} "
+        f"visualize_human_replay={args.visualize_human_replay} "
         f"synthetic_human={args.synthetic_human}",
         flush=True,
     )
@@ -468,6 +551,8 @@ def _run() -> None:
             terminated = False
             truncated = False
             bc_blend_count = 0
+            success_count = 0
+            successful_cubes: list[str] = []
 
             for _ in range(args.max_steps):
                 action = runner.predict(np.asarray(obs, dtype=np.float32))
@@ -492,14 +577,33 @@ def _run() -> None:
                     errp_source_counts[source_name] = errp_source_counts.get(source_name, 0) + 1
                 for name, value in info["reward_components"].items():
                     reward_components_total[name] = reward_components_total.get(name, 0.0) + float(value)
-                if terminated or truncated:
+                if terminated:
+                    success_count += 1
+                    successful_cubes.append(str(info["active_cube"]))
+                    if success_count >= max(1, int(args.success_target_count)):
+                        break
+                    next_target_index = episode_idx * max(1, int(args.success_target_count)) + success_count
+                    obs, info = env.start_next_pick_target(active_cube_index=next_target_index)
+                    terminated = False
+                    if args.log_every > 0:
+                        print(
+                            f"[EvalRollout] episode={episode_idx:04d} "
+                            f"completed={success_count}/{args.success_target_count}; "
+                            f"next_active_cube={info['active_cube']}",
+                            flush=True,
+                        )
+                    continue
+                if truncated:
                     break
 
             row = {
                 "episode": episode_idx,
                 "seed": episode_seed,
                 "active_cube": info["active_cube"],
-                "success": bool(terminated),
+                "success": bool(success_count >= max(1, int(args.success_target_count))),
+                "success_count": int(success_count),
+                "success_target_count": int(args.success_target_count),
+                "successful_cubes": successful_cubes,
                 "truncated": bool(truncated),
                 "steps": int(info["step"]),
                 "total_reward": float(total_reward),
@@ -533,6 +637,7 @@ def _run() -> None:
             ):
                 print(
                     f"[EvalRollout] episode={episode_idx:04d} success={row['success']} "
+                    f"success_count={success_count}/{args.success_target_count} "
                     f"steps={row['steps']} reward={row['total_reward']:.3f} "
                     f"cube_target={row['final_cube_target_dist']:.3f} "
                     f"grasped_any={int(row['grasped_any'])}",
@@ -551,6 +656,7 @@ def _run() -> None:
             "checkpoint": _resolve_project_path(args.checkpoint),
             "episodes": args.episodes,
             "max_steps": args.max_steps,
+            "success_target_count": args.success_target_count,
             "seed": args.seed,
             "render": args.render,
             "action_scale": args.action_scale,
@@ -559,15 +665,21 @@ def _run() -> None:
             "success_dist": args.success_dist,
             "phase_gate_close_dist": args.phase_gate_close_dist,
             "phase_gate_max_hold": args.phase_gate_max_hold,
+            "human_observation_mode": args.human_observation_mode,
             "pseudo_errp_enabled": args.pseudo_errp_enabled,
             "pseudo_errp_sources": list(pseudo_errp_sources),
             "human_replay_data": human_replay.path if human_replay is not None else "",
             "human_replay_mode": args.human_replay_mode,
             "human_replay_episode_policy": args.human_replay_episode_policy,
+            "human_replay_offset": list(_parse_vec3(args.human_replay_offset)),
+            "human_replay_mirror_y": args.human_replay_mirror_y,
+            "visualize_human_replay": args.visualize_human_replay,
             "early_close_on_grasp_gate": args.early_close_on_grasp_gate,
             "fast_forward_grasp_gate": args.fast_forward_grasp_gate,
+            "strict_grasp_phase_gate": args.strict_grasp_phase_gate,
             "release_gate_dist": release_gate_dist,
             "release_gate_max_hold": args.release_gate_max_hold,
+            "strict_release_phase_gate": args.strict_release_phase_gate,
             "require_release_for_success": args.require_release_for_success,
             "blend_bc_checkpoint": _resolve_project_path(args.blend_bc_checkpoint)
             if args.blend_bc_checkpoint
@@ -610,6 +722,7 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     grasped = np.asarray([row["grasped_any"] for row in rows], dtype=np.float32)
     truncated = np.asarray([row["truncated"] for row in rows], dtype=np.float32)
     errp_counts = np.asarray([row.get("errp_count", 0) for row in rows], dtype=np.float32)
+    success_counts = np.asarray([row.get("success_count", int(row.get("success", False))) for row in rows], dtype=np.float32)
     mean_errp_feedback = np.asarray(
         [row.get("mean_errp_feedback", 0.0) for row in rows],
         dtype=np.float32,
@@ -630,6 +743,8 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "episodes": int(len(rows)),
         "successes": int(np.sum(success)),
         "success_rate": float(np.mean(success)),
+        "mean_success_count": float(np.mean(success_counts)),
+        "max_success_count": int(np.max(success_counts)),
         "truncated_rate": float(np.mean(truncated)),
         "grasp_rate": float(np.mean(grasped)),
         "mean_steps": float(np.mean(steps)),
@@ -659,6 +774,16 @@ def _parse_event_set(text: str) -> set[int]:
     return events
 
 
+def _parse_vec3(text: str) -> np.ndarray:
+    try:
+        values = [float(part.strip()) for part in str(text).split(",")]
+    except Exception as exc:
+        raise ValueError(f"Expected comma-separated x,y,z vector, got {text!r}") from exc
+    if len(values) != 3:
+        raise ValueError(f"Expected comma-separated x,y,z vector, got {text!r}")
+    return np.asarray(values, dtype=np.float32)
+
+
 def _write_json(path: str, payload: dict[str, Any]) -> None:
     if not path:
         return
@@ -676,6 +801,9 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "seed",
         "active_cube",
         "success",
+        "success_count",
+        "success_target_count",
+        "successful_cubes",
         "truncated",
         "steps",
         "total_reward",
@@ -704,6 +832,7 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             csv_row = {field: row[field] for field in fields}
             csv_row["errp_sources"] = ",".join(row.get("errp_sources", []))
+            csv_row["successful_cubes"] = ",".join(row.get("successful_cubes", []))
             writer.writerow(csv_row)
 
 

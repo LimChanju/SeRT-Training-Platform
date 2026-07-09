@@ -59,34 +59,7 @@ def compute_reward(
     success_dist: float = 0.06,
     weights: RewardWeights = DEFAULT_REWARD_WEIGHTS,
 ) -> RewardResult:
-    """Compute reward v4 from consecutive observations.
-
-    Formula:
-
-        r_t =
-          w1 * (d_ee_cube[t-1] - d_ee_cube[t])
-        + w2 * (d_cube_goal[t-1] - d_cube_goal[t])
-        + w3 * grasp_or_post_grasp * (d_cube_goal[t-1] - d_cube_goal[t])
-        - wg * grasp_phase * no_grasp * max(0, d_ee_cube[t] - d_grasp) / d_grasp
-        - wm * entered_post_grasp_without_grasp
-        + bg * grasp
-        + bz * target_zone
-        + bs * success
-        - lp * grasp_or_post_grasp * max(0, d_cube_goal[t] - d_success) / d_success
-        + bp * near_target * max(0, d_cube_goal[t-1] - d_cube_goal[t]) / d_success
-        + bh * near_target_hold
-        - br * near_target * max(0, d_cube_goal[t] - d_cube_goal[t-1]) / d_success
-        - be * exited_near_target_band
-        + bi * released_inside_target
-        - lr * release_outside_target
-        + bpr * post_release_inside_target
-        - lpr * post_release_outside_error
-        - lrr * post_release_regression
-        - la * ||a_t||_2
-        - ln * near_human
-        - lc * human_robot_collision
-        - le * errp_feedback
-    """
+    """Compute reward v4 from consecutive observations."""
 
     ee_cube_dist = _norm_field(obs, "ee_to_cube")
     cube_target_dist = _norm_field(obs, "cube_to_place_target")
@@ -189,7 +162,7 @@ def compute_reward(
 
 
 def is_success(obs: dict[str, np.ndarray], threshold_m: float = 0.06) -> bool:
-    """Simple v0 success: active cube is close enough to the place target."""
+    """Simple success: active cube is close enough to the place target."""
 
     return _norm_field(obs, "cube_to_place_target") <= float(threshold_m)
 
