@@ -1,8 +1,0 @@
-metric,value
-lead_time_avg_hours,0.000
-lead_time_median_hours,0.000
-deployment_frequency_avg_per_day,0.000
-change_failure_rate,0.000
-mttr_avg_minutes,0.000
-session_success_count,0
-session_failure_count,0

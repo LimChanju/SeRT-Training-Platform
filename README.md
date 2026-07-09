@@ -1,344 +1,138 @@
 # Isaac VR Project
 
-## 14주차 AI OSS 최종 제출
+VR/Isaac Sim 기반 인간-로봇 협업 데이터 수집 및 robot learning
+파이프라인입니다.
 
-이 저장소는 인간-로봇 협업 환경을 위한 VR/Isaac Sim 기반 데이터 수집
-플랫폼을 AI OSS 최종 프로젝트로 정리한 것입니다.
+이 저장소는 NVIDIA Isaac Sim 환경에서 Franka Panda pick-and-place 작업을
+실행하고, VR/hand tracking 기반 사람 상태, 사람-로봇 근접/충돌 이벤트,
+안전 관련 피드백 라벨, trajectory 데이터를 수집하는 연구용 플랫폼입니다.
+수집된 expert/HRI trajectory는 BC/PPO 정책 학습과 rollout 평가에 사용됩니다.
 
-제출 검토용 주요 문서는 다음 링크에서 확인할 수 있습니다.
+## 주요 구성
 
-| 항목 | 링크 |
+| 항목 | 경로 |
 | --- | --- |
-| 최종 제출 체크리스트 | [docs/week14_final_submission.md](docs/week14_final_submission.md) |
-| 회고문 | [RETROSPECTIVE.md](RETROSPECTIVE.md) |
-| Runbook 및 롤백 계획 | [RUNBOOK.md](RUNBOOK.md) |
-| 시스템 파이프라인 | [docs/pipeline.md](docs/pipeline.md) |
-| Trajectory schema | [docs/rl_trajectory_schema.md](docs/rl_trajectory_schema.md) |
-| 관측성 대시보드 | [metrics/out/dashboard.html](metrics/out/dashboard.html) |
-| Latest release | [v1.0.1](https://github.com/railabchan/isaac_vr_project/releases/tag/v1.0.1) |
-| 데모 영상 | [데모 영상 유튜브 링크](https://youtu.be/BBAQPnZaHSM?si=I-tZ5E8gA7BzGc7a) |
-
-핵심 AI 기능은 수집된 trajectory와 안전 관련 상호작용 데이터를 활용한
-BC/PPO 기반 로봇 정책 학습 및 rollout 평가입니다. API 헬스체크는
-`api/app.py`의 `GET /health`에서 확인할 수 있습니다.
-
-참고: `v2/vr_grab.py`의 사람 큐브 grab/release 기능은 구현 시도 흔적이
-남아 있는 실험적 경로이며, 최종 제출의 완료 기능으로 주장하지 않습니다.
-최종 제출 범위는 VR/hand tracking 기반 사람 상태 수집, 로봇 pick-and-place,
-근접/충돌 이벤트 로깅, 안전 관련 피드백 라벨링, 정책 학습/evaluation입니다.
-
-## Description
-VR 사람-로봇 협업 데이터 수집 및 분석 파이프라인 프로젝트입니다. 
-NVIDIA Isaac Sim 4.5 기반 환경에서 로봇 팔(Panda)과 VR 트래킹을 통해 실시간으로 제어되는 사용자(손/팔 실린더 프록시) 간의 물체 조작(Pick and Place) 태스크를 시뮬레이션합니다. 
-버전 관리 및 로깅된 실험 데이터를 통해 수정된 DORA 4대 지표를 자동 산출하고 대시보드로 구성하는 기능도 포함되어 있습니다.
+| Isaac Sim VR runtime | `v2/main.py`, `v3_chan/main.py` |
+| Robot-only RL baseline | `v2/train_rl.py`, `v2/evaluate_rollout_policy.py`, `v2/rl/` |
+| HRI safety experiment | `v3_chan/` |
+| Trajectory schema | `docs/rl_trajectory_schema.md` |
+| RL progress notes | `docs/rl_progress.md` |
+| System pipeline | `docs/pipeline.md` |
+| Porting requirements | `docs/porting_requirements.md` |
+| Artifact manifest | `artifacts/MANIFEST.md` |
 
 ## Installation
-1. [NVIDIA Isaac Sim 4.5](https://developer.nvidia.com/isaac-sim) 이상 버전을 설치합니다.
-2. 레포지토리를 Clone 합니다:
-   ```bash
-   git clone https://github.com/railabchan/isaac_vr_project.git
-   cd isaac_vr_project
-   ```
 
-## Usage
-메인 시뮬레이션 환경은 Isaac Sim의 파이썬 인터프리터를 사용해 실행합니다:
-```bash
-isaac ~/isaac_vr_project/v2/main.py
-```
-- VR 트래킹 데이터는 UDP 포트 `5555`를 통해 JSON 형태로 송신해야 로봇 환경 내에서 반영됩니다.
-
-### DORA 지표 대시보드
-자동화된 실험 파이프라인 관리를 위해 변경된 DORA 지표를 수집하고 시각화합니다.
-- **Lead Time**: 시나리오/코드 변경부터 유효 데이터 추출까지의 시간
-- **Deployment Frequency**: 수집 세션 성공 횟수 (일 단위)
-- **Change Failure Rate**: 세션 실패 비율 (실패 / 전체)
-- **MTTR**: 장애 발생부터 복구 완료까지의 평균 시간
-
-*대시보드 HTML 출력 결과는 GitHub Actions 파이프라인 성공 후 `metrics/out/dashboard.html`에서 확인할 수 있습니다.*
-
-<!-- DORA_SCREENSHOT -->
-![DORA Metrics Dashboard](metrics/out/dashboard.png)
-
-### 이벤트 로그 스키마
-`metrics/session_events.csv`
-
-컬럼: `timestamp,event,details`
-
-이벤트 예시:
-- `code_change`
-- `session_start`
-- `session_success`
-- `session_failed`
-- `incident_start`
-- `incident_end`
-
-`metrics/session_events.csv`
-
-컬럼: `timestamp,event,details`
-## CI 최적화
-
-### CI 워크플로우 구성
-
-`main` 브랜치 push 및 PR 시 Lint(Flake8) → Test(pytest) 가 자동 실행됩니다.
-
-민감정보는 GitHub Secrets로 주입합니다:
-
-| Secret | 용도 |
-|--------|------|
-| `DEPLOY_TOKEN` | 조건부 배포 인증 |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | GCP 인증 |
-| `GCP_SERVICE_ACCOUNT` | GCP 서비스 계정 |
-| `GCP_PROJECT_ID` | GCP 프로젝트 ID |
-
-### Build → Test → Deploy 복합 워크플로우
-
-잡 간 의존성과 아티팩트 전달로 순차 실행을 보장합니다:
-
-```
-cached-matrix ──┐
-                ├──► cache-report ──► changes ──► conditional-deploy
-nocache-matrix ─┘         │
-                           └──► upload-artifact(cache-report)
-                                      │
-                           conditional-deploy ──► download-artifact
-```
-
-- 타이밍 결과는 `upload-artifact`로 저장 → `cache-report` 잡에서 `download-artifact`로 수집
-- 배포 잡은 `needs: [cache-report, changes]`로 선행 잡 완료 후 실행
-
-### Matrix 확장 테스트
-
-Ubuntu / Windows / macOS × Python 3.9 / 3.10 / 3.11 조합으로 8개 환경에서 병렬 테스트를 실행합니다.
-
-- 워크플로우: [`.github/workflows/python-lint.yml`](.github/workflows/python-lint.yml)
-- Reusable Workflow: [`.github/workflows/reusable-ci.yml`](.github/workflows/reusable-ci.yml)
-- Composite Action: [`.github/actions/python-ci/action.yml`](.github/actions/python-ci/action.yml)
-
-### 캐싱 전후 실행 시간 비교
-
-`cached-matrix`와 `nocache-matrix` 두 잡을 순차 실행하여 pip 캐시 효과를 측정합니다. 결과는 자동으로 [`cache_timing_report.md`](cache_timing_report.md)에 기록됩니다.
-
-| OS | Python | 캐시 (s) | 캐시 없음 (s) | 개선률 |
-|----|--------|---------|------------|--------|
-| ubuntu-latest | 3.11 | 4.25 | 6.86 | **38.0%** |
-| windows-latest | 3.10 | 12.49 | 17.50 | **28.6%** |
-| ubuntu-latest | 3.10 | 6.59 | 5.25 | -25.5% |
-
-> 전체 결과: [`cache_timing_report.md`](cache_timing_report.md)
-
-### 선택적 배포 파이프라인
-
-`dorny/paths-filter`로 변경 파일을 감지하여 `v2/`, `metrics/`, `.github/workflows/` 변경 시에만 배포 잡을 실행합니다.
-
-```
-push to main
-  ├── cached-matrix (항상 실행)
-  ├── nocache-matrix (항상 실행)
-  ├── cache-report (항상 실행)
-  ├── changes — 변경 파일 감지
-  └── conditional-deploy — v2/metrics/.github 변경 시에만 실행
-```
-
-## CI/CD 파이프라인
-
-### Python 패키지 배포
-
-`v2/` 코드를 `sert-vr-training` 패키지로 빌드하여 GitHub Releases에 배포합니다.
+1. NVIDIA Isaac Sim 4.5.0을 설치한다.
+2. CUDA 11.8, Isaac Sim Python, PyTorch `2.5.1+cu118` 조합을 맞춘다.
+3. SteamVR/ALVR/OpenXR 환경을 준비한다.
+4. 저장소를 clone한다.
 
 ```bash
-# Actions 탭 → Publish Python Package → bump 타입 선택 → Run workflow
-# patch / minor / major 선택 시 pyproject.toml 버전 자동 bump + .whl 릴리스 첨부
+git clone https://github.com/LimChanju/SeRT-Training-Platform.git
+cd SeRT-Training-Platform
 ```
 
-- 워크플로우: [`.github/workflows/publish-package.yml`](.github/workflows/publish-package.yml)
-- 패키지 설정: [`pyproject.toml`](pyproject.toml)
+자세한 이식 요구사항은 `docs/porting_requirements.md`를 참고한다.
 
-### Docker 이미지 자동 빌드/푸시
+## Runtime
 
-`v2/` 또는 `api/` 변경 시 자동으로 GHCR에 이미지를 빌드/푸시하고 스모크 테스트를 실행합니다.
-
-| 브랜치 | 이미지 태그 | 환경 |
-|--------|------------|------|
-| `main` | `latest` | prod |
-| `release/*` | `staging` | staging |
-| 기타 | `dev` | dev |
+메인 Isaac Sim 환경은 launcher를 통해 실행한다.
 
 ```bash
-# 로컬 실행 검증
-docker pull ghcr.io/limchanju/sert-training-platform:latest
-docker run --rm ghcr.io/limchanju/sert-training-platform:latest
+./launch_isaac.sh "$PWD/v2/main.py"
 ```
 
-- 워크플로우: [`.github/workflows/docker.yml`](.github/workflows/docker.yml)
-- Dockerfile: [`Dockerfile`](Dockerfile) (multi-stage builder/runtime)
-
-### Dependabot + 보안 스캔
-
-Dependabot이 매주 월요일 pip/GitHub Actions 패키지 업데이트 PR을 자동 생성합니다.
-
-| 그룹 | 대상 |
-|------|------|
-| `scientific` | numpy, scipy, pandas |
-| `dev-tools` | pytest, pip-audit, build |
-| `actions` | GitHub Actions 전체 |
-
-`pip-audit` 기반 보안 스캔은 `requirements.txt` 변경 시 및 매주 화요일 자동 실행되며, 취약점 발견 시 GitHub Issue를 자동 생성합니다.
-
-- Dependabot 설정: [`.github/dependabot.yml`](.github/dependabot.yml)
-- 보안 스캔 워크플로우: [`.github/workflows/security-scan.yml`](.github/workflows/security-scan.yml)
-
-### GitHub Pages + PR 프리뷰
-
-`metrics/` 변경 시 DORA 대시보드 HTML이 GitHub Pages에 자동 배포됩니다.
-PR 생성 시 프리뷰 URL이 코멘트로 자동 등록되며, PR 닫힘 시 자동 삭제됩니다.
-
-- 라이브 URL: `https://limchanju.github.io/SeRT-Training-Platform/`
-- 워크플로우: [`.github/workflows/pages.yml`](.github/workflows/pages.yml)
-
-### GCP Cloud Run 배포
-
-`api/app.py` 헬스체크 API를 GCP Cloud Run(서울 리전)에 자동 배포합니다.
-배포 후 `/health` 엔드포인트 검증 및 Cloud Monitoring 업타임 체크를 자동 등록합니다.
-
-```json
-// GET /health 응답 예시
-{"status": "ok", "version": "...", "env": "prod", "uptime_seconds": 42.1}
-```
-
-GCP 배포를 위해 아래 시크릿을 저장소에 설정해야 합니다:
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`
-- `GCP_SERVICE_ACCOUNT`
-- `GCP_PROJECT_ID`
-
-- 워크플로우: [`.github/workflows/cloud-run.yml`](.github/workflows/cloud-run.yml)
-- API 서버: [`api/app.py`](api/app.py)
-
-## Feature Flags
-
-실험 조건을 코드 변경 없이 환경 변수 또는 피험자 ID 기준으로 토글합니다.
-
-| 플래그 | 기본값 | 설명 |
-|--------|--------|------|
-| `ENABLE_VR` | OFF | VR 모드 활성화 (환경변수 또는 `VR_SUBJECT_IDS` 목록 기반) |
-| `ENABLE_ERP_LOGGING` | ON | ERP 마커 로깅 (`ERP_ROLLOUT_PCT`로 비율 조절 가능) |
-| `ENABLE_ROBOT_COLLISION` | ON | 로봇 충돌 감지 활성화 |
-| `ENABLE_RAYCAST` | OFF | 레이캐스트 시각화 (실험적 기능) |
-
-설정은 [`flags.env`](flags.env)에서 관리하며, 실행 전 아래 명령으로 적용합니다:
+또는 로컬 shell alias가 설정되어 있다면:
 
 ```bash
-export $(cat flags.env | xargs)
-isaac ~/isaac_vr_project/v2/main.py
+isaac "$PWD/v2/main.py"
 ```
 
-플래그는 [`v2/feature_flags.py`](v2/feature_flags.py)에 구현되어 있습니다.
+VR/hand tracking 데이터는 UDP `5555`로 JSON packet을 받는다. bHaptics 연동을
+사용하는 경우 haptic bridge는 UDP `5005`를 사용한다.
 
-## A/B 테스트
+## HRI Trajectory Recording
 
-피험자 ID의 SHA-256 해시를 기반으로 variant를 결정합니다. 동일한 피험자 ID는 항상 같은 variant에 배정됩니다.
-
-| | Variant A | Variant B |
-|---|-----------|-----------|
-| 큐브 수 | 3개 | 5개 |
-| 배치 | 표준 간격 | 확장/좁은 간격 |
-| 속도 임계값 | 0.5 m/s | 0.3 m/s |
-
-이벤트 추적 로그는 `data/ab_logs/` 에 피험자별 CSV로 저장됩니다. 샘플 로그 생성:
+VR 협업 episode를 HDF5 trajectory로 저장하려면:
 
 ```bash
-python scripts/generate_sample_logs.py
+ENABLE_HRI_TRAJECTORY_RECORDING=1 \
+HRI_TRAJECTORY_PATH=v2/trajectories/hri_vr_expert_v0.hdf5 \
+./launch_isaac.sh "$PWD/v2/main.py"
 ```
 
-A/B 테스트 구현은 [`v2/ab_test.py`](v2/ab_test.py)를 참고하세요.
+주요 산출물:
 
-## 테스트
+| 경로 | 설명 |
+| --- | --- |
+| `v2/session_samples.csv` | frame/session sample 로그 |
+| `v2/errp_markers.csv` | safety/event marker 로그 |
+| `v2/trajectories/*.hdf5` | expert/HRI trajectory dataset |
+| `v2/eval_results/*.json` | rollout 평가 요약 |
+| `v2/eval_results/*.csv` | episode별 rollout 평가 결과 |
 
-### 단위 테스트 (pytest)
+## Expert/RL Pipeline
 
-핵심 모듈에 대해 TDD(Red-Green-Refactor) 사이클로 작성된 단위 테스트입니다.
-
-| TDD 사이클 | 대상 | 검증 내용 |
-|-----------|------|-----------|
-| 1 | `ENABLE_VR` 플래그 | 기본 OFF, 환경변수 ON, 피험자 목록 토글 |
-| 2 | 피험자 bucket 해시 | 동일 ID → 항상 같은 그룹 배정 |
-| 3 | A/B variant 할당 | 동일 피험자 → 항상 같은 variant |
-| 4 | 이벤트 CSV 기록 | `record()` 호출 시 파일에 행 저장 |
-| 5 | EventLogger | 충돌/드롭/스택 이벤트 기록 검증 |
+Robot-only expert trajectory 수집:
 
 ```bash
-pip install pytest pytest-cov numpy
-python -m pytest tests/ --ignore=tests/e2e -v
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/collect_expert_trajectories.py" \
+  --episodes 10 \
+  --overwrite
 ```
 
-현재 커버리지: **95%** (CI 최소 기준 80%)
-
-### E2E 테스트 (Playwright)
-
-DORA 대시보드 HTML을 실제 브라우저로 열어 시나리오를 검증합니다.
-
-- 페이지 로드 및 제목 확인
-- Lead Time, MTTR 등 지표 4개 텍스트 존재 확인
-- 차트 요소(SVG/canvas) 렌더링 확인
-- JavaScript 에러 없음 확인
-
-테스트 실패 시 스크린샷이 `test-artifacts/screenshots/`에 자동 저장됩니다.
+HRI replay를 포함한 PPO 학습:
 
 ```bash
-pip install pytest-playwright
-playwright install chromium
-python metrics/compute_dora.py --input metrics/session_events.csv --out metrics/out
-python -m pytest tests/e2e/ -v
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/train_rl.py" \
+  --human-replay-data v2/trajectories/hri_vr_expert_v0.hdf5 \
+  --human-replay-mode step \
+  --human-replay-episode-policy cycle
 ```
 
-### CI
+Rollout 평가:
 
-push 또는 PR 시 GitHub Actions에서 자동 실행됩니다.
-
-1. 단위 테스트 → 커버리지 80% 미달 시 CI 실패
-2. E2E 테스트 → 실패 시 스크린샷 아티팩트 업로드
-
-## 사용자 피드백 및 실험 결과
-
-### LLM 기반 10명 페르소나 피드백
-
-뇌졸중 환자, 신경과학 연구자, 재활치료사, VR 엔지니어 등 10개 페르소나를 Claude API로 생성하여 시스템을 평가했습니다.
-
-| 지표 | 결과 |
-|------|------|
-| 평균 만족도 | **4.2 / 5.0** |
-| 사용 의향 | **7 / 10명 (70%)** |
-| 주요 긍정 | ERP 마커 연동, 피험자별 조건 제어, 데이터 자동 기록 |
-| 주요 개선 요청 | UI 단순화, EEG 동기화, 보안 인증 |
-
-피드백 데이터: [`data/persona_feedback/`](data/persona_feedback/)
-
-피드백 재생성:
 ```bash
-ANTHROPIC_API_KEY=your_key python scripts/generate_persona_feedback.py
+ISAAC_SKIP_VR_WAIT=1 ./launch_isaac.sh "$PWD/v2/evaluate_rollout_policy.py" \
+  --checkpoint v2/policies/ppo_pick_place_v7_residual_rewardv4_strict_best.pt \
+  --human-replay-data v2/trajectories/hri_vr_expert_v0.hdf5
 ```
 
-### A/B 테스트 2주 운영 결과
+## Haptics
 
-피험자 40명, 120세션을 대상으로 2주간 실험을 운영했습니다.
+bHaptics bridge 실행:
 
-| 지표 | Variant A (큐브 3개) | Variant B (큐브 5개) |
-|------|---------------------|---------------------|
-| 평균 완료 시간 | **32.54초** | 42.21초 |
-| 평균 충돌 횟수 | **1.0회** | 2.52회 |
-| 태스크 성공률 | 100% | 100% |
-| ERP P300 검출률 | 63.9% | 64.6% |
+```bash
+BHAPTICS_APP_ID=... \
+BHAPTICS_API_KEY=... \
+python scripts/bhaptics_udp_bridge.py
+```
 
-실험 데이터: [`data/ab_experiment/`](data/ab_experiment/)
+테스트 pulse 전송:
 
-### Pivot or Persevere 결정
+```bash
+python scripts/test_haptics_udp.py
+```
 
-**결정: Persevere (현행 유지 + 개선)**
+## Tests
 
-Variant A가 완료 시간 23% 단축, 충돌 60% 감소로 우세하여 기본 실험 조건으로 확정했습니다. 상세 결정 근거 및 다음 스프린트 계획: [`docs/pivot-decision.md`](docs/pivot-decision.md)
+일반 Python 단위 테스트:
 
-### 주간 리포팅 자동화
+```bash
+pip install pytest pytest-cov numpy h5py
+python -m pytest tests/ -v
+```
 
-매주 월요일 GitHub Actions가 자동으로 실험 지표를 수집하고 GitHub Issue로 리포트를 생성합니다.
+Isaac Sim 의존 runtime, rollout, PPO 학습은 Isaac Sim launcher를 통해 별도로
+검증한다.
+
+## Artifacts
+
+큰 모델/trajectory artifact는 일반 Git history에 넣지 않고 release artifact
+또는 별도 artifact store에 보관한다. 현재 robot-only baseline artifact 목록은
+`artifacts/MANIFEST.md`에 정리되어 있다.
 
 ## License
+
 이 프로젝트는 [MIT License](LICENSE)에 따라 배포됩니다.

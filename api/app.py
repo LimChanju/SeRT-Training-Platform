@@ -1,4 +1,4 @@
-"""경량 헬스체크 + 메트릭 API — GCP Cloud Run 배포용"""
+"""Lightweight healthcheck API for local and container smoke tests."""
 import json
 import os
 import time
@@ -7,18 +7,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 _START = time.time()
 _VERSION = os.getenv("APP_VERSION", "unknown")
 _ENV = os.getenv("APP_ENV", "dev")
-
-METRICS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "metrics", "out", "metrics.json"
-)
-
-
-def _load_metrics() -> dict:
-    try:
-        with open(METRICS_PATH) as f:
-            return json.load(f)
-    except Exception:
-        return {}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -42,16 +30,12 @@ class Handler(BaseHTTPRequestHandler):
                 "uptime_seconds": round(time.time() - _START, 1),
             })
 
-        elif self.path == "/metrics":
-            data = _load_metrics()
-            self._send(200 if data else 204, data)
-
         elif self.path == "/":
             self._send(200, {
                 "service": "sert-vr-training-api",
                 "version": _VERSION,
                 "env": _ENV,
-                "endpoints": ["/health", "/metrics"],
+                "endpoints": ["/health"],
             })
 
         else:

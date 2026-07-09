@@ -121,7 +121,9 @@ jobs:
           filters: |
             deploy:
               - 'v2/**'
-              - 'metrics/**'
+              - 'v3_chan/**'
+              - 'scripts/**'
+              - 'docs/**'
               - '.github/workflows/**'
 
   conditional-deploy:

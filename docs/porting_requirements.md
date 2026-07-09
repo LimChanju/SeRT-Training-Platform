@@ -189,13 +189,6 @@ TensorBoard 변환을 사용할 경우:
 pip install tensorboard tensorboardX
 ```
 
-E2E 대시보드 테스트를 사용할 경우:
-
-```bash
-pip install pytest-playwright
-playwright install chromium
-```
-
 bHaptics 장갑 연동을 사용할 경우에는 별도 bHaptics SDK/Python package와
 아래 환경변수가 필요하다.
 
@@ -258,7 +251,7 @@ python -V
 일반 테스트와 API를 확인한다.
 
 ```bash
-python -m pytest tests/ --ignore=tests/e2e -v
+python -m pytest tests/ -v
 python api/app.py
 ```
 
