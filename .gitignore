@@ -20,3 +20,17 @@ v2/session_samples.csv
 v2/.python_packages/
 v2/policies/
 v2/trajectories/
+
+# v3_chan generated artifacts and local run outputs
+v3_chan/__pycache__/
+v3_chan/**/__pycache__/
+v3_chan/logs/
+v3_chan/trajectories/*.hdf5
+v3_chan/trajectories/*.h5
+v3_chan/trajectories/*.npz
+v3_chan/policies/*.pt
+v3_chan/policies/*.pth
+v3_chan/policies/*.hdf5
+v3_chan/policies/*.h5
+v3_chan/session_samples.csv
+v3_chan/errp_markers.csv
