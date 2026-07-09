@@ -12,7 +12,7 @@ from .actions import (
     clip_action,
     controller_target_from_action,
 )
-from .observations import build_observation, flatten_observation, task_phase_onehot
+from .observations import MISSING_DISTANCE_M, build_observation, flatten_observation, task_phase_onehot
 from .pick_place_phase import advance_pick_place_event, event_gripper_command, task_phase_from_event
 from .pseudo_errp import (
     DEFAULT_PSEUDO_ERRP_SOURCES,
@@ -25,6 +25,7 @@ from .rewards import DEFAULT_REWARD_WEIGHTS, RewardWeights, compute_reward, is_s
 
 GripperMode = Literal["event", "rule", "policy"]
 ObservationMode = Literal["flat", "dict"]
+HumanObservationMode = Literal["policy_and_reward", "reward_only"]
 
 
 @dataclass
@@ -44,10 +45,13 @@ class PickPlaceEnvConfig:
     phase_gate_max_hold: int = 320
     early_close_on_grasp_gate: bool = False
     fast_forward_grasp_gate: bool = False
+    strict_grasp_phase_gate: bool = False
     release_gate_dist: float | None = None
     release_gate_max_hold: int = 240
+    strict_release_phase_gate: bool = False
     require_release_for_success: bool = False
     observation_mode: ObservationMode = "flat"
+    human_observation_mode: HumanObservationMode = "policy_and_reward"
     seed: int = 11
     render: bool = False
     reward_weights: RewardWeights = field(default_factory=lambda: DEFAULT_REWARD_WEIGHTS)
@@ -55,6 +59,7 @@ class PickPlaceEnvConfig:
     pseudo_errp_sources: tuple[str, ...] = field(
         default_factory=lambda: DEFAULT_PSEUDO_ERRP_SOURCES
     )
+    visualize_human_replay: bool = False
     synthetic_human_enabled: bool = False
     synthetic_human_episode_prob: float = 0.35
     synthetic_human_start_min_step: int = 120
@@ -132,6 +137,10 @@ class IsaacPickPlaceEnv:
         self._synthetic_human_duration_steps = 0
         self._synthetic_human_side = 1.0
         self._synthetic_human_height_offset = 0.0
+        self._phase_gate_blocked_reason = ""
+        self._human_visual_prims: dict[str, Any] = {}
+        if self.config.visualize_human_replay:
+            self._setup_human_visuals()
 
     @property
     def action_shape(self) -> tuple[int, ...]:
@@ -182,6 +191,7 @@ class IsaacPickPlaceEnv:
         self.phase_hold_steps = 0
         self.gripper_closed = False
         self.yaw = 0.0
+        self._phase_gate_blocked_reason = ""
         self._reset_synthetic_human()
 
         obs = self._build_obs()
@@ -189,6 +199,34 @@ class IsaacPickPlaceEnv:
         errp_result = self._pseudo_errp_result(obs, override_feedback=0.0)
         info = self._info(obs, reward_components={}, errp_result=errp_result)
         self.episode_index += 1
+        return self._format_obs(obs), info
+
+    def start_next_pick_target(
+        self,
+        *,
+        active_cube_index: int | None = None,
+    ) -> tuple[np.ndarray | dict[str, np.ndarray], dict[str, Any]]:
+        """Continue the current scene with another cube as the active pick target."""
+
+        self.controller.reset()
+        if active_cube_index is None:
+            try:
+                current_idx = self.pick_targets.index(self.active_cube)
+            except ValueError:
+                current_idx = -1
+            active_cube_index = current_idx + 1
+        self.active_cube = self.pick_targets[int(active_cube_index) % len(self.pick_targets)]
+        self.phase_event = 0
+        self.phase_t = 0.0
+        self.phase_hold_steps = 0
+        self.gripper_closed = False
+        self.yaw = 0.0
+        self._phase_gate_blocked_reason = ""
+
+        obs = self._build_obs()
+        self._last_obs = obs
+        errp_result = self._pseudo_errp_result(obs, override_feedback=0.0)
+        info = self._info(obs, reward_components={}, errp_result=errp_result)
         return self._format_obs(obs), info
 
     def step(
@@ -267,7 +305,46 @@ class IsaacPickPlaceEnv:
         )
         if self.phase_event is None:
             obs["task_phase"] = task_phase_onehot("approach_cube")
+        self._update_human_visuals(obs)
         return obs
+
+    def _setup_human_visuals(self) -> None:
+        from omni.isaac.core.objects import VisualSphere
+
+        specs = (
+            ("head", "/World/HumanReplay/head", "human_replay_head", 0.045, np.array([0.8, 0.8, 0.8])),
+            ("left", "/World/HumanReplay/left_hand", "human_replay_left_hand", 0.035, np.array([0.45, 0.65, 1.0])),
+            ("right", "/World/HumanReplay/right_hand", "human_replay_right_hand", 0.035, np.array([1.0, 0.55, 0.25])),
+        )
+        parked = np.array([0.0, 0.0, -10.0], dtype=float)
+        for key, prim_path, name, radius, color in specs:
+            self._human_visual_prims[key] = self.world.scene.add(
+                VisualSphere(
+                    prim_path=prim_path,
+                    name=name,
+                    position=parked,
+                    radius=radius,
+                    color=color,
+                )
+            )
+
+    def _update_human_visuals(self, obs: dict[str, np.ndarray]) -> None:
+        if not self._human_visual_prims:
+            return
+        fields = {
+            "head": "human_head_pos",
+            "left": "human_left_hand_pos",
+            "right": "human_right_hand_pos",
+        }
+        parked = np.array([0.0, 0.0, -10.0], dtype=float)
+        for key, field_name in fields.items():
+            prim = self._human_visual_prims.get(key)
+            if prim is None:
+                continue
+            pos = np.asarray(obs.get(field_name, parked), dtype=float).reshape(-1)
+            if pos.size < 3 or not np.all(np.isfinite(pos[:3])) or np.linalg.norm(pos[:3]) < 1e-6:
+                pos = parked
+            prim.set_world_pose(position=pos[:3])
 
     def _reset_synthetic_human(self) -> None:
         cfg = self.config
@@ -326,9 +403,17 @@ class IsaacPickPlaceEnv:
         }
 
     def _format_obs(self, obs: dict[str, np.ndarray]) -> np.ndarray | dict[str, np.ndarray]:
+        obs = self._policy_observation(obs)
         if self.config.observation_mode == "dict":
             return obs
         return flatten_observation(obs)
+
+    def _policy_observation(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        if self.config.human_observation_mode == "policy_and_reward":
+            return obs
+        if self.config.human_observation_mode == "reward_only":
+            return _mask_human_observation(obs)
+        raise ValueError(f"Unknown human_observation_mode: {self.config.human_observation_mode}")
 
     def _target_from_action(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, float]:
         ee_pos = np.asarray(self._last_obs["ee_pos"], dtype=float)
@@ -411,13 +496,25 @@ class IsaacPickPlaceEnv:
         next_event, next_t = advance_pick_place_event(self.phase_event, self.phase_t)
         ee_cube_dist = float(np.linalg.norm(obs["ee_to_cube"]))
         cube_target_dist = float(np.linalg.norm(obs["cube_to_place_target"]))
+        has_grasped = bool(float(obs["has_grasped_cube"][0]) > 0.5)
+        self._phase_gate_blocked_reason = ""
         hold_lowering_for_grasp = (
             self.config.gripper_mode == "event"
             and self.phase_event in (1, 2)
             and next_event != self.phase_event
             and ee_cube_dist > self.config.phase_gate_close_dist
-            and float(obs["has_grasped_cube"][0]) <= 0.5
-            and self.phase_hold_steps < self.config.phase_gate_max_hold
+            and not has_grasped
+            and (
+                self.config.strict_grasp_phase_gate
+                or self.phase_hold_steps < self.config.phase_gate_max_hold
+            )
+        )
+        hold_after_close_until_grasped = (
+            self.config.gripper_mode == "event"
+            and self.config.strict_grasp_phase_gate
+            and self.phase_event in (3, 4, 5, 6)
+            and next_event != self.phase_event
+            and not has_grasped
         )
         hold_release_for_target = (
             self.config.gripper_mode == "event"
@@ -425,9 +522,18 @@ class IsaacPickPlaceEnv:
             and self.phase_event == 6
             and next_event != self.phase_event
             and cube_target_dist > float(self.config.release_gate_dist)
-            and self.phase_hold_steps < self.config.release_gate_max_hold
+            and (
+                self.config.strict_release_phase_gate
+                or self.phase_hold_steps < self.config.release_gate_max_hold
+            )
         )
-        if hold_lowering_for_grasp or hold_release_for_target:
+        if hold_lowering_for_grasp:
+            self._phase_gate_blocked_reason = "approach_until_close_or_grasped"
+        elif hold_after_close_until_grasped:
+            self._phase_gate_blocked_reason = "wait_until_grasped"
+        elif hold_release_for_target:
+            self._phase_gate_blocked_reason = "hold_release_until_target"
+        if hold_lowering_for_grasp or hold_after_close_until_grasped or hold_release_for_target:
             self.phase_hold_steps += 1
             return
         if next_event != self.phase_event:
@@ -470,6 +576,9 @@ class IsaacPickPlaceEnv:
             "controller_event": int(self.phase_event),
             "controller_t": float(self.phase_t),
             "phase_hold_steps": int(self.phase_hold_steps),
+            "phase_gate_blocked_reason": self._phase_gate_blocked_reason,
+            "human_observation_mode": self.config.human_observation_mode,
+            "policy_human_observation_masked": self.config.human_observation_mode == "reward_only",
             "gripper_closed": bool(self.gripper_closed),
             "success": self._is_success(obs),
             "cube_target_dist": float(np.linalg.norm(obs["cube_to_place_target"])),
@@ -508,6 +617,29 @@ def _rule_gripper_should_close(
 def _finite_action(action: np.ndarray) -> np.ndarray:
     arr = np.nan_to_num(np.asarray(action, dtype=np.float32), nan=0.0, posinf=1.0, neginf=-1.0)
     return clip_action(arr)
+
+
+_HUMAN_POLICY_OBS_ZERO_KEYS = (
+    "human_head_pos",
+    "human_left_hand_pos",
+    "human_right_hand_pos",
+    "ee_to_left_hand",
+    "ee_to_right_hand",
+    "human_robot_collision",
+    "near_human",
+)
+
+
+def _mask_human_observation(obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Hide replayed human state from policy input while preserving reward observations."""
+
+    masked = {key: np.array(value, copy=True) for key, value in obs.items()}
+    for key in _HUMAN_POLICY_OBS_ZERO_KEYS:
+        if key in masked:
+            masked[key][...] = 0.0
+    if "min_hand_gripper_dist" in masked:
+        masked["min_hand_gripper_dist"][...] = MISSING_DISTANCE_M
+    return masked
 
 
 _OBSERVATION_HUMAN_STATE_KEYS = {

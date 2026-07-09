@@ -34,11 +34,15 @@ class HumanTrajectoryReplay:
         mode: HumanReplayMode = "step",
         episode_policy: HumanReplayEpisodePolicy = "cycle",
         seed: int = 0,
+        position_offset: np.ndarray | None = None,
+        mirror_y: bool = False,
     ) -> None:
         self.path = os.path.abspath(path)
         self.mode = mode
         self.episode_policy = episode_policy
         self.rng = np.random.default_rng(seed)
+        self.position_offset = _vec3(position_offset)
+        self.mirror_y = bool(mirror_y)
         self._file = h5py.File(self.path, "r")
         if "episodes" not in self._file:
             raise KeyError(f"Human replay file has no 'episodes' group: {self.path}")
@@ -104,16 +108,16 @@ class HumanTrajectoryReplay:
 
         valid_mask = self._episode["valid_mask"][sample_idx]
         state: dict[str, Any] = {
-            "human_left_hand_vel": self._episode["left_hand_vel"][sample_idx],
-            "human_right_hand_vel": self._episode["right_hand_vel"][sample_idx],
+            "human_left_hand_vel": self._transform_vel(self._episode["left_hand_vel"][sample_idx]),
+            "human_right_hand_vel": self._transform_vel(self._episode["right_hand_vel"][sample_idx]),
             "human_valid_mask": valid_mask,
         }
         if valid_mask[0] > 0.5:
-            state["human_head_pos"] = self._episode["head_pos"][sample_idx]
+            state["human_head_pos"] = self._transform_pos(self._episode["head_pos"][sample_idx])
         if valid_mask[1] > 0.5:
-            state["human_left_hand_pos"] = self._episode["left_hand_pos"][sample_idx]
+            state["human_left_hand_pos"] = self._transform_pos(self._episode["left_hand_pos"][sample_idx])
         if valid_mask[2] > 0.5:
-            state["human_right_hand_pos"] = self._episode["right_hand_pos"][sample_idx]
+            state["human_right_hand_pos"] = self._transform_pos(self._episode["right_hand_pos"][sample_idx])
 
         if self._episode["human_robot_collision"] is not None:
             state["recorded_human_robot_collision"] = bool(
@@ -126,6 +130,19 @@ class HumanTrajectoryReplay:
                 np.clip(self._episode["gripper_camera_occluded"][sample_idx], 0.0, 1.0)
             )
         return state
+
+    def _transform_pos(self, pos: np.ndarray) -> np.ndarray:
+        out = np.asarray(pos, dtype=np.float32).reshape(3).copy()
+        if self.mirror_y:
+            out[1] = -out[1]
+        out += self.position_offset
+        return out
+
+    def _transform_vel(self, vel: np.ndarray) -> np.ndarray:
+        out = np.asarray(vel, dtype=np.float32).reshape(3).copy()
+        if self.mirror_y:
+            out[1] = -out[1]
+        return out
 
     def _load_episode(self, episode_name: str) -> dict[str, Any]:
         group = self._episodes[episode_name]
@@ -173,6 +190,15 @@ def _dataset_or_zeros(group, name: str, item_shape: tuple[int, ...]) -> np.ndarr
         return arr.reshape((arr.shape[0],) + item_shape)
     length = _infer_group_length(group)
     return np.zeros((length,) + item_shape, dtype=np.float32)
+
+
+def _vec3(value: np.ndarray | None) -> np.ndarray:
+    if value is None:
+        return np.zeros(3, dtype=np.float32)
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    out = np.zeros(3, dtype=np.float32)
+    out[: min(3, arr.size)] = arr[:3]
+    return out
 
 
 def _dataset_or_none(group, name: str) -> np.ndarray | None:

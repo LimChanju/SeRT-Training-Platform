@@ -63,9 +63,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-dims", default="256,256")
     parser.add_argument(
         "--policy-mode",
-        choices=("direct", "residual"),
+        choices=("direct", "residual", "safety_residual"),
         default="direct",
-        help="direct learns the full action; residual learns a correction added to the BC action.",
+        help=(
+            "direct learns the full action; residual learns a correction added to the BC action. "
+            "safety_residual feeds full HRI observation to the residual actor but masks human "
+            "state before the frozen base actor."
+        ),
     )
     parser.add_argument(
         "--residual-scale",
@@ -164,6 +168,15 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(require_release_for_success=False)
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
     parser.add_argument("--phase-gate-max-hold", type=int, default=320)
+    parser.add_argument(
+        "--human-observation-mode",
+        choices=("policy_and_reward", "reward_only"),
+        default="policy_and_reward",
+        help=(
+            "policy_and_reward exposes replayed human state to the policy and reward. "
+            "reward_only hides human state from policy input but still uses it for pseudo-ErrP/reward."
+        ),
+    )
     pseudo_errp_group = parser.add_mutually_exclusive_group()
     pseudo_errp_group.add_argument(
         "--pseudo-errp",
@@ -208,6 +221,21 @@ def _parse_args() -> argparse.Namespace:
         help="How to choose a recorded human episode for each RL episode.",
     )
     parser.add_argument(
+        "--human-replay-offset",
+        default="0,0,0",
+        help="World-space x,y,z offset applied to replayed human head/hand positions.",
+    )
+    parser.add_argument(
+        "--human-replay-mirror-y",
+        action="store_true",
+        help="Mirror replayed human head/hand positions across the world Y=0 plane.",
+    )
+    parser.add_argument(
+        "--visualize-human-replay",
+        action="store_true",
+        help="Show replayed head and hand positions as simple visual markers when rendering.",
+    )
+    parser.add_argument(
         "--synthetic-human",
         action="store_true",
         help="Inject a random synthetic hand sweep near the gripper for pseudo-ErrP stress tests.",
@@ -227,6 +255,16 @@ def _parse_args() -> argparse.Namespace:
         "--fast-forward-grasp-gate",
         action="store_true",
         help="When early close triggers, jump the event clock to close_gripper to avoid lingering in approach.",
+    )
+    parser.add_argument(
+        "--strict-grasp-phase-gate",
+        action="store_true",
+        help="Do not advance out of grasp phases until a grasp is actually detected.",
+    )
+    parser.add_argument(
+        "--strict-release-phase-gate",
+        action="store_true",
+        help="Do not advance out of release approach until the cube is inside --release-gate-dist.",
     )
     parser.add_argument("--save-every-updates", type=int, default=5)
     return parser.parse_args()
@@ -342,6 +380,8 @@ def _maybe_load_human_replay() -> HumanTrajectoryReplay | None:
         mode=args.human_replay_mode,
         episode_policy=args.human_replay_episode_policy,
         seed=args.seed,
+        position_offset=_parse_vec3(args.human_replay_offset),
+        mirror_y=args.human_replay_mirror_y,
     )
 
 
@@ -354,6 +394,13 @@ def _train() -> None:
     hidden_dims = _parse_hidden_dims(args.hidden_dims)
     pseudo_errp_sources = parse_pseudo_errp_sources(args.pseudo_errp_sources)
     human_replay = _maybe_load_human_replay()
+    if args.policy_mode == "safety_residual" and args.human_observation_mode != "policy_and_reward":
+        print(
+            "[TrainPPO] --policy-mode safety_residual requires human state in the safety stream; "
+            "overriding human_observation_mode=policy_and_reward.",
+            flush=True,
+        )
+        args.human_observation_mode = "policy_and_reward"
 
     release_gate_dist = None if args.release_gate_dist < 0.0 else float(args.release_gate_dist)
     env = IsaacPickPlaceEnv(
@@ -367,14 +414,18 @@ def _train() -> None:
             phase_gate_max_hold=args.phase_gate_max_hold,
             early_close_on_grasp_gate=args.early_close_on_grasp_gate,
             fast_forward_grasp_gate=args.fast_forward_grasp_gate,
+            strict_grasp_phase_gate=args.strict_grasp_phase_gate,
             release_gate_dist=release_gate_dist,
             release_gate_max_hold=args.release_gate_max_hold,
+            strict_release_phase_gate=args.strict_release_phase_gate,
             require_release_for_success=args.require_release_for_success,
             observation_mode="flat",
+            human_observation_mode=args.human_observation_mode,
             seed=args.seed,
             render=args.render,
             pseudo_errp_enabled=args.pseudo_errp_enabled,
             pseudo_errp_sources=pseudo_errp_sources,
+            visualize_human_replay=args.visualize_human_replay,
             synthetic_human_enabled=args.synthetic_human,
             synthetic_human_episode_prob=args.synthetic_human_episode_prob,
             synthetic_human_start_min_step=args.synthetic_human_start_min_step,
@@ -399,9 +450,9 @@ def _train() -> None:
         load_actor=args.policy_mode == "direct",
     )
     bc_actor = _load_frozen_bc_actor(args.bc_checkpoint, hidden_dims, device)
-    if args.policy_mode == "residual":
+    if args.policy_mode in ("residual", "safety_residual"):
         if bc_actor is None:
-            raise RuntimeError("--policy-mode residual requires a valid --bc-checkpoint")
+            raise RuntimeError(f"--policy-mode {args.policy_mode} requires a valid --bc-checkpoint")
         _zero_policy_output(model.actor)
     bc_anchor = _load_bc_anchor_dataset(args.bc_anchor_data, obs_mean, obs_std, device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -417,6 +468,10 @@ def _train() -> None:
         f"pseudo_errp={args.pseudo_errp_enabled} "
         f"pseudo_errp_sources={','.join(pseudo_errp_sources) if pseudo_errp_sources else 'none'} "
         f"human_replay={human_replay.path if human_replay is not None else 'off'} "
+        f"human_observation_mode={args.human_observation_mode} "
+        f"human_replay_offset={args.human_replay_offset} "
+        f"human_replay_mirror_y={args.human_replay_mirror_y} "
+        f"visualize_human_replay={args.visualize_human_replay} "
         f"synthetic_human={args.synthetic_human}",
         flush=True,
     )
@@ -729,7 +784,7 @@ def _ppo_update(
             bc_action_loss = torch.zeros((), device=device)
             if bc_actor is not None and args.bc_action_coef > 0.0:
                 policy_mean = model.actor(obs_tensor[idx])
-                if args.policy_mode == "residual":
+                if args.policy_mode in ("residual", "safety_residual"):
                     bc_action_loss = torch.mean(policy_mean**2)
                 else:
                     with torch.no_grad():
@@ -778,7 +833,7 @@ def _clone_actor_state(model: ActorCritic) -> dict[str, torch.Tensor]:
 def _actor_constraint_mse(model: ActorCritic, bc_actor: MLPPolicy, obs_tensor: torch.Tensor) -> float:
     with torch.no_grad():
         policy_action = model.actor(obs_tensor)
-        if args.policy_mode == "residual":
+        if args.policy_mode in ("residual", "safety_residual"):
             loss = torch.mean(policy_action**2)
         else:
             bc_action = bc_actor(obs_tensor)
@@ -864,7 +919,7 @@ def _sample_bc_anchor_loss(
     idx = torch.randint(0, n, (batch_size,), device=device)
     obs_batch = obs.index_select(0, idx)
     pred = model.actor(obs_batch)
-    if args.policy_mode == "residual":
+    if args.policy_mode in ("residual", "safety_residual"):
         if bc_actor is None:
             return torch.zeros((), device=device)
         with torch.no_grad():
@@ -890,10 +945,16 @@ def _sample_action(
         tensor = torch.from_numpy(obs_norm).to(device)
         train_action, log_prob, value = model.act(tensor)
         env_action = train_action
-        if args.policy_mode == "residual":
+        if args.policy_mode in ("residual", "safety_residual"):
             if bc_actor is None:
                 raise RuntimeError("Residual policy mode requires a loaded BC actor.")
-            base_action = bc_actor(tensor)
+            base_tensor = tensor
+            if args.policy_mode == "safety_residual":
+                base_obs = _mask_human_flat_observation(
+                    np.asarray(obs, dtype=np.float32).reshape(1, -1)
+                )
+                base_tensor = torch.from_numpy(_normalize_obs(base_obs, obs_mean, obs_std)).to(device)
+            base_action = bc_actor(base_tensor)
             env_action = torch.clamp(
                 base_action + float(args.residual_scale) * train_action,
                 -1.0,
@@ -995,6 +1056,13 @@ def _load_frozen_bc_actor(
     action_dim = int(checkpoint.get("action_dim", ACTION_DIM))
     if action_dim != ACTION_DIM:
         return None
+    checkpoint_policy_mode = str(checkpoint.get("policy_mode", "direct"))
+    if args.policy_mode == "safety_residual" and checkpoint_policy_mode != "direct":
+        raise ValueError(
+            "--policy-mode safety_residual currently requires a direct frozen task policy. "
+            f"Got policy_mode={checkpoint_policy_mode!r} from {path}. "
+            "Use a BC checkpoint such as v2/policies/bc_pick_place_v1_100eps.pt."
+        )
     bc_hidden_dims = tuple(int(value) for value in checkpoint.get("hidden_dims", hidden_dims))
     bc_actor = MLPPolicy(obs_dim, action_dim, hidden_dims=bc_hidden_dims).to(device)
     bc_actor.load_state_dict(checkpoint["model_state_dict"])
@@ -1098,6 +1166,29 @@ def _normalize_obs(obs: np.ndarray, obs_mean: np.ndarray, obs_std: np.ndarray) -
     return ((obs - obs_mean) / np.maximum(obs_std, 1e-6)).astype(np.float32)
 
 
+def _mask_human_flat_observation(obs: np.ndarray) -> np.ndarray:
+    """Build the robot-only view expected by the frozen base policy."""
+
+    masked = _align_obs_dim(np.asarray(obs, dtype=np.float32), OBSERVATION_DIM).copy()
+    slices = observation_slices()
+    for key in (
+        "human_head_pos",
+        "human_left_hand_pos",
+        "human_right_hand_pos",
+        "ee_to_left_hand",
+        "ee_to_right_hand",
+        "human_robot_collision",
+        "near_human",
+    ):
+        field_slice = slices.get(key)
+        if field_slice is not None:
+            masked[:, field_slice] = 0.0
+    dist_slice = slices.get("min_hand_gripper_dist")
+    if dist_slice is not None:
+        masked[:, dist_slice] = 10.0
+    return masked
+
+
 def _align_obs_dim(obs: np.ndarray, expected_dim: int, *, fill_value: float = 0.0) -> np.ndarray:
     obs = np.asarray(obs, dtype=np.float32)
     if obs.ndim == 1:
@@ -1121,6 +1212,16 @@ def _select_device(requested: str) -> torch.device:
 def _parse_hidden_dims(text: str) -> tuple[int, ...]:
     values = [part.strip() for part in text.split(",") if part.strip()]
     return tuple(int(value) for value in values) if values else (256, 256)
+
+
+def _parse_vec3(text: str) -> np.ndarray:
+    try:
+        values = [float(part.strip()) for part in str(text).split(",")]
+    except Exception as exc:
+        raise ValueError(f"Expected comma-separated x,y,z vector, got {text!r}") from exc
+    if len(values) != 3:
+        raise ValueError(f"Expected comma-separated x,y,z vector, got {text!r}")
+    return np.asarray(values, dtype=np.float32)
 
 
 def _resolve_project_path(path: str) -> str:
