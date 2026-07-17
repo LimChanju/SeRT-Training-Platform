@@ -468,7 +468,7 @@ def _build_runtime_observation(
     left_pos: "np.ndarray | None",
     right_pos: "np.ndarray | None",
     gripper_center: "np.ndarray | None",
-    human_robot_collision: bool,
+    human_robot_collision: bool | None,
     min_hand_gripper_dist: "float | None",
     controller,
 ) -> dict:
@@ -492,9 +492,7 @@ def _build_runtime_observation(
         human_right_hand_pos=right_pos,
         gripper_center_pos=gripper_center,
         human_robot_collision=human_robot_collision,
-        near_human=(
-            min_hand_gripper_dist is not None and float(min_hand_gripper_dist) < 0.12
-        ),
+        near_human=None,
         has_grasped_cube=has_grasped,
         task_phase=task_phase,
         controller_event=event,
@@ -884,7 +882,9 @@ def main():
                     left_pos=left_pos,
                     right_pos=right_pos,
                     gripper_center=_gripper_center_from_fingers(panda),
-                    human_robot_collision=arm_robot_collision_active,
+                    # Dataset labels use the shared surface-gap definition. The
+                    # PhysX/contact flag remains available for haptics above.
+                    human_robot_collision=None,
                     min_hand_gripper_dist=min_hand_gripper_dist,
                     controller=controller,
                 )
@@ -905,18 +905,22 @@ def main():
                             if right_hand_gripper_dist is not None
                             else np.nan
                         ),
-                        "min_hand_gripper_dist_m": (
-                            min_hand_gripper_dist
-                            if min_hand_gripper_dist is not None
-                            else np.nan
+                        "min_hand_gripper_dist_m": float(
+                            np.asarray(obs["min_hand_gripper_dist"]).reshape(-1)[0]
                         ),
-                        "near_human": (
-                            1.0
-                            if min_hand_gripper_dist is not None
-                            and float(min_hand_gripper_dist) < 0.12
-                            else 0.0
+                        "min_hand_gripper_center_dist_m": float(
+                            np.asarray(obs["min_hand_gripper_center_dist"]).reshape(-1)[0]
                         ),
-                        "human_robot_collision": 1.0 if arm_robot_collision_active else 0.0,
+                        "min_hand_gripper_surface_gap_m": float(
+                            np.asarray(obs["min_hand_gripper_surface_gap"]).reshape(-1)[0]
+                        ),
+                        "near_human": float(
+                            np.asarray(obs["near_human"]).reshape(-1)[0]
+                        ),
+                        "near_miss": float(np.asarray(obs["near_miss"]).reshape(-1)[0]),
+                        "human_robot_collision": float(
+                            np.asarray(obs["human_robot_collision"]).reshape(-1)[0]
+                        ),
                         "haptic_pulse_left": 1.0 if haptic_pulse_by_hand["left"] else 0.0,
                         "haptic_pulse_right": 1.0 if haptic_pulse_by_hand["right"] else 0.0,
                         "gripper_gap_left_m": (
