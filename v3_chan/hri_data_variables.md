@@ -8,19 +8,20 @@
 |---|---|
 | `sim_time` | 이벤트가 발생한 시뮬레이션 시간 |
 | `event` | 이벤트 이름 |
-| `details` | 이벤트 상세 정보 |
+| `details` | 이벤트 상세 정보. 사람-로봇 event에는 hand, collider path와 `surface_gap_m` 포함 |
 
 | `event` 값 | 의미 |
 |---|---|
 | `episode_start` | episode 시작 |
 | `episode_end` | episode 종료 |
-| `arm_robot_proximity` | 사람 손/팔 proxy가 로봇 링크의 근접 거리 안에 들어옴 |
-| `arm_robot_collision` | 사람 손/팔 proxy가 로봇 링크의 접촉 거리 안에 들어옴 |
+| `arm_robot_proximity` | 손 sphere와 distal Panda built-in collider의 surface gap이 `0.05 m` 이하 |
+| `arm_robot_collision` | 손 sphere와 distal Panda built-in collider가 실제 overlap/contact |
 | `pick_miss` | 로봇 gripper가 cube grasp에 실패한 후보 이벤트 |
 | `drop_throw` | cube가 떨어지거나 튕겨나간 후보 이벤트 |
 | `collision_green` | 보호 대상 green cube와 충돌한 후보 이벤트 |
-| `human_collision` | 기존 human proxy 기준 충돌 후보 이벤트 |
 | `stack_failure` | 쌓은 cube가 목표 높이 아래로 떨어진 후보 이벤트 |
+| `pick_attempt_success` | grasp, lift, 목표 위치 및 안정성 검증을 통과한 pick-place attempt |
+| `pick_attempt_failed` | 실제 place 검증에 실패하여 같은 cube를 재시도하는 attempt |
 
 ## 2. `v3_chan/session_samples.csv`
 
@@ -33,7 +34,7 @@
 | `left_hand_gripper_dist_m` | 왼손 sphere proxy와 gripper 사이 거리 |
 | `right_hand_gripper_dist_m` | 오른손 sphere proxy와 gripper 사이 거리 |
 | `min_hand_gripper_dist_m` | 양손 중 gripper와 더 가까운 거리 |
-| `human_robot_collision` | gripper contact/haptic trigger 기준 충돌 flag |
+| `human_robot_collision` | 손 sphere와 distal Panda built-in collider의 overlap 기준 충돌 flag |
 
 ## 3. `v3_chan/trajectories/hri_vr_sphere_obs.hdf5`
 
@@ -64,6 +65,19 @@
 | `current_pick_idx` | 현재 pick 대상 cube index |
 | `completed_picks` | 현재 episode 안에서 완료한 pick 개수 |
 
+새 수집 데이터에서 episode 길이는 고정값이 아니다. 실제 place 검증에 실패하면 같은 cube를 재시도하므로, 3회보다 많은 pick-and-place controller attempt가 포함될 수 있다.
+
+새 recorder schema는 `hri_obs_v4_builtin_panda_collision_geometry`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 built-in Panda collider 보조 변수를 포함해 84차원이다. 기존 v1/v2의 74차원과 v3의 77차원 파일은 과거 데이터로 그대로 유지된다.
+
+surface 기반 flag의 기본 기준은 다음과 같다.
+
+| 변수명 | 기본 기준 |
+|---|---|
+| `human_robot_collision` | 실제 PhysX overlap 또는 `min_hand_end_effector_surface_gap <= 0.0 m` |
+| `near_miss` | `0.0 m < min_hand_end_effector_surface_gap <= 0.02 m` |
+| `near_human` | `min_hand_end_effector_surface_gap <= 0.05 m` |
+| `distance_gate` | `clip((0.13 - gap) / (0.13 - 0.05), 0, 1)` |
+
 ### `hri_obs/*`
 
 `hri_obs_policy`에 포함되는 핵심 변수이다.
@@ -86,9 +100,19 @@
 | `human_right_hand_pos` | 오른손 sphere proxy world position |
 | `ee_to_left_hand` | `human_left_hand_pos - ee_pos` |
 | `ee_to_right_hand` | `human_right_hand_pos - ee_pos` |
-| `min_hand_gripper_dist` | 양손 중 gripper와 가장 가까운 거리 |
-| `human_robot_collision` | 사람 손 proxy와 gripper/robot 충돌 flag |
+| `min_hand_gripper_dist` | 호환용 canonical signed surface gap. v2 surface observation부터 음수는 겹침을 뜻함 |
+| `min_hand_gripper_center_dist` | 양손 sphere 중심 중 gripper 중심과 가장 가까운 Euclidean 거리 |
+| `min_hand_gripper_surface_gap` | 호환용 이름. 손 sphere와 distal end-effector collider 사이 signed surface gap |
+| `human_robot_collision` | 사람 손 proxy와 distal end-effector collider 충돌 flag |
 | `near_human` | 손이 인지적 안전 근접 거리 안에 있는지 |
+| `near_miss` | 접촉하지 않았지만 surface gap이 near-miss 범위 안인지 |
+| `left_hand_end_effector_surface_gap` | 왼손 sphere와 distal Panda built-in collider 사이 최소 signed gap |
+| `right_hand_end_effector_surface_gap` | 오른손 sphere와 distal Panda built-in collider 사이 최소 signed gap |
+| `min_hand_end_effector_surface_gap` | 양손 중 최소 signed gap |
+| `left_hand_contact` | 왼손 PhysX overlap/contact flag |
+| `right_hand_contact` | 오른손 PhysX overlap/contact flag |
+| `distance_gate` | 공통 safety residual gate |
+| `geometry_valid` | collider query와 손 tracking 유효 여부 |
 | `has_grasped_cube` | 현재 cube grasp 추정 flag |
 | `task_phase` | task phase one-hot |
 | `controller_event` | PickPlaceController event one-hot |
@@ -117,9 +141,12 @@
 | `human_right_hand_pos` | 오른손 sphere proxy world position |
 | `ee_to_left_hand` | `human_left_hand_pos - ee_pos` |
 | `ee_to_right_hand` | `human_right_hand_pos - ee_pos` |
-| `min_hand_gripper_dist` | 양손 중 gripper와 가장 가까운 거리 |
+| `min_hand_gripper_dist` | 호환용 canonical signed surface gap. `obs_policy`의 84차원 위치는 유지됨 |
+| `min_hand_gripper_center_dist` | 양손 sphere 중심 중 gripper 중심과 가장 가까운 Euclidean 거리. flatten된 `obs_policy`에는 제외됨 |
+| `min_hand_gripper_surface_gap` | 손 sphere와 gripper geometry 사이 signed surface gap. flatten된 `obs_policy`에는 제외됨 |
 | `human_robot_collision` | 사람 손 proxy와 gripper/robot 충돌 flag |
 | `near_human` | 손이 인지적 안전 근접 거리 안에 있는지 |
+| `near_miss` | 접촉하지 않았지만 surface gap이 near-miss 범위 안인지. flatten된 `obs_policy`에는 제외됨 |
 | `collision_green` | green cube 충돌 flag |
 | `pick_miss_recent` | 최근 pick miss flag |
 | `drop_throw_recent` | 최근 drop/throw flag |
@@ -146,15 +173,27 @@
 |---|---|
 | `left_hand_gripper_dist_m` | 왼손 sphere proxy와 gripper 사이 거리 |
 | `right_hand_gripper_dist_m` | 오른손 sphere proxy와 gripper 사이 거리 |
-| `min_hand_gripper_dist_m` | 양손 중 gripper와 가장 가까운 거리 |
+| `min_hand_gripper_dist_m` | canonical signed surface gap. `min_hand_gripper_surface_gap_m`과 동일한 의미 |
+| `min_hand_gripper_center_dist_m` | 양손 sphere 중심 중 gripper 중심과 가장 가까운 거리 |
+| `min_hand_gripper_surface_gap_m` | 호환용 이름. 손 sphere와 distal end-effector collider 사이 signed surface gap |
 | `near_human` | 손이 인지적 안전 근접 거리 안에 있는지 |
-| `human_robot_collision` | 사람 손 proxy와 gripper/robot 충돌 flag |
+| `near_miss` | 접촉 없이 surface gap이 near-miss 범위 안인지 |
+| `human_robot_collision` | 사람 손 proxy와 distal end-effector collider 충돌 flag |
 | `haptic_pulse_left` | 왼손 bHaptics pulse trigger 여부 |
 | `haptic_pulse_right` | 오른손 bHaptics pulse trigger 여부 |
-| `gripper_gap_left_m` | 왼손 proxy와 gripper haptic proxy 사이 signed gap |
-| `gripper_gap_right_m` | 오른손 proxy와 gripper haptic proxy 사이 signed gap |
-| `gripper_penetration_left_m` | 왼손 proxy와 gripper haptic proxy의 penetration depth |
-| `gripper_penetration_right_m` | 오른손 proxy와 gripper haptic proxy의 penetration depth |
+| `end_effector_surface_gap_m` | 양손과 distal Panda built-in collider 사이 최소 signed gap |
+| `left_end_effector_surface_gap_m` | 왼손 최소 signed gap |
+| `right_end_effector_surface_gap_m` | 오른손 최소 signed gap |
+| `closest_human_hand_id` | closest hand ID (`0=none, 1=left, 2=right`) |
+| `closest_robot_link_id` | HDF5 root metadata의 링크 ID |
+| `closest_collider_id` | HDF5 root metadata의 collider ID |
+| `contact_active` | 양손 중 하나라도 contact인지 |
+| `contact_force_n` | available contact magnitude. query sphere에서는 `0` |
+| `penetration_depth_m` | 최소 gap 기준 penetration depth |
+| `distance_gate` | safety residual gate |
+| `geometry_valid` | 손 tracking 및 geometry query 유효 여부 |
+| `gripper_gap_left_m` | v3 reader 호환용 왼손 built-in collider signed gap alias |
+| `gripper_gap_right_m` | v3 reader 호환용 오른손 built-in collider signed gap alias |
 
 ### `errp/*`
 
@@ -197,5 +236,10 @@ RL reward shaping을 위한 group이다.
 |---|---|
 | `current_pick_idx` | 현재 pick 대상 cube index |
 | `completed_picks` | 현재 episode 안에서 완료한 pick 개수 |
+| `attempt_index` | episode 안에서 현재 수행 중인 전체 attempt 번호. 1부터 시작 |
+| `current_cube_attempt` | 현재 cube에 대한 attempt 번호. 실패 후 재시도할 때 증가 |
+| `failed_attempts` | 현재 step까지 누적된 실제 place 검증 실패 횟수 |
 | `has_grasped_cube` | 현재 cube grasp 추정 flag |
 | `controller_event` | PickPlaceController event index |
+
+Episode attribute의 `success=True`는 세 cube가 robot grasp, 5 cm 이상 lift, 목표 위치 및 안정성 검증을 모두 통과했다는 뜻이다. `attempts`와 `failed_attempts`에는 해당 episode의 전체 시도 및 재시도 횟수가 기록된다.

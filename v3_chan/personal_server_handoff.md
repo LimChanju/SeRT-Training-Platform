@@ -34,7 +34,7 @@ XR_HAND_HAPTIC_POINT_MODE=sphere
 v3_chan/trajectories/hri_vr_sphere_obs.hdf5
 ```
 
-현재 확인된 첫 episode:
+과거 v1 schema에서 확인된 첫 episode 예시:
 
 ```text
 episode_000000
@@ -48,6 +48,10 @@ safety/human_robot_collision sum = 66
 safety/haptic_pulse_left sum = 29
 safety/haptic_pulse_right sum = 37
 ```
+
+`hri_obs_v2_verified_place_retry`부터는 실패한 pick-place attempt를 같은 episode 안에서 재시도하므로 `episode_length`와 observation shape의 첫 번째 차원은 가변적이다. Episode의 `success=True`는 세 cube가 실제 grasp, lift, place 검증을 모두 통과한 경우에만 기록된다.
+
+`hri_obs_v4_builtin_panda_collision_geometry`부터 `obs_policy`는 기존 checkpoint 호환을 위해 84차원을 유지하고, `hri_obs_policy`도 built-in Panda collider 기반 보조 변수를 포함한 84차원이다. 기존 v1/v2의 74차원 및 v3의 77차원 HRI vector와 v4를 같은 batch에 바로 섞지 말고 schema별로 변환하거나 분리한다.
 
 세부 요약은 아래 문서에 있다.
 
@@ -104,14 +108,14 @@ a_final = a_task + gate * alpha * a_safe
 예시:
 
 ```text
-gate = clip((0.20 - min_hand_gripper_dist) / (0.20 - 0.08), 0, 1)
+gate = clip((0.13 - min_hand_end_effector_surface_gap) / (0.13 - 0.05), 0, 1)
 ```
 
 해석:
 
 ```text
-min_hand_gripper_dist >= 0.20 m  -> gate = 0
-min_hand_gripper_dist <= 0.08 m  -> gate = 1
+min_hand_end_effector_surface_gap >= 0.13 m  -> gate = 0
+min_hand_end_effector_surface_gap <= 0.05 m  -> gate = 1
 중간 거리                      -> 선형 보간
 ```
 
@@ -124,6 +128,14 @@ alpha = 0.1 ~ 0.3
 ```
 
 ErrP는 `alpha`를 직접 바꾸는 데 쓰지 않고, `pi_safe`의 reward shaping에 사용하는 것을 권장한다.
+
+현재 코드의 선택형 gate 인자는 다음과 같다.
+
+```text
+--policy-mode residual --residual-gate-mode distance --residual-scale 0.1
+```
+
+기존 robot-only residual checkpoint는 `residual_gate_mode` metadata가 없으므로 `none`으로 평가되어 과거 동작을 유지한다. 단, 현재 `pi_task`가 `BC + task residual PPO`의 합성 policy라면 safety trainer의 base loader도 그 두 policy를 함께 평가해야 한다. task residual actor의 `model_state_dict`만 `pi_task`로 사용하면 안 된다.
 
 ## ErrP Replay 계획
 

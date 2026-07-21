@@ -1,6 +1,5 @@
-# vr_avatar.py — VR 트래킹 기반 인체 아바타
-# HMD = 시점 기준, 컨트롤러/손 = 손 (sphere)
-# 어깨→손 선분이 로봇과 충돌 시 ErrP 발생
+# vr_avatar.py - VR tracking avatar and visible hand spheres.
+# Safety labels are computed separately from built-in Panda PhysX colliders.
 #
 # ── xrAnchor 일회 이동 전략 ──────────────────────────────────────────────
 # get_virtual_world_pose() = xrAnchor + 물리_룸_위치
@@ -15,6 +14,8 @@ import os
 import numpy as np
 from pxr import Gf, Usd, UsdGeom
 
+from end_effector_safety_geometry import DEFAULT_THRESHOLDS
+
 # 아바타 머리 중심 위치 (시뮬 월드 좌표)
 AVATAR_HEAD_INIT = np.array([1.1, 0.0, 1.5])
 
@@ -23,48 +24,12 @@ SHOULDER_Y = 0.20   # 좌우 ±0.20 m
 SHOULDER_Z = -0.20  # 머리보다 0.20 m 아래
 
 HEAD_RADIUS = 0.10
-HAND_RADIUS = 0.05
+HAND_RADIUS = DEFAULT_THRESHOLDS.hand_radius_m
 
 # 눈 위치: 머리 구 중심에서 앞(테이블 방향, -x)으로 HEAD_RADIUS만큼 앞
 AVATAR_EYE_OFFSET = np.array([-HEAD_RADIUS, 0.0, 0.0])
 AVATAR_EYE_POS    = AVATAR_HEAD_INIT + AVATAR_EYE_OFFSET  # [1.00, 0.0, 1.5]
 
-ARM_PROXIMITY_DIST = float(
-    os.environ.get(
-        "ARM_ROBOT_PROXIMITY_DIST",
-        os.environ.get("ARM_ROBOT_COLLISION_DIST", "0.08"),
-    )
-)
-ARM_CONTACT_DIST = float(os.environ.get("ARM_ROBOT_CONTACT_DIST", "0.04"))
-ARM_ROBOT_COLLISION_MODE = os.environ.get(
-    "ARM_ROBOT_COLLISION_MODE", "controller"
-).strip().lower()
-ARM_ROBOT_COLLISION_GEOMETRY = os.environ.get(
-    "ARM_ROBOT_COLLISION_GEOMETRY", "capsule"
-).strip().lower()
-ARM_ROBOT_CAPSULE_RADIUS = float(os.environ.get("ARM_ROBOT_CAPSULE_RADIUS", "0.09"))
-ARM_ROBOT_FINGER_CAPSULE_RADIUS = float(
-    os.environ.get("ARM_ROBOT_FINGER_CAPSULE_RADIUS", "0.035")
-)
-GRIPPER_VISUAL_OVERLAP_MARGIN = float(os.environ.get("GRIPPER_VISUAL_OVERLAP_MARGIN", "0.01"))
-GRIPPER_HAPTIC_HAND_RADIUS = float(os.environ.get("GRIPPER_HAPTIC_HAND_RADIUS", "0.018"))
-GRIPPER_HAPTIC_FINGER_RADIUS = float(os.environ.get("GRIPPER_HAPTIC_FINGER_RADIUS", "0.018"))
-GRIPPER_HAPTIC_PALM_RADIUS = float(os.environ.get("GRIPPER_HAPTIC_PALM_RADIUS", "0.025"))
-GRIPPER_HAPTIC_CONTACT_MARGIN = float(os.environ.get("GRIPPER_HAPTIC_CONTACT_MARGIN", "0.0"))
-GRIPPER_HAPTIC_FINGER_SEGMENT_MIN_T = float(
-    os.environ.get("GRIPPER_HAPTIC_FINGER_SEGMENT_MIN_T", "0.45")
-)
-GRIPPER_HAPTIC_HAND_POINT_SUFFIXES = tuple(
-    suffix.strip().lower()
-    for suffix in os.environ.get("GRIPPER_HAPTIC_HAND_POINT_SUFFIXES", "_tip").split(",")
-    if suffix.strip()
-)
-DEBUG_ARM_COLLISION = os.environ.get("DEBUG_ARM_COLLISION", "0").lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
 XR_ZERO_POSE_INVALID_DIST = float(os.environ.get("XR_ZERO_POSE_INVALID_DIST", "0.03"))
 XR_STAGE_VISUAL_FALLBACK = os.environ.get("XR_STAGE_VISUAL_FALLBACK", "0").lower() in (
     "1",
@@ -122,41 +87,6 @@ def room_to_world_delta(delta: np.ndarray) -> np.ndarray:
 
 def room_to_world_point(pos: np.ndarray) -> np.ndarray:
     return room_to_world_delta(pos)
-
-ROBOT_LINK_PATHS = [
-    "/World/Franka/panda_link1",
-    "/World/Franka/panda_link2",
-    "/World/Franka/panda_link3",
-    "/World/Franka/panda_link4",
-    "/World/Franka/panda_link5",
-    "/World/Franka/panda_link6",
-    "/World/Franka/panda_link7",
-    "/World/Franka/panda_hand",
-    "/World/Franka/panda_leftfinger",
-    "/World/Franka/panda_rightfinger",
-]
-
-GRIPPER_VISUAL_PRIM_PATHS = (
-    "/World/Franka/panda_hand",
-    "/World/Franka/panda_leftfinger",
-    "/World/Franka/panda_rightfinger",
-)
-
-ROBOT_ARM_CHAIN_PATHS = [
-    "/World/Franka/panda_link1",
-    "/World/Franka/panda_link2",
-    "/World/Franka/panda_link3",
-    "/World/Franka/panda_link4",
-    "/World/Franka/panda_link5",
-    "/World/Franka/panda_link6",
-    "/World/Franka/panda_link7",
-    "/World/Franka/panda_hand",
-]
-
-ROBOT_FINGER_CHAIN_PATHS = [
-    ("/World/Franka/panda_hand", "/World/Franka/panda_leftfinger"),
-    ("/World/Franka/panda_hand", "/World/Franka/panda_rightfinger"),
-]
 
 COLOR_LEFT  = 0xFF88AAFF
 COLOR_RIGHT = 0xFFFF8844
@@ -307,37 +237,6 @@ def _is_invalid_xr_pos(xr_path: str, pos: "np.ndarray | None") -> bool:
     return False
 
 
-def _seg_dist(point: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
-    ab = b - a
-    sq = float(np.dot(ab, ab))
-    if sq < 1e-10:
-        return float(np.linalg.norm(point - a))
-    t = np.clip(float(np.dot(point - a, ab)) / sq, 0.0, 1.0)
-    return float(np.linalg.norm(point - (a + t * ab)))
-
-
-def _seg_dist_window(
-    point: np.ndarray,
-    a: np.ndarray,
-    b: np.ndarray,
-    t_min: float,
-    t_max: float,
-) -> float:
-    ab = b - a
-    sq = float(np.dot(ab, ab))
-    if sq < 1e-10:
-        return float(np.linalg.norm(point - b))
-    lo = max(0.0, min(1.0, float(t_min)))
-    hi = max(lo, min(1.0, float(t_max)))
-    t = np.clip(float(np.dot(point - a, ab)) / sq, lo, hi)
-    return float(np.linalg.norm(point - (a + t * ab)))
-
-
-def _point_aabb_dist(point: np.ndarray, box_min: np.ndarray, box_max: np.ndarray) -> float:
-    outside = np.maximum(0.0, np.maximum(box_min - point, point - box_max))
-    return float(np.linalg.norm(outside))
-
-
 def _env_pose_priority(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -381,10 +280,6 @@ class VRAvatar:
         self._openxr_spec = None
         self._openxr_failed = False
         self._debug_draw  = None
-        self._robot_links = None
-        self._robot_link_prims = None
-        self._robot_link_by_path = None
-        self._bbox_cache = None
         self._devices = {}
         self._last_pose_mats = {}
         self._stage_visual_candidates = {"left": [], "right": []}
@@ -410,7 +305,6 @@ class VRAvatar:
         self._accepted_controller_pose_paths = set()
         self._openxr_wait_logged = False
         self._coord_logged = False
-        self._collision_debug_counts = {"left": 0, "right": 0}
         print(
             f"[Avatar] XR hand swap={XR_SWAP_HANDS} | "
             f"openxr-hand-joints={XR_USE_OPENXR_HAND_JOINTS} | "
@@ -425,9 +319,8 @@ class VRAvatar:
             f"workspace-guard={XR_CONTROLLER_WORKSPACE_GUARD} "
             f"z=[{XR_CONTROLLER_MIN_Z_M:.2f},{XR_CONTROLLER_MAX_Z_M:.2f}]m "
             f"max-head-dist={XR_CONTROLLER_MAX_HEAD_DIST_M:.2f}m | "
-            f"collision-geometry={ARM_ROBOT_COLLISION_GEOMETRY} "
-            f"proximity={ARM_PROXIMITY_DIST:.3f}m contact={ARM_CONTACT_DIST:.3f}m | "
-            f"capsule-radius={ARM_ROBOT_CAPSULE_RADIUS:.3f}m | "
+            "safety-geometry=built-in-panda-physx (external runtime) | "
+            f"hand-radius={HAND_RADIUS:.3f}m | "
             f"zero-pose-invalid<{XR_ZERO_POSE_INVALID_DIST:.3f}m | "
             f"virtual-world-pose-fallback={XR_VIRTUAL_WORLD_POSE_FALLBACK} | "
             f"stage-visual-fallback={XR_STAGE_VISUAL_FALLBACK} | "
@@ -1255,344 +1148,6 @@ class VRAvatar:
                         pass
 
         return head_pos, left_pos, right_pos
-
-    # ── 로봇 충돌 감지 ────────────────────────────────────────────────────
-    def _ensure_links(self):
-        if self._robot_links is not None:
-            return
-        import omni.usd
-        from omni.isaac.core.prims import XFormPrim
-        stage = omni.usd.get_context().get_stage()
-        self._robot_links = []
-        self._robot_link_prims = []
-        self._robot_link_by_path = {}
-        for p in ROBOT_LINK_PATHS:
-            prim = stage.GetPrimAtPath(p)
-            if not prim.IsValid():
-                continue
-            link = XFormPrim(prim_path=p)
-            self._robot_links.append(link)
-            self._robot_link_prims.append(prim)
-            self._robot_link_by_path[p] = link
-        if ARM_ROBOT_COLLISION_GEOMETRY == "bbox":
-            self._bbox_cache = UsdGeom.BBoxCache(
-                Usd.TimeCode.Default(),
-                [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
-                useExtentsHint=True,
-            )
-        print(f"[Avatar] {len(self._robot_links)}/{len(ROBOT_LINK_PATHS)} robot links loaded.")
-
-    def _ensure_bbox_cache(self) -> None:
-        if self._bbox_cache is None:
-            self._bbox_cache = UsdGeom.BBoxCache(
-                Usd.TimeCode.Default(),
-                [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
-                useExtentsHint=True,
-            )
-        try:
-            self._bbox_cache.Clear()
-        except Exception:
-            pass
-
-    def _robot_link_bbox_distance(self, prim, point: np.ndarray) -> "float | None":
-        if self._bbox_cache is None:
-            return None
-        try:
-            box = self._bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
-            box_min_gf = box.GetMin()
-            box_max_gf = box.GetMax()
-            box_min = np.array([box_min_gf[0], box_min_gf[1], box_min_gf[2]], dtype=float)
-            box_max = np.array([box_max_gf[0], box_max_gf[1], box_max_gf[2]], dtype=float)
-        except Exception:
-            return None
-        if (
-            not np.all(np.isfinite(box_min))
-            or not np.all(np.isfinite(box_max))
-            or np.any(box_max < box_min)
-        ):
-            return None
-        return _point_aabb_dist(point, box_min, box_max)
-
-    def _robot_link_world_pos(self, path: str) -> "np.ndarray | None":
-        link = (self._robot_link_by_path or {}).get(path)
-        if link is None:
-            return None
-        try:
-            pos, _ = link.get_world_pose()
-        except Exception:
-            return None
-        pos = np.asarray(pos, dtype=float)
-        if not np.all(np.isfinite(pos)):
-            return None
-        return pos
-
-    def _robot_capsule_distances(self, point: np.ndarray) -> "list[tuple[float, str]]":
-        """Approximate moving Franka links with pose-driven capsules.
-
-        USD BBoxCache can lag behind PhysX articulation transforms, which makes
-        collision/haptics feel fixed in world space. Link poses follow the
-        articulation every frame, so this approximation is more reliable for VR.
-        """
-        distances = []
-
-        arm_points = []
-        for path in ROBOT_ARM_CHAIN_PATHS:
-            pos = self._robot_link_world_pos(path)
-            if pos is not None:
-                arm_points.append((path, pos))
-
-        for (path_a, pos_a), (path_b, pos_b) in zip(arm_points, arm_points[1:]):
-            dist = max(0.0, _seg_dist(point, pos_a, pos_b) - ARM_ROBOT_CAPSULE_RADIUS)
-            label = f"{path_a}->{path_b}"
-            distances.append((dist, label))
-
-        for path_a, path_b in ROBOT_FINGER_CHAIN_PATHS:
-            pos_a = self._robot_link_world_pos(path_a)
-            pos_b = self._robot_link_world_pos(path_b)
-            if pos_a is None or pos_b is None:
-                continue
-            dist = max(0.0, _seg_dist(point, pos_a, pos_b) - ARM_ROBOT_FINGER_CAPSULE_RADIUS)
-            label = f"{path_a}->{path_b}"
-            distances.append((dist, label))
-
-        if distances:
-            return distances
-
-        # Fallback to per-link origin distance if the chain could not be built.
-        for link in self._robot_links or []:
-            try:
-                link_pos, _ = link.get_world_pose()
-            except Exception:
-                continue
-            dist = float(np.linalg.norm(np.asarray(link_pos, dtype=float) - point))
-            distances.append((dist, link.prim_path))
-        return distances
-
-    def _robot_capsule_distance(self, point: np.ndarray) -> "tuple[float, str]":
-        distances = self._robot_capsule_distances(point)
-        return min(distances, default=(float("inf"), ""), key=lambda item: item[0])
-
-    def gripper_haptic_distance(self, point: "np.ndarray | None") -> "tuple[float | None, str]":
-        if point is None:
-            return None, ""
-        self._ensure_links()
-        distances = []
-        for path_a, path_b in ROBOT_FINGER_CHAIN_PATHS:
-            pos_a = self._robot_link_world_pos(path_a)
-            pos_b = self._robot_link_world_pos(path_b)
-            if pos_a is None or pos_b is None:
-                continue
-            dist = max(0.0, _seg_dist(point, pos_a, pos_b) - ARM_ROBOT_FINGER_CAPSULE_RADIUS)
-            distances.append((dist, f"{path_a}->{path_b}"))
-
-        hand_pos = self._robot_link_world_pos("/World/Franka/panda_hand")
-        if hand_pos is not None:
-            dist = max(0.0, float(np.linalg.norm(np.asarray(point, dtype=float) - hand_pos)) - 0.045)
-            distances.append((dist, "/World/Franka/panda_hand"))
-
-        if not distances:
-            return None, ""
-        dist, label = min(distances, key=lambda item: item[0])
-        return dist, label
-
-    def gripper_haptic_contact(
-        self,
-        hand: str,
-        point: "np.ndarray | None",
-    ) -> "tuple[bool, float | None, str, float | None]":
-        """Narrow haptic-only contact test using pose-driven gripper proxies.
-
-        Returns (active, signed_gap, label, penetration). signed_gap <= 0 means
-        the hand proxy overlaps the haptic gripper proxy.
-        """
-        if point is None:
-            return False, None, "", None
-        self._ensure_links()
-        palm_arr = np.asarray(point, dtype=float)
-        if not np.all(np.isfinite(palm_arr)):
-            return False, None, "", None
-
-        hand_points = self._haptic_hand_points(hand, palm_arr)
-        if not hand_points:
-            return False, None, "", None
-
-        distances = []
-        finger_radius_sum = GRIPPER_HAPTIC_HAND_RADIUS + GRIPPER_HAPTIC_FINGER_RADIUS
-        for path_a, path_b in ROBOT_FINGER_CHAIN_PATHS:
-            pos_a = self._robot_link_world_pos(path_a)
-            pos_b = self._robot_link_world_pos(path_b)
-            if pos_a is None or pos_b is None:
-                continue
-            for hand_label, hand_point in hand_points:
-                gap = float(
-                    _seg_dist_window(
-                        hand_point,
-                        pos_a,
-                        pos_b,
-                        GRIPPER_HAPTIC_FINGER_SEGMENT_MIN_T,
-                        1.0,
-                    )
-                    - finger_radius_sum
-                )
-                distances.append((gap, f"{hand_label}:{path_a}->{path_b}"))
-
-        hand_pos = self._robot_link_world_pos("/World/Franka/panda_hand")
-        if hand_pos is not None:
-            palm_radius_sum = GRIPPER_HAPTIC_HAND_RADIUS + GRIPPER_HAPTIC_PALM_RADIUS
-            for hand_label, hand_point in hand_points:
-                gap = float(np.linalg.norm(hand_point - hand_pos) - palm_radius_sum)
-                distances.append((gap, f"{hand_label}:/World/Franka/panda_hand"))
-
-        if not distances:
-            return False, None, "", None
-        gap, label = min(distances, key=lambda item: item[0])
-        active = gap <= GRIPPER_HAPTIC_CONTACT_MARGIN
-        penetration = max(0.0, -gap)
-        return active, gap, label, penetration
-
-    def _haptic_hand_points(
-        self,
-        hand: str,
-        palm_pos: np.ndarray,
-    ) -> "list[tuple[str, np.ndarray]]":
-        if HAND_HAPTIC_POINT_MODE in ("sphere", "center", "controller", "single"):
-            return [("hand_sphere", palm_pos)]
-
-        def _is_haptic_point(name: str) -> bool:
-            lowered = name.lower()
-            return any(lowered.endswith(suffix) for suffix in GRIPPER_HAPTIC_HAND_POINT_SUFFIXES)
-
-        joint_positions = self._external_hand_joint_positions(hand)
-        use_external = bool(joint_positions)
-        if not joint_positions:
-            joint_positions = self._openxr_hand_joint_positions(hand)
-        if joint_positions:
-            points = []
-            for joint_name, pos in joint_positions.items():
-                label = joint_name.replace("XR_HAND_JOINT_", "").replace("_EXT", "").lower()
-                if not _is_haptic_point(label):
-                    continue
-                out_pos = self._with_hand_visual_offset(hand, pos) if use_external else pos
-                points.append((label, out_pos))
-            if points:
-                return points
-
-        if EXTERNAL_HAND_TRACKING_ENABLED or XR_USE_OPENXR_HAND_JOINTS:
-            return []
-
-        points = []
-        for name, offset in FALLBACK_HAND_OFFSETS:
-            if not _is_haptic_point(name):
-                continue
-            points.append((name, palm_pos + self._fallback_hand_offset(hand, offset)))
-        return points
-
-    def gripper_visual_overlap(self, point: "np.ndarray | None") -> "tuple[bool, float | None, str]":
-        """Check visible overlap between the hand proxy sphere and gripper visual bounds."""
-        if point is None:
-            return False, None, ""
-        self._ensure_links()
-        self._ensure_bbox_cache()
-        point_arr = np.asarray(point, dtype=float)
-        prim_by_path = dict(zip(ROBOT_LINK_PATHS, self._robot_link_prims or []))
-        best_dist = float("inf")
-        best_label = ""
-        for path in GRIPPER_VISUAL_PRIM_PATHS:
-            prim = prim_by_path.get(path)
-            if prim is None:
-                continue
-            dist = self._robot_link_bbox_distance(prim, point_arr)
-            if dist is None:
-                continue
-            if dist < best_dist:
-                best_dist = dist
-                best_label = path
-        if not best_label:
-            return False, None, ""
-        overlap_limit = HAND_RADIUS + GRIPPER_VISUAL_OVERLAP_MARGIN
-        return best_dist <= overlap_limit, best_dist, best_label
-
-    def check_robot_proximity(
-        self,
-        hand: str,
-        head_pos: "np.ndarray | None",
-        ctrl_pos: "np.ndarray | None",
-    ) -> "tuple[list[str], list[str]]":
-        if ctrl_pos is None:
-            return [], []
-        if ARM_ROBOT_COLLISION_MODE == "arm" and head_pos is None:
-            return [], []
-        sh = self.shoulder_pos(hand, head_pos) if head_pos is not None else None
-        self._ensure_links()
-        if self._bbox_cache is not None:
-            try:
-                self._bbox_cache.Clear()
-            except Exception:
-                pass
-        proximity_hits = []
-        contact_hits = []
-        nearest = (float("inf"), "")
-        if ARM_ROBOT_COLLISION_GEOMETRY in ("capsule", "capsules", "skeleton"):
-            distances = self._robot_capsule_distances(ctrl_pos)
-            nearest = min(distances, default=(float("inf"), ""), key=lambda item: item[0])
-            for dist, label in distances:
-                if dist < ARM_PROXIMITY_DIST and label:
-                    proximity_hits.append(label)
-                if dist < ARM_CONTACT_DIST and label:
-                    contact_hits.append(label)
-            if DEBUG_ARM_COLLISION:
-                self._collision_debug_counts[hand] = self._collision_debug_counts.get(hand, 0) + 1
-                count = self._collision_debug_counts[hand]
-                if proximity_hits or contact_hits or count % 120 == 0:
-                    print(
-                        f"[CollisionDBG] {hand} pos={np.round(ctrl_pos, 3)} "
-                        f"nearest={nearest[1]} dist={nearest[0]:.3f} "
-                        f"proximity={proximity_hits[:3]} contact={contact_hits[:3]}"
-                    )
-            return proximity_hits, contact_hits
-
-        link_prims = self._robot_link_prims or [None] * len(self._robot_links or [])
-        for link, prim in zip((self._robot_links or []), link_prims):
-            try:
-                link_pos, _ = link.get_world_pose()
-            except Exception:
-                continue
-            if ARM_ROBOT_COLLISION_MODE == "arm" and sh is not None:
-                dist = _seg_dist(link_pos, sh, ctrl_pos)
-            else:
-                dist = (
-                    self._robot_link_bbox_distance(prim, ctrl_pos)
-                    if prim is not None and ARM_ROBOT_COLLISION_GEOMETRY == "bbox"
-                    else None
-                )
-                if dist is None:
-                    dist = float(np.linalg.norm(np.asarray(link_pos, dtype=float) - ctrl_pos))
-            if dist < nearest[0]:
-                nearest = (dist, link.prim_path)
-            if dist < ARM_PROXIMITY_DIST:
-                proximity_hits.append(link.prim_path)
-            if dist < ARM_CONTACT_DIST:
-                contact_hits.append(link.prim_path)
-        if DEBUG_ARM_COLLISION:
-            self._collision_debug_counts[hand] = self._collision_debug_counts.get(hand, 0) + 1
-            count = self._collision_debug_counts[hand]
-            if proximity_hits or contact_hits or count % 120 == 0:
-                print(
-                    f"[CollisionDBG] {hand} pos={np.round(ctrl_pos, 3)} "
-                    f"nearest={nearest[1]} dist={nearest[0]:.3f} "
-                    f"proximity={proximity_hits[:3]} contact={contact_hits[:3]}"
-                )
-        return proximity_hits, contact_hits
-
-    def check_robot_collision(
-        self,
-        hand: str,
-        head_pos: "np.ndarray | None",
-        ctrl_pos: "np.ndarray | None",
-    ) -> "list[str]":
-        """Backward-compatible contact-only collision check."""
-        _, contact_hits = self.check_robot_proximity(hand, head_pos, ctrl_pos)
-        return contact_hits
 
     def get_avatar_prims(self) -> list:
         prims = [p for p in (self._lhand_prim, self._rhand_prim) if p is not None]

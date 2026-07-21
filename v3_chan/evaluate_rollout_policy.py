@@ -24,10 +24,21 @@ for path in (RL_DIR, PYTHON_PACKAGE_DIR, SCRIPT_DIR, PROJECT_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+from end_effector_safety_geometry import (  # noqa: E402
+    SafetyThresholds,
+    distance_gate,
+)
+
+
+SAFETY_THRESHOLDS = SafetyThresholds.from_env()
+
 
 def _parse_args() -> argparse.Namespace:
     default_json = os.path.join(SCRIPT_DIR, "eval_results", "bc_pick_place_v1_rollout_eval.json")
     default_csv = os.path.join(SCRIPT_DIR, "eval_results", "bc_pick_place_v1_rollout_eval.csv")
+    default_step_csv = os.path.join(
+        SCRIPT_DIR, "eval_results", "bc_pick_place_v1_rollout_eval_steps.csv"
+    )
     parser = argparse.ArgumentParser(description="Evaluate a trained BC policy by rolling it out in Isaac Sim.")
     parser.add_argument(
         "--checkpoint",
@@ -40,6 +51,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=("auto", "cuda", "cpu"))
     parser.add_argument("--render", action="store_true", help="Render the rollout window.")
     parser.add_argument("--action-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--residual-gate-mode",
+        choices=("checkpoint", "none", "distance"),
+        default="checkpoint",
+        help=(
+            "Override residual gating. checkpoint uses checkpoint metadata; "
+            "legacy checkpoints default to none."
+        ),
+    )
     orientation_group = parser.add_mutually_exclusive_group()
     orientation_group.add_argument(
         "--fixed-orientation",
@@ -159,6 +179,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=1, help="Episode logging interval. 0 disables logs.")
     parser.add_argument("--output-json", default=default_json, help="Path to save summary and per-episode JSON.")
     parser.add_argument("--output-csv", default=default_csv, help="Path to save per-episode CSV.")
+    parser.add_argument(
+        "--output-step-csv",
+        default=default_step_csv,
+        help="Path to save geometry and safety metrics for every rollout step.",
+    )
     return parser.parse_args()
 
 
@@ -200,12 +225,17 @@ from rl import (  # noqa: E402
     parse_pseudo_errp_sources,
 )
 from rl.actions import ACTION_DIM, clip_action  # noqa: E402
-from rl.observations import OBSERVATION_DIM  # noqa: E402
+from rl.observations import OBSERVATION_DIM, observation_slices  # noqa: E402
 from rl.policies import MLPPolicy  # noqa: E402
 
 
 class PolicyRunner:
-    def __init__(self, checkpoint_path: str, device_name: str) -> None:
+    def __init__(
+        self,
+        checkpoint_path: str,
+        device_name: str,
+        residual_gate_override: str = "checkpoint",
+    ) -> None:
         self.checkpoint_path = _resolve_project_path(checkpoint_path)
         self.device = _select_device(device_name)
         checkpoint = _torch_load(self.checkpoint_path, self.device)
@@ -213,6 +243,18 @@ class PolicyRunner:
         self.action_version = str(checkpoint.get("action_version", "action_v0_task_space"))
         self.policy_mode = str(checkpoint.get("policy_mode", "direct"))
         self.residual_scale = float(checkpoint.get("residual_scale", 1.0))
+        checkpoint_gate_mode = str(checkpoint.get("residual_gate_mode", "none"))
+        self.residual_gate_mode = (
+            checkpoint_gate_mode
+            if residual_gate_override == "checkpoint"
+            else residual_gate_override
+        )
+        if self.residual_gate_mode not in ("none", "distance"):
+            raise ValueError(
+                f"Unknown residual gate mode: {self.residual_gate_mode}"
+            )
+        self.last_residual_norm = 0.0
+        self.last_residual_gate = 0.0
         if self.target_version == "expert_arm_joint_action_v0":
             raise ValueError("evaluate_rollout_policy.py currently supports 5D task-space policies only.")
 
@@ -251,6 +293,7 @@ class PolicyRunner:
             "action_version": self.action_version,
             "policy_mode": self.policy_mode,
             "residual_scale": self.residual_scale,
+            "residual_gate_mode": self.residual_gate_mode,
             "source_bc_checkpoint": self.base_checkpoint_path,
             "observation_version": str(checkpoint.get("observation_version", "")),
             "reward_version": str(checkpoint.get("reward_version", "")),
@@ -263,13 +306,18 @@ class PolicyRunner:
         print(
             f"[EvalRollout] loaded checkpoint={self.checkpoint_path} device={self.device} "
             f"torch={torch.__version__} action={self.action_version} obs_dim={self.obs_dim} "
-            f"policy_mode={self.policy_mode}",
+            f"policy_mode={self.policy_mode} residual_gate={self.residual_gate_mode}",
             flush=True,
         )
         if self.device.type == "cuda":
             print(f"[EvalRollout] cuda={torch.cuda.get_device_name(0)}", flush=True)
 
-    def predict(self, obs: np.ndarray) -> np.ndarray:
+    def predict(
+        self,
+        obs: np.ndarray,
+        *,
+        safety_gate: float | None = None,
+    ) -> np.ndarray:
         residual_or_action = self._predict_model(
             self.model,
             obs,
@@ -287,7 +335,19 @@ class PolicyRunner:
                 self.base_obs_std,
                 int(self.base_obs_dim),
             )
-            return clip_action(base_action + float(self.residual_scale) * residual_or_action)
+            gate = 1.0
+            if self.residual_gate_mode == "distance":
+                gate = (
+                    float(np.clip(safety_gate, 0.0, 1.0))
+                    if safety_gate is not None
+                    else _distance_gate_from_flat_obs(obs)
+                )
+            scaled_residual = gate * float(self.residual_scale) * residual_or_action
+            self.last_residual_gate = float(gate)
+            self.last_residual_norm = float(np.linalg.norm(scaled_residual))
+            return clip_action(base_action + scaled_residual)
+        self.last_residual_norm = 0.0
+        self.last_residual_gate = 0.0
         return residual_or_action
 
     def _predict_model(
@@ -380,6 +440,14 @@ def _align_obs_dim(obs_policy: np.ndarray, expected_dim: int) -> np.ndarray:
     return np.concatenate([obs_policy, pad], axis=1)
 
 
+def _distance_gate_from_flat_obs(obs: np.ndarray) -> float:
+    obs_policy = np.asarray(obs, dtype=np.float32).reshape(-1)
+    gap_index = observation_slices()["min_hand_gripper_dist"].start
+    if gap_index >= obs_policy.size:
+        return 0.0
+    return distance_gate(float(obs_policy[gap_index]), SAFETY_THRESHOLDS)
+
+
 def _maybe_load_human_replay() -> HumanTrajectoryReplay | None:
     if not args.human_replay_data:
         return None
@@ -397,10 +465,18 @@ def _maybe_load_human_replay() -> HumanTrajectoryReplay | None:
 def _run() -> None:
     np.random.seed(args.seed)
     started_at = time.time()
-    runner = PolicyRunner(args.checkpoint, args.device)
+    runner = PolicyRunner(
+        args.checkpoint,
+        args.device,
+        residual_gate_override=args.residual_gate_mode,
+    )
     blend_events = _parse_event_set(args.blend_bc_events)
     blend_runner = (
-        PolicyRunner(args.blend_bc_checkpoint, args.device)
+        PolicyRunner(
+            args.blend_bc_checkpoint,
+            args.device,
+            residual_gate_override=args.residual_gate_mode,
+        )
         if args.blend_bc_checkpoint and blend_events
         else None
     )
@@ -440,6 +516,7 @@ def _run() -> None:
     )
 
     rows = []
+    step_rows = []
     print(
         f"[EvalRollout] checkpoint={args.checkpoint} episodes={args.episodes} "
         f"max_steps={args.max_steps} render={args.render} gripper_mode={args.gripper_mode} "
@@ -468,11 +545,37 @@ def _run() -> None:
             terminated = False
             truncated = False
             bc_blend_count = 0
+            collision_steps = 0
+            near_steps = 0
+            near_miss_steps = 0
+            gate_active_steps = 0
+            geometry_valid_steps = 0
+            distance_gate_sum = 0.0
+            max_distance_gate = 0.0
+            min_surface_gap = 10.0
+            safety_query_time_ms_sum = 0.0
+            closest_link_counts: dict[str, int] = {}
+            collision_link_counts: dict[str, int] = {}
+            collision_event_count = 0
+            collision_was_active = False
+            gate_collision_overlap_steps = 0
+            gated_residual_norm_sum = 0.0
+            gated_residual_norm_max = 0.0
+            gated_residual_count = 0
 
             for _ in range(args.max_steps):
-                action = runner.predict(np.asarray(obs, dtype=np.float32))
+                action_safety_gate = float(info.get("distance_gate", 0.0))
+                action = runner.predict(
+                    np.asarray(obs, dtype=np.float32),
+                    safety_gate=action_safety_gate,
+                )
+                residual_norm = float(runner.last_residual_norm)
+                residual_gate = float(runner.last_residual_gate)
                 if blend_runner is not None and int(info["controller_event"]) in blend_events:
-                    bc_action = blend_runner.predict(np.asarray(obs, dtype=np.float32))
+                    bc_action = blend_runner.predict(
+                        np.asarray(obs, dtype=np.float32),
+                        safety_gate=action_safety_gate,
+                    )
                     action = clip_action((1.0 - blend_alpha) * action + blend_alpha * bc_action)
                     bc_blend_count += 1
                 obs, reward, terminated, truncated, info = env.step(action)
@@ -492,9 +595,90 @@ def _run() -> None:
                     errp_source_counts[source_name] = errp_source_counts.get(source_name, 0) + 1
                 for name, value in info["reward_components"].items():
                     reward_components_total[name] = reward_components_total.get(name, 0.0) + float(value)
+                collision_active = bool(info.get("human_robot_collision", False))
+                collision_steps += int(collision_active)
+                if collision_active and not collision_was_active:
+                    collision_event_count += 1
+                collision_was_active = collision_active
+                near_steps += int(info.get("near_human", False))
+                near_miss_steps += int(info.get("near_miss", False))
+                gate = float(info.get("distance_gate", 0.0))
+                gate_active_steps += int(gate > 0.0)
+                gate_collision_overlap_steps += int(gate > 0.0 and collision_active)
+                distance_gate_sum += gate
+                max_distance_gate = max(max_distance_gate, gate)
+                geometry_valid = bool(info.get("geometry_valid", False))
+                geometry_valid_steps += int(geometry_valid)
+                if geometry_valid:
+                    min_surface_gap = min(
+                        min_surface_gap,
+                        float(info.get("min_hand_end_effector_surface_gap", 10.0)),
+                    )
+                safety_query_time_ms_sum += float(info.get("safety_query_time_ms", 0.0))
+                for key in ("closest_link_left", "closest_link_right"):
+                    link_name = str(info.get(key, ""))
+                    if link_name:
+                        closest_link_counts[link_name] = closest_link_counts.get(link_name, 0) + 1
+                collision_links = {
+                    str(info.get("closest_link_left", ""))
+                    if info.get("contact_left", False)
+                    else "",
+                    str(info.get("closest_link_right", ""))
+                    if info.get("contact_right", False)
+                    else "",
+                }
+                for collision_link in collision_links - {""}:
+                    collision_link_counts[collision_link] = (
+                        collision_link_counts.get(collision_link, 0) + 1
+                    )
+                if action_safety_gate > 0.0:
+                    gated_residual_norm_sum += residual_norm
+                    gated_residual_norm_max = max(gated_residual_norm_max, residual_norm)
+                    gated_residual_count += 1
+                step_rows.append(
+                    {
+                        "episode": episode_idx,
+                        "seed": episode_seed,
+                        "step": int(info["step"]),
+                        "sim_time": float(info.get("sim_time", 0.0)),
+                        "end_effector_surface_gap_m": float(
+                            info.get("min_hand_end_effector_surface_gap", 10.0)
+                        ),
+                        "left_end_effector_surface_gap_m": float(
+                            info.get("left_end_effector_surface_gap_m", 10.0)
+                        ),
+                        "right_end_effector_surface_gap_m": float(
+                            info.get("right_end_effector_surface_gap_m", 10.0)
+                        ),
+                        "closest_human_hand": str(info.get("closest_human_hand", "")),
+                        "closest_robot_link": str(info.get("closest_robot_link", "")),
+                        "closest_collider_prim": str(info.get("closest_collider", "")),
+                        "contact_active": int(info.get("contact_active", False)),
+                        "contact_left": int(info.get("contact_left", False)),
+                        "contact_right": int(info.get("contact_right", False)),
+                        "penetration_depth_m": float(
+                            info.get("penetration_depth_m", 0.0)
+                        ),
+                        "near_human": int(info.get("near_human", False)),
+                        "near_miss": int(info.get("near_miss", False)),
+                        "human_robot_collision": int(collision_active),
+                        "safety_gate": gate,
+                        "residual_norm": residual_norm,
+                        "residual_gate": residual_gate,
+                        "action_safety_gate": action_safety_gate,
+                        "haptic_pulse_left": 0,
+                        "haptic_pulse_right": 0,
+                        "geometry_valid": int(geometry_valid),
+                        "safety_query_time_ms": float(
+                            info.get("safety_query_time_ms", 0.0)
+                        ),
+                        "task_success": int(terminated),
+                    }
+                )
                 if terminated or truncated:
                     break
 
+            episode_steps = max(1, int(info["step"]))
             row = {
                 "episode": episode_idx,
                 "seed": episode_seed,
@@ -522,6 +706,30 @@ def _run() -> None:
                 "final_controller_t": float(info["controller_t"]),
                 "phase_hold_steps": int(info["phase_hold_steps"]),
                 "bc_blend_count": int(bc_blend_count),
+                "collision_steps": int(collision_steps),
+                "near_steps": int(near_steps),
+                "near_miss_steps": int(near_miss_steps),
+                "gate_active_steps": int(gate_active_steps),
+                "geometry_valid_steps": int(geometry_valid_steps),
+                "collision_event_count": int(collision_event_count),
+                "gate_collision_overlap_steps": int(gate_collision_overlap_steps),
+                "collision_rate": float(collision_steps / episode_steps),
+                "near_rate": float(near_steps / episode_steps),
+                "near_miss_rate": float(near_miss_steps / episode_steps),
+                "gate_activation_rate": float(gate_active_steps / episode_steps),
+                "mean_distance_gate": float(distance_gate_sum / episode_steps),
+                "max_distance_gate": float(max_distance_gate),
+                "min_surface_gap": float(min_surface_gap),
+                "minimum_end_effector_surface_gap_m": float(min_surface_gap),
+                "mean_safety_query_time_ms": float(
+                    safety_query_time_ms_sum / episode_steps
+                ),
+                "mean_residual_norm_during_gate": float(
+                    gated_residual_norm_sum / max(1, gated_residual_count)
+                ),
+                "max_residual_norm_during_gate": float(gated_residual_norm_max),
+                "closest_link_counts": closest_link_counts,
+                "collision_link_counts": collision_link_counts,
                 "reward_components_total": reward_components_total,
             }
             rows.append(row)
@@ -535,7 +743,9 @@ def _run() -> None:
                     f"[EvalRollout] episode={episode_idx:04d} success={row['success']} "
                     f"steps={row['steps']} reward={row['total_reward']:.3f} "
                     f"cube_target={row['final_cube_target_dist']:.3f} "
-                    f"grasped_any={int(row['grasped_any'])}",
+                    f"grasped_any={int(row['grasped_any'])} "
+                    f"collision_rate={row['collision_rate']:.3f} "
+                    f"gate_rate={row['gate_activation_rate']:.3f}",
                     flush=True,
                 )
     finally:
@@ -554,6 +764,7 @@ def _run() -> None:
             "seed": args.seed,
             "render": args.render,
             "action_scale": args.action_scale,
+            "residual_gate_mode_override": args.residual_gate_mode,
             "fixed_orientation": args.fixed_orientation,
             "gripper_mode": args.gripper_mode,
             "success_dist": args.success_dist,
@@ -574,6 +785,8 @@ def _run() -> None:
             else "",
             "blend_bc_events": sorted(blend_events),
             "blend_bc_alpha": blend_alpha,
+            "safety_geometry_source": env.safety_geometry.GEOMETRY_SOURCE,
+            "safety_geometry_metadata": env.safety_geometry.metadata(),
         },
         "policy": runner.metadata,
         "blend_policy": blend_runner.metadata if blend_runner is not None else {},
@@ -582,17 +795,22 @@ def _run() -> None:
     }
     output_json = _resolve_output_path(args.output_json)
     output_csv = _resolve_output_path(args.output_csv)
+    output_step_csv = _resolve_output_path(args.output_step_csv)
     _write_json(output_json, result)
     _write_csv(output_csv, rows)
+    _write_step_csv(output_step_csv, step_rows)
     print(
         f"[EvalRollout] success_rate={summary['success_rate']:.3f} "
         f"successes={summary['successes']}/{summary['episodes']} "
         f"mean_steps={summary['mean_steps']:.1f} "
-        f"mean_final_cube_target_dist={summary['mean_final_cube_target_dist']:.4f}",
+        f"mean_final_cube_target_dist={summary['mean_final_cube_target_dist']:.4f} "
+        f"collision_rate={summary['collision_rate']:.4f} "
+        f"gate_activation_rate={summary['gate_activation_rate']:.4f}",
         flush=True,
     )
     print(f"[EvalRollout] saved json={output_json}", flush=True)
     print(f"[EvalRollout] saved csv={output_csv}", flush=True)
+    print(f"[EvalRollout] saved step csv={output_step_csv}", flush=True)
 
 
 def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -626,6 +844,37 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         [row.get("max_errp_uncertainty", 0.0) for row in rows],
         dtype=np.float32,
     )
+    total_steps = max(1, int(np.sum(steps)))
+    collision_steps = int(sum(row.get("collision_steps", 0) for row in rows))
+    near_steps = int(sum(row.get("near_steps", 0) for row in rows))
+    near_miss_steps = int(sum(row.get("near_miss_steps", 0) for row in rows))
+    gate_active_steps = int(sum(row.get("gate_active_steps", 0) for row in rows))
+    collision_event_count = int(sum(row.get("collision_event_count", 0) for row in rows))
+    gate_collision_overlap_steps = int(
+        sum(row.get("gate_collision_overlap_steps", 0) for row in rows)
+    )
+    geometry_valid_steps = int(sum(row.get("geometry_valid_steps", 0) for row in rows))
+    weighted_gate_sum = float(
+        sum(row.get("mean_distance_gate", 0.0) * row["steps"] for row in rows)
+    )
+    closest_link_counts: dict[str, int] = {}
+    collision_link_counts: dict[str, int] = {}
+    for row in rows:
+        for name, count in row.get("closest_link_counts", {}).items():
+            closest_link_counts[name] = closest_link_counts.get(name, 0) + int(count)
+        for name, count in row.get("collision_link_counts", {}).items():
+            collision_link_counts[name] = collision_link_counts.get(name, 0) + int(count)
+    gated_residual_weight = max(1, gate_active_steps)
+    gated_residual_sum = float(
+        sum(
+            row.get("mean_residual_norm_during_gate", 0.0)
+            * row.get("gate_active_steps", 0)
+            for row in rows
+        )
+    )
+    query_time_sum = float(
+        sum(row.get("mean_safety_query_time_ms", 0.0) * row["steps"] for row in rows)
+    )
     return {
         "episodes": int(len(rows)),
         "successes": int(np.sum(success)),
@@ -646,6 +895,35 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "max_episode_errp_feedback": float(np.max(max_errp_feedback)),
         "mean_episode_errp_uncertainty": float(np.mean(mean_errp_uncertainty)),
         "max_episode_errp_uncertainty": float(np.max(max_errp_uncertainty)),
+        "collision_steps": collision_steps,
+        "near_steps": near_steps,
+        "near_miss_steps": near_miss_steps,
+        "gate_active_steps": gate_active_steps,
+        "geometry_valid_steps": geometry_valid_steps,
+        "collision_event_count": collision_event_count,
+        "gate_collision_overlap_steps": gate_collision_overlap_steps,
+        "collision_rate": float(collision_steps / total_steps),
+        "near_rate": float(near_steps / total_steps),
+        "near_miss_rate": float(near_miss_steps / total_steps),
+        "gate_activation_rate": float(gate_active_steps / total_steps),
+        "geometry_valid_rate": float(geometry_valid_steps / total_steps),
+        "mean_distance_gate": float(weighted_gate_sum / total_steps),
+        "gate_collision_overlap_rate": float(
+            gate_collision_overlap_steps / max(1, gate_active_steps)
+        ),
+        "mean_residual_norm_during_gate": float(
+            gated_residual_sum / gated_residual_weight
+        ),
+        "max_residual_norm_during_gate": float(
+            max(row.get("max_residual_norm_during_gate", 0.0) for row in rows)
+        ),
+        "mean_safety_query_time_ms": float(query_time_sum / total_steps),
+        "min_surface_gap": float(min(row.get("min_surface_gap", 10.0) for row in rows)),
+        "minimum_end_effector_surface_gap_m": float(
+            min(row.get("min_surface_gap", 10.0) for row in rows)
+        ),
+        "closest_link_counts": closest_link_counts,
+        "collision_link_counts": collision_link_counts,
     }
 
 
@@ -697,6 +975,26 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "final_controller_t",
         "phase_hold_steps",
         "bc_blend_count",
+        "collision_steps",
+        "near_steps",
+        "near_miss_steps",
+        "gate_active_steps",
+        "geometry_valid_steps",
+        "collision_event_count",
+        "gate_collision_overlap_steps",
+        "collision_rate",
+        "near_rate",
+        "near_miss_rate",
+        "gate_activation_rate",
+        "mean_distance_gate",
+        "max_distance_gate",
+        "min_surface_gap",
+        "minimum_end_effector_surface_gap_m",
+        "mean_safety_query_time_ms",
+        "mean_residual_norm_during_gate",
+        "max_residual_norm_during_gate",
+        "closest_link_counts",
+        "collision_link_counts",
     ]
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -704,7 +1002,51 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             csv_row = {field: row[field] for field in fields}
             csv_row["errp_sources"] = ",".join(row.get("errp_sources", []))
+            csv_row["closest_link_counts"] = json.dumps(
+                row.get("closest_link_counts", {}), sort_keys=True
+            )
+            csv_row["collision_link_counts"] = json.dumps(
+                row.get("collision_link_counts", {}), sort_keys=True
+            )
             writer.writerow(csv_row)
+
+
+def _write_step_csv(path: str, rows: list[dict[str, Any]]) -> None:
+    if not path:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    fields = [
+        "episode",
+        "seed",
+        "step",
+        "sim_time",
+        "end_effector_surface_gap_m",
+        "left_end_effector_surface_gap_m",
+        "right_end_effector_surface_gap_m",
+        "closest_human_hand",
+        "closest_robot_link",
+        "closest_collider_prim",
+        "contact_active",
+        "contact_left",
+        "contact_right",
+        "penetration_depth_m",
+        "near_human",
+        "near_miss",
+        "human_robot_collision",
+        "safety_gate",
+        "residual_norm",
+        "residual_gate",
+        "action_safety_gate",
+        "haptic_pulse_left",
+        "haptic_pulse_right",
+        "geometry_valid",
+        "safety_query_time_ms",
+        "task_success",
+    ]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 try:

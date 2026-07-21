@@ -33,14 +33,14 @@ class HapticsUdpClient:
         else:
             print("[HapticsUDP] disabled. Set BHAPTICS_NOTEBOOK_IP to enable.")
 
-    def pulse(self, intensity: int = 100, hand: str = "right", event: str = "collision") -> None:
+    def pulse(self, intensity: int = 100, hand: str = "right", event: str = "collision") -> bool:
         if not self.enabled or self._sock is None or self._addr is None:
-            return
+            return False
 
         now = time.monotonic()
         key = f"{event}:{hand}"
         if now - self._last_send_at.get(key, 0.0) < self._min_interval:
-            return
+            return False
 
         value = max(0, min(100, int(intensity)))
         payload = {
@@ -53,8 +53,10 @@ class HapticsUdpClient:
             self._last_send_at[key] = now
             if DEBUG_HAPTICS_UDP:
                 print(f"[HapticsUDP] sent {payload} -> {self._addr}")
+            return True
         except OSError as exc:
             print(f"[HapticsUDP] send failed: {exc}")
+            return False
 
     def close(self) -> None:
         if self._sock is not None:

@@ -175,30 +175,36 @@ class EventLogger:
                         return True
         return False
 
-    def check_arm_robot_proximity(self, hand: str, hit_prims: list) -> None:
-        """가상 팔/손이 로봇 링크의 위험 근접 거리 안에 들어오면 기록."""
+    def check_arm_robot_proximity(
+        self,
+        hand: str,
+        hit_prims: list,
+        surface_gap_m: float | None = None,
+    ) -> None:
+        """Record hand proximity to a built-in distal Panda collider."""
         if not hit_prims:
             return
         key = f"arm_robot_proximity:{hand}"
         if self._step - self._last_event_step.get(key, -9999) > 30:
             links = ",".join(_format_hit_label(p) for p in hit_prims[:3])
-            self.log_event(
-                "arm_robot_proximity",
-                f"hand={hand},links={links}",
-            )
+            gap = "" if surface_gap_m is None else f",surface_gap_m={surface_gap_m:.4f}"
+            self.log_event("arm_robot_proximity", f"hand={hand},links={links}{gap}")
             self._last_event_step[key] = self._step
 
-    def check_arm_robot_collision(self, hand: str, hit_prims: list) -> None:
-        """가상 팔/손이 로봇 링크의 접촉 거리 안에 들어오면 기록."""
+    def check_arm_robot_collision(
+        self,
+        hand: str,
+        hit_prims: list,
+        surface_gap_m: float | None = None,
+    ) -> None:
+        """Record hand overlap with a built-in distal Panda collider."""
         if not hit_prims:
             return
         key = f"arm_robot_collision:{hand}"
         if self._step - self._last_event_step.get(key, -9999) > 30:
             links = ",".join(_format_hit_label(p) for p in hit_prims[:3])
-            self.log_event(
-                "arm_robot_collision",
-                f"hand={hand},links={links}",
-            )
+            gap = "" if surface_gap_m is None else f",surface_gap_m={surface_gap_m:.4f}"
+            self.log_event("arm_robot_collision", f"hand={hand},links={links}{gap}")
             self._last_event_step[key] = self._step
 
     def check_stack_failure(self, pick_targets: Iterable) -> None:
