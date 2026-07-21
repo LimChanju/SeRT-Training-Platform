@@ -91,6 +91,7 @@ class IsaacPickPlaceEnv:
         from omni.isaac.franka.controllers import RMPFlowController
 
         from panda_robot import add_panda
+        from end_effector_safety_runtime import PandaEndEffectorSafetyRuntime
         from scene_setup import create_world, setup_scene
 
         self._euler_angles_to_quat = euler_angles_to_quat
@@ -114,6 +115,9 @@ class IsaacPickPlaceEnv:
         self.world.reset()
         self.world.play()
         self.controller = RMPFlowController(name="rl_env_rmpflow_controller", robot_articulation=self.robot)
+        self.safety_geometry = PandaEndEffectorSafetyRuntime(
+            robot_prim_path="/World/Franka"
+        )
 
         self.episode_index = 0
         self.current_episode_index = 0
@@ -127,6 +131,7 @@ class IsaacPickPlaceEnv:
         self._last_obs: dict[str, np.ndarray] | None = None
         self._pseudo_errp_aux_flags: dict[str, float] = {}
         self._human_replay_aux_state: dict[str, Any] = {}
+        self._last_safety_result = None
         self._synthetic_human_active = False
         self._synthetic_human_start_step = 0
         self._synthetic_human_duration_steps = 0
@@ -253,6 +258,27 @@ class IsaacPickPlaceEnv:
         human_state = {**synthetic_state, **human_state}
         human_state, self._pseudo_errp_aux_flags = extract_pseudo_errp_aux_flags(human_state)
         human_state, self._human_replay_aux_state = _split_observation_human_state(human_state)
+        safety_result = self.safety_geometry.evaluate(
+            human_state.get("human_left_hand_pos"),
+            human_state.get("human_right_hand_pos"),
+        )
+        self._last_safety_result = safety_result
+        # Recorded labels never drive a rollout. Recompute them against the
+        # current robot pose and its composed PhysX collision shapes.
+        human_state.update(
+            {
+                "human_robot_collision": safety_result.collision,
+                "near_human": safety_result.near,
+                "near_miss": safety_result.near_miss,
+                "min_hand_gripper_surface_gap_override": safety_result.min_surface_gap_m,
+                "left_hand_surface_gap_override": safety_result.left.surface_gap_m,
+                "right_hand_surface_gap_override": safety_result.right.surface_gap_m,
+                "left_hand_contact": safety_result.left.contact,
+                "right_hand_contact": safety_result.right.contact,
+                "distance_gate_override": safety_result.distance_gate,
+                "geometry_valid_override": safety_result.geometry_valid,
+            }
+        )
         task_phase = task_phase_from_event(self.phase_event)
         obs = build_observation(
             robot=self.robot,
@@ -321,8 +347,6 @@ class IsaacPickPlaceEnv:
             "human_left_hand_pos": left_hand,
             "human_right_hand_pos": right_hand,
             "min_hand_gripper_dist_override": dist,
-            "near_human": dist <= near_dist,
-            "human_robot_collision": dist <= collision_dist,
         }
 
     def _format_obs(self, obs: dict[str, np.ndarray]) -> np.ndarray | dict[str, np.ndarray]:
@@ -466,6 +490,7 @@ class IsaacPickPlaceEnv:
         return {
             "episode_index": self.current_episode_index,
             "step": self.step_count,
+            "sim_time": float(getattr(self.world, "current_time", 0.0)),
             "active_cube": getattr(self.active_cube, "name", ""),
             "controller_event": int(self.phase_event),
             "controller_t": float(self.phase_t),
@@ -483,6 +508,105 @@ class IsaacPickPlaceEnv:
             "pseudo_errp_flags": dict(errp_result.flags),
             "pseudo_errp_source_scores": dict(errp_result.source_scores),
             "human_replay_aux_state": dict(self._human_replay_aux_state),
+            "human_robot_collision": bool(float(obs["human_robot_collision"][0]) > 0.5),
+            "near_human": bool(float(obs["near_human"][0]) > 0.5),
+            "near_miss": bool(float(obs["near_miss"][0]) > 0.5),
+            "min_hand_end_effector_surface_gap": float(
+                obs["min_hand_end_effector_surface_gap"][0]
+            ),
+            "distance_gate": float(obs["distance_gate"][0]),
+            "geometry_valid": bool(float(obs["geometry_valid"][0]) > 0.5),
+            "left_end_effector_surface_gap_m": (
+                self._last_safety_result.left.surface_gap_m
+                if self._last_safety_result is not None
+                else 10.0
+            ),
+            "right_end_effector_surface_gap_m": (
+                self._last_safety_result.right.surface_gap_m
+                if self._last_safety_result is not None
+                else 10.0
+            ),
+            "contact_left": (
+                self._last_safety_result.left.contact
+                if self._last_safety_result is not None
+                else False
+            ),
+            "contact_right": (
+                self._last_safety_result.right.contact
+                if self._last_safety_result is not None
+                else False
+            ),
+            "penetration_left_m": (
+                self._last_safety_result.left.penetration_m
+                if self._last_safety_result is not None
+                else 0.0
+            ),
+            "penetration_right_m": (
+                self._last_safety_result.right.penetration_m
+                if self._last_safety_result is not None
+                else 0.0
+            ),
+            "distance_gate_left": (
+                self._last_safety_result.left.distance_gate
+                if self._last_safety_result is not None
+                else 0.0
+            ),
+            "distance_gate_right": (
+                self._last_safety_result.right.distance_gate
+                if self._last_safety_result is not None
+                else 0.0
+            ),
+            "closest_link_left": (
+                self._last_safety_result.left.closest_link
+                if self._last_safety_result is not None
+                else ""
+            ),
+            "closest_link_right": (
+                self._last_safety_result.right.closest_link
+                if self._last_safety_result is not None
+                else ""
+            ),
+            "closest_collider_left": (
+                self._last_safety_result.left.closest_collider_path
+                if self._last_safety_result is not None
+                else ""
+            ),
+            "closest_collider_right": (
+                self._last_safety_result.right.closest_collider_path
+                if self._last_safety_result is not None
+                else ""
+            ),
+            "closest_human_hand": (
+                self._last_safety_result.closest_human_hand
+                if self._last_safety_result is not None
+                else ""
+            ),
+            "closest_robot_link": (
+                self._last_safety_result.closest_robot_link
+                if self._last_safety_result is not None
+                else ""
+            ),
+            "closest_collider": (
+                self._last_safety_result.closest_collider_path
+                if self._last_safety_result is not None
+                else ""
+            ),
+            "contact_active": (
+                self._last_safety_result.contact
+                if self._last_safety_result is not None
+                else False
+            ),
+            "penetration_depth_m": (
+                self._last_safety_result.penetration_depth_m
+                if self._last_safety_result is not None
+                else 0.0
+            ),
+            "safety_query_time_ms": (
+                self._last_safety_result.left.query_time_ms
+                + self._last_safety_result.right.query_time_ms
+                if self._last_safety_result is not None
+                else 0.0
+            ),
             "reward_components": dict(reward_components),
             "obs_dict": obs,
         }
@@ -520,6 +644,14 @@ _OBSERVATION_HUMAN_STATE_KEYS = {
     "pick_miss_recent",
     "drop_throw_recent",
     "min_hand_gripper_dist_override",
+    "min_hand_gripper_surface_gap_override",
+    "left_hand_surface_gap_override",
+    "right_hand_surface_gap_override",
+    "left_hand_contact",
+    "right_hand_contact",
+    "near_miss",
+    "distance_gate_override",
+    "geometry_valid_override",
 }
 
 

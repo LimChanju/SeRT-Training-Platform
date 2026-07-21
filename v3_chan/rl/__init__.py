@@ -18,9 +18,11 @@ from .actions import (
     zero_action,
 )
 from .observations import (
+    AUXILIARY_OBSERVATION_FIELDS,
     OBSERVATION_DIM,
     OBSERVATION_FIELDS,
     OBSERVATION_VERSION,
+    RECORDED_OBSERVATION_FIELDS,
     TASK_PHASES,
     CONTROLLER_EVENT_COUNT,
     build_observation,
@@ -28,6 +30,7 @@ from .observations import (
     empty_observation,
     flatten_observation,
     observation_slices,
+    validate_auxiliary_observation,
     validate_observation,
 )
 from .pseudo_errp import (
@@ -117,6 +120,7 @@ __all__ = [
     "ACTION_DIM",
     "ACTION_NAMES",
     "ACTION_VERSION",
+    "AUXILIARY_OBSERVATION_FIELDS",
     "CONTROLLER_EVENT_COUNT",
     "CONTROLLER_TARGET_ACTION_VERSION",
     "CONTROLLER_TARGET_MAX_DELTA_M",
@@ -130,6 +134,7 @@ __all__ = [
     "OBSERVATION_DIM",
     "OBSERVATION_FIELDS",
     "OBSERVATION_VERSION",
+    "RECORDED_OBSERVATION_FIELDS",
     "IsaacPickPlaceEnv",
     "LEGACY_REWARD_VERSION",
     "PickPlaceEnvConfig",
@@ -160,6 +165,7 @@ __all__ = [
     "reward_component_names",
     "reward_weights_dict",
     "task_action_from_transition",
+    "validate_auxiliary_observation",
     "validate_observation",
     "zero_action",
 ]

@@ -30,6 +30,14 @@ for path in (RL_DIR, PYTHON_PACKAGE_DIR, SCRIPT_DIR, PROJECT_DIR):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+from end_effector_safety_geometry import (  # noqa: E402
+    SafetyThresholds,
+    distance_gate,
+)
+
+
+SAFETY_THRESHOLDS = SafetyThresholds.from_env()
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a PPO policy in Isaac pick-and-place.")
@@ -72,6 +80,15 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,
         help="Multiplier for residual policy output when --policy-mode residual is used.",
+    )
+    parser.add_argument(
+        "--residual-gate-mode",
+        choices=("none", "distance"),
+        default="none",
+        help=(
+            "none preserves robot-only residual PPO; distance applies the shared "
+            "end-effector surface-gap gate to the residual action."
+        ),
     )
     parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -354,6 +371,8 @@ def _train() -> None:
     hidden_dims = _parse_hidden_dims(args.hidden_dims)
     pseudo_errp_sources = parse_pseudo_errp_sources(args.pseudo_errp_sources)
     human_replay = _maybe_load_human_replay()
+    if args.residual_gate_mode != "none" and args.policy_mode != "residual":
+        raise ValueError("--residual-gate-mode distance requires --policy-mode residual")
 
     release_gate_dist = None if args.release_gate_dist < 0.0 else float(args.release_gate_dist)
     env = IsaacPickPlaceEnv(
@@ -398,6 +417,15 @@ def _train() -> None:
         device,
         load_actor=args.policy_mode == "direct",
     )
+    if (
+        args.residual_gate_mode == "distance"
+        and bc_meta.get("policy_mode") == "residual"
+    ):
+        raise RuntimeError(
+            "Distance-gated safety residual training needs a direct/consolidated "
+            "frozen task-policy checkpoint. The supplied base is itself residual; "
+            "do not load its residual actor as a full task policy."
+        )
     bc_actor = _load_frozen_bc_actor(args.bc_checkpoint, hidden_dims, device)
     if args.policy_mode == "residual":
         if bc_actor is None:
@@ -411,6 +439,7 @@ def _train() -> None:
         f"device={device} torch={torch.__version__} reward={REWARD_VERSION} "
         f"reward_scale={args.reward_scale} log_std_init={args.log_std_init} "
         f"policy_mode={args.policy_mode} residual_scale={args.residual_scale} "
+        f"residual_gate={args.residual_gate_mode} "
         f"release_gate_dist={release_gate_dist} bc_action_coef={args.bc_action_coef} "
         f"max_bc_action_mse={args.max_bc_action_mse} "
         f"bc_anchor_coef={args.bc_anchor_coef} "
@@ -623,6 +652,7 @@ def _collect_rollout(
             obs_std,
             bc_actor,
             device,
+            safety_gate=float(info.get("distance_gate", 0.0)),
         )
         next_obs, reward, terminated, truncated, next_info = env.step(env_action)
         done = bool(terminated or truncated)
@@ -821,12 +851,14 @@ def _load_bc_anchor_dataset(
     obs_all = np.concatenate(obs_chunks, axis=0).astype(np.float32)
     actions_all = np.clip(np.concatenate(action_chunks, axis=0).astype(np.float32), -1.0, 1.0)
     weights = _bc_anchor_sample_weights(obs_all)
+    distance_gates = _distance_gate_batch(obs_all)
     obs_norm = _normalize_obs(obs_all, obs_mean, obs_std)
     return {
         "path": resolved_path,
         "obs": torch.from_numpy(obs_norm).to(device),
         "actions": torch.from_numpy(actions_all).to(device),
         "weights": torch.from_numpy(weights).to(device),
+        "distance_gate": torch.from_numpy(distance_gates).to(device),
     }
 
 
@@ -850,6 +882,16 @@ def _bc_anchor_sample_weights(obs_np: np.ndarray) -> np.ndarray:
     return np.maximum(weights, 1e-6).astype(np.float32)
 
 
+def _distance_gate_batch(obs_np: np.ndarray) -> np.ndarray:
+    obs_array = np.asarray(obs_np, dtype=np.float32)
+    gap_slice = observation_slices()["min_hand_gripper_dist"]
+    gaps = obs_array[:, gap_slice.start]
+    return np.asarray(
+        [distance_gate(float(gap), SAFETY_THRESHOLDS) for gap in gaps],
+        dtype=np.float32,
+    )
+
+
 def _sample_bc_anchor_loss(
     model: ActorCritic,
     bc_actor: MLPPolicy | None,
@@ -859,6 +901,7 @@ def _sample_bc_anchor_loss(
     obs = bc_anchor["obs"]
     actions = bc_anchor["actions"]
     weights = bc_anchor["weights"]
+    distance_gates = bc_anchor["distance_gate"]
     n = int(obs.shape[0])
     batch_size = max(1, min(int(args.bc_anchor_batch_size), n))
     idx = torch.randint(0, n, (batch_size,), device=device)
@@ -869,7 +912,16 @@ def _sample_bc_anchor_loss(
             return torch.zeros((), device=device)
         with torch.no_grad():
             base_action = bc_actor(obs_batch)
-        pred = torch.clamp(base_action + float(args.residual_scale) * pred, -1.0, 1.0)
+        gate = (
+            distance_gates.index_select(0, idx).reshape(-1, 1)
+            if args.residual_gate_mode == "distance"
+            else 1.0
+        )
+        pred = torch.clamp(
+            base_action + gate * float(args.residual_scale) * pred,
+            -1.0,
+            1.0,
+        )
     target = actions.index_select(0, idx)
     sample_weights = weights.index_select(0, idx)
     per_sample_loss = torch.mean((pred - target) ** 2, dim=1)
@@ -884,6 +936,8 @@ def _sample_action(
     obs_std: np.ndarray,
     bc_actor: MLPPolicy | None,
     device: torch.device,
+    *,
+    safety_gate: float,
 ) -> tuple[np.ndarray, np.ndarray, float, float]:
     obs_norm = _normalize_obs(np.asarray(obs, dtype=np.float32).reshape(1, -1), obs_mean, obs_std)
     with torch.no_grad():
@@ -894,8 +948,13 @@ def _sample_action(
             if bc_actor is None:
                 raise RuntimeError("Residual policy mode requires a loaded BC actor.")
             base_action = bc_actor(tensor)
+            gate = (
+                float(np.clip(safety_gate, 0.0, 1.0))
+                if args.residual_gate_mode == "distance"
+                else 1.0
+            )
             env_action = torch.clamp(
-                base_action + float(args.residual_scale) * train_action,
+                base_action + gate * float(args.residual_scale) * train_action,
                 -1.0,
                 1.0,
             )
@@ -977,7 +1036,11 @@ def _maybe_load_bc_checkpoint(
         obs_mean = _align_obs_dim(obs_mean, OBSERVATION_DIM)
         obs_std = _align_obs_dim(obs_std, OBSERVATION_DIM, fill_value=1.0)
 
-    return obs_mean.astype(np.float32), obs_std.astype(np.float32), {"path": path, "loaded_actor": loaded_actor}
+    return obs_mean.astype(np.float32), obs_std.astype(np.float32), {
+        "path": path,
+        "loaded_actor": loaded_actor,
+        "policy_mode": str(checkpoint.get("policy_mode", "direct")),
+    }
 
 
 def _load_frozen_bc_actor(
@@ -1039,6 +1102,7 @@ def _save_checkpoint(
         "reward_version": REWARD_VERSION,
         "policy_mode": args.policy_mode,
         "residual_scale": float(args.residual_scale),
+        "residual_gate_mode": args.residual_gate_mode,
         "pseudo_errp_enabled": bool(args.pseudo_errp_enabled),
         "pseudo_errp_sources": parse_pseudo_errp_sources(args.pseudo_errp_sources),
         "human_replay_data": _resolve_project_path(args.human_replay_data)

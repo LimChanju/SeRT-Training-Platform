@@ -24,8 +24,8 @@ DEFAULT_PSEUDO_ERRP_SOURCES: tuple[str, ...] = (
     "gripper_camera_occluded",
 )
 DEFAULT_ERRP_LABEL_THRESHOLD = 0.5
-DEFAULT_NEAR_HUMAN_SAFE_DIST_M = 0.12
-DEFAULT_NEAR_HUMAN_COLLISION_DIST_M = 0.03
+DEFAULT_NEAR_HUMAN_SAFE_DIST_M = 0.15
+DEFAULT_NEAR_HUMAN_COLLISION_DIST_M = 0.0
 DEFAULT_SOURCE_SEVERITY: dict[str, float] = {
     "human_robot_collision": 1.0,
     "collision_green": 0.7,

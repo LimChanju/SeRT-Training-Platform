@@ -8,6 +8,7 @@ import sys; print("[main.py] Python started:", sys.version, flush=True); del sys
 
 # ── 반드시 가장 먼저 임포트 (표준 라이브러리 제외) ────────────────────────────
 import os
+import time
 
 # SteamVR OpenXR 런타임 경로 자동 설정
 _initial_xr_mode = os.environ.get("ISAAC_XR_MODE", "vr").strip().lower()
@@ -127,6 +128,7 @@ from app_config import (
 )
 from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
+from end_effector_safety_runtime import PandaEndEffectorSafetyRuntime
 from gripper_camera import GripperCamera
 from hand_tracking import HandTrackingReceiver
 from haptics_udp import HapticsUdpClient
@@ -331,67 +333,13 @@ def _min_optional(*values: "float | None") -> "float | None":
     return min(valid) if valid else None
 
 
-GRIPPER_HAPTIC_LINK_NAMES = ("panda_hand", "panda_leftfinger", "panda_rightfinger")
-GRIPPER_HAPTIC_CHAIN_NAMES = (
-    ("panda_hand", "panda_leftfinger"),
-    ("panda_hand", "panda_rightfinger"),
-)
-HAPTICS_ROBOT_COLLISION_LINK_FILTER = os.environ.get(
-    "HAPTICS_ROBOT_COLLISION_LINK_FILTER", "gripper"
-).strip().lower()
 DEBUG_HAPTICS_COLLISION = os.environ.get("DEBUG_HAPTICS_COLLISION", "0").lower() in (
     "1",
     "true",
     "yes",
     "on",
 )
-HAPTICS_CONTACT_MIN_STEPS = max(1, int(os.environ.get("HAPTICS_CONTACT_MIN_STEPS", "3")))
-GRIPPER_HAPTIC_MIN_PENETRATION = float(
-    os.environ.get("GRIPPER_HAPTIC_MIN_PENETRATION", "0.0")
-)
-HAPTICS_REQUIRE_GRIPPER_LABEL_CONTACT = os.environ.get(
-    "HAPTICS_REQUIRE_GRIPPER_LABEL_CONTACT", "0"
-).lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-
-
-def _link_names_from_hit(hit: str) -> list[str]:
-    return [part.split("/")[-1] for part in hit.split("->")]
-
-
-def _is_gripper_haptic_hit(hit: str) -> bool:
-    names = _link_names_from_hit(hit)
-    if len(names) == 1:
-        return names[0] in GRIPPER_HAPTIC_LINK_NAMES
-    if any(name in GRIPPER_HAPTIC_LINK_NAMES for name in names):
-        return True
-    return any(all(name in names for name in chain) for chain in GRIPPER_HAPTIC_CHAIN_NAMES)
-
-
-def _haptic_hits_from_collision_hits(hit_prims: list[str]) -> list[str]:
-    if not hit_prims:
-        return []
-    if HAPTICS_ROBOT_COLLISION_LINK_FILTER in ("all", "any", "*"):
-        return list(hit_prims)
-    if HAPTICS_ROBOT_COLLISION_LINK_FILTER in ("off", "none", "disabled"):
-        return []
-    return [hit for hit in hit_prims if _is_gripper_haptic_hit(hit)]
-
-
-def _should_pulse_haptics_for_hits(hit_prims: list[str]) -> bool:
-    return bool(_haptic_hits_from_collision_hits(hit_prims))
-
-
-def _should_pulse_haptics_for_gripper(
-    avatar: "VRAvatar",
-    hand: str,
-    ctrl_pos: "np.ndarray | None",
-) -> tuple[bool, "float | None", str, "float | None"]:
-    return avatar.gripper_haptic_contact(hand, ctrl_pos)
+HAPTICS_CONTACT_MIN_STEPS = max(1, int(os.environ.get("HAPTICS_CONTACT_MIN_STEPS", "1")))
 
 
 def _gripper_center_from_fingers(robot) -> "np.ndarray | None":
@@ -468,8 +416,7 @@ def _build_runtime_observation(
     left_pos: "np.ndarray | None",
     right_pos: "np.ndarray | None",
     gripper_center: "np.ndarray | None",
-    human_robot_collision: bool | None,
-    min_hand_gripper_dist: "float | None",
+    safety_result,
     controller,
 ) -> dict:
     ee_pos, _ = panda.end_effector.get_world_pose()
@@ -491,13 +438,24 @@ def _build_runtime_observation(
         human_left_hand_pos=left_pos,
         human_right_hand_pos=right_pos,
         gripper_center_pos=gripper_center,
-        human_robot_collision=human_robot_collision,
-        near_human=None,
+        human_robot_collision=safety_result.collision,
+        near_human=safety_result.near,
+        near_miss=safety_result.near_miss,
         has_grasped_cube=has_grasped,
         task_phase=task_phase,
         controller_event=event,
         controller_t=0.0,
-        min_hand_gripper_dist_override=min_hand_gripper_dist,
+        min_hand_gripper_dist_override=_min_optional(
+            _distance_or_none(left_pos, gripper_center),
+            _distance_or_none(right_pos, gripper_center),
+        ),
+        min_hand_gripper_surface_gap_override=safety_result.min_surface_gap_m,
+        left_hand_surface_gap_override=safety_result.left.surface_gap_m,
+        right_hand_surface_gap_override=safety_result.right.surface_gap_m,
+        left_hand_contact=safety_result.left.contact,
+        right_hand_contact=safety_result.right.contact,
+        distance_gate_override=safety_result.distance_gate,
+        geometry_valid_override=safety_result.geometry_valid,
     )
 
 
@@ -592,6 +550,12 @@ def main():
     world.play()
     print("[Main] World reset complete.", flush=True)
 
+    # One authoritative geometry source for collision, proximity, observation,
+    # recording, and haptics. Initialization fails loudly if Panda colliders are
+    # unavailable; falling back to the old hand-authored capsules would silently
+    # change dataset semantics.
+    safety_geometry = PandaEndEffectorSafetyRuntime(robot_prim_path="/World/Franka")
+
     place_target.set_world_pose(
         position=np.array([stack_base_xy[0], stack_base_xy[1], table_top_z + cube_half])
     )
@@ -653,7 +617,26 @@ def main():
                 HRI_TRAJECTORY_PATH,
                 overwrite=HRI_TRAJECTORY_OVERWRITE,
                 sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
+                file_metadata=safety_geometry.metadata(),
             )
+            if (
+                HRI_TRAJECTORY_MAX_EPISODES > 0
+                and hri_recorder.num_episodes >= HRI_TRAJECTORY_MAX_EPISODES
+            ):
+                hri_recorder.close()
+                root, ext = os.path.splitext(HRI_TRAJECTORY_PATH)
+                continued_path = f"{root}_continued_{time.time_ns()}{ext or '.hdf5'}"
+                print(
+                    "[HRI] requested file already reached its episode limit; "
+                    f"switching to {continued_path}",
+                    flush=True,
+                )
+                hri_recorder = HRIObsRecorder(
+                    continued_path,
+                    overwrite=False,
+                    sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
+                    file_metadata=safety_geometry.metadata(),
+                )
             if (
                 HRI_TRAJECTORY_MAX_EPISODES <= 0
                 or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
@@ -661,7 +644,7 @@ def main():
                 hri_recorder.start_episode(
                     {"reason": "run_start", "mode": "vr_pick_place", "proxy": "sphere"}
                 )
-            print(f"[HRI] recording obs dataset: {HRI_TRAJECTORY_PATH}")
+            print(f"[HRI] recording obs dataset: {hri_recorder.path}")
         except Exception as exc:
             print(f"[HRI] recorder disabled: {exc}")
             hri_recorder = None
@@ -759,7 +742,7 @@ def main():
                 continue
             waiting_for_vr_logged = False
 
-            # 팔↔로봇 충돌 → ErrP
+            # Tracked hand spheres against the built-in distal Panda colliders.
             ee_pos, _ = panda.end_effector.get_world_pose()
             current_cube_pos_for_camera, _ = pick_targets[current_pick_idx].get_world_pose()
             gripper_camera.update(
@@ -767,91 +750,60 @@ def main():
                 target_pos=current_cube_pos_for_camera,
                 mount_pos=_gripper_center_from_fingers(panda),
             )
-            arm_robot_collision_active = False
+            safety_result = safety_geometry.evaluate(left_pos, right_pos)
+            human_robot_collision_active = safety_result.collision
             haptic_pulse_by_hand = {"left": False, "right": False}
-            gripper_gap_by_hand = {"left": None, "right": None}
-            gripper_penetration_by_hand = {"left": None, "right": None}
-            for hand, ctrl_pos in (("left", left_pos), ("right", right_pos)):
-                proximity_hits, collision_hits = avatar.check_robot_proximity(
-                    hand, head_pos, ctrl_pos
+            for hand, hand_result in (
+                ("left", safety_result.left),
+                ("right", safety_result.right),
+            ):
+                closest_hit = (
+                    [hand_result.closest_collider_path]
+                    if hand_result.closest_collider_path
+                    else []
                 )
-                logger.check_arm_robot_proximity(hand, proximity_hits)
-                logger.check_arm_robot_collision(hand, collision_hits)
-                haptic_hits = _haptic_hits_from_collision_hits(collision_hits)
-                gripper_contact_raw, gripper_gap, gripper_label, gripper_penetration = (
-                    _should_pulse_haptics_for_gripper(avatar, hand, ctrl_pos)
+                proximity_hits = closest_hit if hand_result.near else []
+                collision_hits = closest_hit if hand_result.collision else []
+                logger.check_arm_robot_proximity(
+                    hand, proximity_hits, hand_result.surface_gap_m
                 )
-                penetration_candidate = (
-                    gripper_penetration is not None
-                    and gripper_penetration >= GRIPPER_HAPTIC_MIN_PENETRATION
+                logger.check_arm_robot_collision(
+                    hand, collision_hits, hand_result.surface_gap_m
                 )
-                label_contact_candidate = bool(haptic_hits)
-                haptic_raw_candidate = (
-                    gripper_contact_raw
-                    and penetration_candidate
-                    and (
-                        label_contact_candidate
-                        or not HAPTICS_REQUIRE_GRIPPER_LABEL_CONTACT
-                    )
-                )
-                if haptic_raw_candidate:
+                if hand_result.contact:
                     haptic_contact_steps[hand] = haptic_contact_steps.get(hand, 0) + 1
                 else:
                     haptic_contact_steps[hand] = 0
-                gripper_haptic_active = haptic_contact_steps[hand] >= HAPTICS_CONTACT_MIN_STEPS
-                gripper_gap_by_hand[hand] = gripper_gap
-                gripper_penetration_by_hand[hand] = gripper_penetration
-                if DEBUG_HAPTICS_COLLISION and (
-                    gripper_contact_raw or haptic_hits or haptic_contact_steps[hand] > 0
-                ):
-                    gripper_gap_text = (
-                        f"{gripper_gap:.3f}" if gripper_gap is not None else "None"
-                    )
-                    gripper_penetration_text = (
-                        f"{gripper_penetration:.3f}"
-                        if gripper_penetration is not None
-                        else "None"
-                    )
+                haptic_active = (
+                    haptic_contact_steps[hand] >= HAPTICS_CONTACT_MIN_STEPS
+                )
+                if DEBUG_HAPTICS_COLLISION and (hand_result.near or hand_result.contact):
                     print(
-                        "[HapticsDBG] raw "
-                        f"hand={hand} gripper_contact={gripper_contact_raw} "
-                        f"penetration_candidate={penetration_candidate} "
-                        f"label_contact_candidate={label_contact_candidate} "
+                        "[HapticsDBG] builtin-physx "
+                        f"hand={hand} contact={hand_result.contact} "
                         f"steps={haptic_contact_steps[hand]}/{HAPTICS_CONTACT_MIN_STEPS} "
-                        f"gripper_gap={gripper_gap_text} "
-                        f"gripper_penetration={gripper_penetration_text} "
-                        f"gripper_label={gripper_label} "
-                        f"label_hits={haptic_hits} "
-                        f"all_contact_hits={collision_hits[:5]} "
-                        f"ctrl={np.round(ctrl_pos, 3) if ctrl_pos is not None else None} "
-                        f"ee={np.round(ee_pos, 3)}"
+                        f"gap={hand_result.surface_gap_m:.4f} "
+                        f"penetration={hand_result.penetration_m:.4f} "
+                        f"near={hand_result.near} gate={hand_result.distance_gate:.3f} "
+                        f"link={hand_result.closest_link} "
+                        f"collider={hand_result.closest_collider_path}"
                     )
-                if gripper_haptic_active:
-                    arm_robot_collision_active = True
-                    haptic_pulse_by_hand[hand] = True
-                    if DEBUG_HAPTICS_COLLISION:
-                        gripper_gap_text = (
-                            f"{gripper_gap:.3f}" if gripper_gap is not None else "None"
-                        )
-                        gripper_penetration_text = (
-                            f"{gripper_penetration:.3f}"
-                            if gripper_penetration is not None
-                            else "None"
-                        )
-                        print(
-                            "[HapticsDBG] pulse "
-                            f"hand={hand} gripper_gap={gripper_gap_text} "
-                            f"gripper_penetration={gripper_penetration_text} "
-                            f"gripper_label={gripper_label} "
-                            f"label_hits={haptic_hits} "
-                            f"all_contact_hits={collision_hits[:5]} "
-                            f"ctrl={np.round(ctrl_pos, 3) if ctrl_pos is not None else None} "
-                            f"ee={np.round(ee_pos, 3)}"
-                        )
-                    haptics.pulse(100, hand=hand, event="gripper_robot_collision")
+                if haptic_active:
+                    haptic_pulse_by_hand[hand] = haptics.pulse(
+                        100,
+                        hand=hand,
+                        event="panda_distal_surface_contact",
+                    )
 
-            left_hand_gripper_dist = _distance_or_none(left_pos, ee_pos)
-            right_hand_gripper_dist = _distance_or_none(right_pos, ee_pos)
+            gripper_center_for_distance = _gripper_center_from_fingers(panda)
+            if gripper_center_for_distance is None:
+                gripper_center_for_distance = ee_pos
+            left_hand_gripper_dist = _distance_or_none(
+                left_pos, gripper_center_for_distance
+            )
+            right_hand_gripper_dist = _distance_or_none(
+                right_pos, gripper_center_for_distance
+            )
             logger.log_sample(
                 left_hand_gripper_dist=left_hand_gripper_dist,
                 right_hand_gripper_dist=right_hand_gripper_dist,
@@ -859,7 +811,7 @@ def main():
                     left_hand_gripper_dist,
                     right_hand_gripper_dist,
                 ),
-                human_robot_collision=arm_robot_collision_active,
+                human_robot_collision=human_robot_collision_active,
             )
             if hri_recorder is not None and hri_recorder.is_open:
                 stack_height = (
@@ -870,10 +822,6 @@ def main():
                     [stack_base_xy[0], stack_base_xy[1], stack_height],
                     dtype=float,
                 )
-                min_hand_gripper_dist = _min_optional(
-                    left_hand_gripper_dist,
-                    right_hand_gripper_dist,
-                )
                 obs = _build_runtime_observation(
                     panda=panda,
                     cube=pick_targets[current_pick_idx],
@@ -882,10 +830,7 @@ def main():
                     left_pos=left_pos,
                     right_pos=right_pos,
                     gripper_center=_gripper_center_from_fingers(panda),
-                    # Dataset labels use the shared surface-gap definition. The
-                    # PhysX/contact flag remains available for haptics above.
-                    human_robot_collision=None,
-                    min_hand_gripper_dist=min_hand_gripper_dist,
+                    safety_result=safety_result,
                     controller=controller,
                 )
                 hri_recorder.add_sample(
@@ -923,26 +868,57 @@ def main():
                         ),
                         "haptic_pulse_left": 1.0 if haptic_pulse_by_hand["left"] else 0.0,
                         "haptic_pulse_right": 1.0 if haptic_pulse_by_hand["right"] else 0.0,
-                        "gripper_gap_left_m": (
-                            gripper_gap_by_hand["left"]
-                            if gripper_gap_by_hand["left"] is not None
-                            else np.nan
+                        # Legacy names remain as exact aliases for readers that
+                        # consumed the v3 safety group.
+                        "gripper_gap_left_m": safety_result.left.surface_gap_m,
+                        "gripper_gap_right_m": safety_result.right.surface_gap_m,
+                        "gripper_penetration_left_m": safety_result.left.penetration_m,
+                        "gripper_penetration_right_m": safety_result.right.penetration_m,
+                        "left_hand_surface_gap_m": safety_result.left.surface_gap_m,
+                        "right_hand_surface_gap_m": safety_result.right.surface_gap_m,
+                        "min_hand_end_effector_surface_gap_m": safety_result.min_surface_gap_m,
+                        "left_end_effector_surface_gap_m": safety_result.left.surface_gap_m,
+                        "right_end_effector_surface_gap_m": safety_result.right.surface_gap_m,
+                        "end_effector_surface_gap_m": safety_result.min_surface_gap_m,
+                        "closest_human_hand_id": safety_result.closest_human_hand_id,
+                        "closest_robot_link_id": safety_result.closest_robot_link_id,
+                        "closest_collider_id": safety_result.closest_collider_id,
+                        "closest_link_left_id": safety_result.left.closest_link_id,
+                        "closest_link_right_id": safety_result.right.closest_link_id,
+                        "closest_collider_left_id": safety_result.left.closest_collider_id,
+                        "closest_collider_right_id": safety_result.right.closest_collider_id,
+                        "contact_left": float(safety_result.left.contact),
+                        "contact_right": float(safety_result.right.contact),
+                        "contact_active": float(safety_result.contact),
+                        "contact_force_left_n": safety_result.left.contact_force_n,
+                        "contact_force_right_n": safety_result.right.contact_force_n,
+                        "contact_force_n": max(
+                            safety_result.left.contact_force_n,
+                            safety_result.right.contact_force_n,
                         ),
-                        "gripper_gap_right_m": (
-                            gripper_gap_by_hand["right"]
-                            if gripper_gap_by_hand["right"] is not None
-                            else np.nan
+                        "contact_force_valid_left": float(
+                            safety_result.left.contact_force_valid
                         ),
-                        "gripper_penetration_left_m": (
-                            gripper_penetration_by_hand["left"]
-                            if gripper_penetration_by_hand["left"] is not None
-                            else 0.0
+                        "contact_force_valid_right": float(
+                            safety_result.right.contact_force_valid
                         ),
-                        "gripper_penetration_right_m": (
-                            gripper_penetration_by_hand["right"]
-                            if gripper_penetration_by_hand["right"] is not None
-                            else 0.0
-                        ),
+                        "penetration_left_m": safety_result.left.penetration_m,
+                        "penetration_right_m": safety_result.right.penetration_m,
+                        "penetration_depth_m": safety_result.penetration_depth_m,
+                        "near_left": float(safety_result.left.near),
+                        "near_right": float(safety_result.right.near),
+                        "near_miss_left": float(safety_result.left.near_miss),
+                        "near_miss_right": float(safety_result.right.near_miss),
+                        "distance_gate_left": safety_result.left.distance_gate,
+                        "distance_gate_right": safety_result.right.distance_gate,
+                        "distance_gate": safety_result.distance_gate,
+                        "geometry_valid_left": float(safety_result.left.geometry_valid),
+                        "geometry_valid_right": float(safety_result.right.geometry_valid),
+                        "geometry_valid": float(safety_result.geometry_valid),
+                        "query_time_left_ms": safety_result.left.query_time_ms,
+                        "query_time_right_ms": safety_result.right.query_time_ms,
+                        "query_count_left": safety_result.left.query_count,
+                        "query_count_right": safety_result.right.query_count,
                     },
                     action=last_robot_action,
                 )
@@ -1017,6 +993,19 @@ def main():
                             if episode_path:
                                 print(f"[HRI] saved episode {episode_path}")
                             if (
+                                HRI_TRAJECTORY_MAX_EPISODES > 0
+                                and hri_recorder.num_episodes
+                                >= HRI_TRAJECTORY_MAX_EPISODES
+                            ):
+                                print(
+                                    "[HRI] collection complete: "
+                                    f"{hri_recorder.num_episodes}/"
+                                    f"{HRI_TRAJECTORY_MAX_EPISODES} episodes. "
+                                    "Closing Isaac Sim.",
+                                    flush=True,
+                                )
+                                break
+                            if (
                                 HRI_TRAJECTORY_MAX_EPISODES <= 0
                                 or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
                             ):
@@ -1061,10 +1050,6 @@ def main():
             logger.check_pick_miss(gripper_closed, ee_pos, current_cube)
             logger.check_drop_throw(pick_targets)
             logger.check_collision_green(pick_targets, green_cubes)
-            logger.check_human_collision(
-                ee_pos,
-                avatar.get_avatar_prims() if avatar is not None else [],
-            )
             logger.check_stack_failure(pick_targets)
 
     hand_tracking.close()
@@ -1080,6 +1065,11 @@ def main():
         hri_recorder.close()
         if saved_path:
             print(f"[HRI] saved final episode {saved_path}")
+    print(
+        "[SafetyGeometry] session mean PhysX query time="
+        f"{safety_geometry.mean_query_time_ms:.4f} ms",
+        flush=True,
+    )
     simulation_app.close()
 
 

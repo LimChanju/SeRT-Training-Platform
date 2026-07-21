@@ -1,16 +1,39 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Mapping
 
 import numpy as np
 
+try:
+    from v3_chan.end_effector_safety_geometry import (
+        MISSING_SURFACE_GAP_M,
+        SafetyThresholds,
+        classify_surface_gap,
+    )
+except ImportError:
+    from end_effector_safety_geometry import (
+        MISSING_SURFACE_GAP_M,
+        SafetyThresholds,
+        classify_surface_gap,
+    )
 
-OBSERVATION_VERSION = "obs_v1_state_controller_phase"
+
+OBSERVATION_VERSION = "obs_v3_builtin_panda_collision_surface"
 TASK_PHASES = ("approach_cube", "grasp_cube", "move_to_target", "release_cube")
 CONTROLLER_EVENT_COUNT = 10
-MISSING_DISTANCE_M = 10.0
-DEFAULT_NEAR_HUMAN_THRESHOLD_M = 0.12
+MISSING_DISTANCE_M = MISSING_SURFACE_GAP_M
+_SAFETY_THRESHOLDS = SafetyThresholds.from_env()
+DEFAULT_NEAR_HUMAN_THRESHOLD_M = _SAFETY_THRESHOLDS.near_gap_m
+DEFAULT_NEAR_MISS_THRESHOLD_M = _SAFETY_THRESHOLDS.near_miss_gap_m
+DEFAULT_COLLISION_SURFACE_GAP_M = _SAFETY_THRESHOLDS.collision_gap_m
+DEFAULT_HAND_PROXY_RADIUS_M = _SAFETY_THRESHOLDS.hand_radius_m
+DEFAULT_GRIPPER_PROXY_RADIUS_M = float(
+    os.environ.get("HRI_GRIPPER_PROXY_RADIUS_M", "0.025")
+)
+DEFAULT_DISTANCE_GATE_FULL_GAP_M = _SAFETY_THRESHOLDS.gate_full_gap_m
+DEFAULT_DISTANCE_GATE_START_GAP_M = _SAFETY_THRESHOLDS.gate_start_gap_m
 
 
 @dataclass(frozen=True)
@@ -43,7 +66,11 @@ OBSERVATION_FIELDS: tuple[ObservationField, ...] = (
     ObservationField("human_right_hand_pos", (3,), "Human right hand world position."),
     ObservationField("ee_to_left_hand", (3,), "Vector from end-effector to left hand."),
     ObservationField("ee_to_right_hand", (3,), "Vector from end-effector to right hand."),
-    ObservationField("min_hand_gripper_dist", (1,), "Minimum hand-to-gripper distance in meters."),
+    ObservationField(
+        "min_hand_gripper_dist",
+        (1,),
+        "Canonical signed hand-to-gripper surface gap in meters; overlap is negative.",
+    ),
     ObservationField("human_robot_collision", (1,), "Binary flag for human/robot collision."),
     ObservationField("near_human", (1,), "Binary flag for unsafe proximity to human hand."),
     ObservationField("collision_green", (1,), "Binary flag for collision with protected green cube."),
@@ -55,8 +82,56 @@ OBSERVATION_FIELDS: tuple[ObservationField, ...] = (
     ObservationField("controller_t", (1,), "PickPlaceController event progress in [0, 1]."),
 )
 
+# These fields are recorded for HRI/safety learning but intentionally excluded
+# from obs_policy so existing 84-D robot-only checkpoints remain compatible.
+AUXILIARY_OBSERVATION_FIELDS: tuple[ObservationField, ...] = (
+    ObservationField(
+        "min_hand_gripper_center_dist",
+        (1,),
+        "Minimum hand-center to gripper-center distance in meters.",
+    ),
+    ObservationField(
+        "min_hand_gripper_surface_gap",
+        (1,),
+        "Signed hand-to-gripper surface gap; overlap is negative.",
+    ),
+    ObservationField(
+        "near_miss",
+        (1,),
+        "Binary flag for positive surface gap inside the near-miss band.",
+    ),
+    ObservationField(
+        "left_hand_end_effector_surface_gap",
+        (1,),
+        "Signed left-hand sphere gap to the nearest built-in distal Panda collider.",
+    ),
+    ObservationField(
+        "right_hand_end_effector_surface_gap",
+        (1,),
+        "Signed right-hand sphere gap to the nearest built-in distal Panda collider.",
+    ),
+    ObservationField(
+        "min_hand_end_effector_surface_gap",
+        (1,),
+        "Minimum signed hand gap to a built-in distal Panda collider.",
+    ),
+    ObservationField("left_hand_contact", (1,), "Left hand/Panda distal contact flag."),
+    ObservationField("right_hand_contact", (1,), "Right hand/Panda distal contact flag."),
+    ObservationField(
+        "distance_gate",
+        (1,),
+        "Safety residual gate: 0 above 0.13 m and 1 at or below 0.05 m.",
+    ),
+    ObservationField(
+        "geometry_valid",
+        (1,),
+        "At least one tracked hand was evaluated against valid Panda colliders.",
+    ),
+)
+RECORDED_OBSERVATION_FIELDS = OBSERVATION_FIELDS + AUXILIARY_OBSERVATION_FIELDS
+
 OBSERVATION_DIM = sum(field.dim for field in OBSERVATION_FIELDS)
-_FIELD_MAP = {field.name: field for field in OBSERVATION_FIELDS}
+_FIELD_MAP = {field.name: field for field in RECORDED_OBSERVATION_FIELDS}
 
 
 def observation_slices() -> dict[str, slice]:
@@ -70,9 +145,14 @@ def observation_slices() -> dict[str, slice]:
 
 def empty_observation(dtype=np.float32) -> dict[str, np.ndarray]:
     obs = {}
-    for field in OBSERVATION_FIELDS:
+    for field in RECORDED_OBSERVATION_FIELDS:
         obs[field.name] = np.zeros(field.shape, dtype=dtype)
     obs["min_hand_gripper_dist"][:] = MISSING_DISTANCE_M
+    obs["min_hand_gripper_center_dist"][:] = MISSING_DISTANCE_M
+    obs["min_hand_gripper_surface_gap"][:] = MISSING_DISTANCE_M
+    obs["left_hand_end_effector_surface_gap"][:] = MISSING_DISTANCE_M
+    obs["right_hand_end_effector_surface_gap"][:] = MISSING_DISTANCE_M
+    obs["min_hand_end_effector_surface_gap"][:] = MISSING_DISTANCE_M
     return obs
 
 
@@ -96,6 +176,19 @@ def validate_observation(obs: Mapping[str, np.ndarray]) -> None:
             )
 
 
+def validate_auxiliary_observation(obs: Mapping[str, np.ndarray]) -> None:
+    missing = [field.name for field in AUXILIARY_OBSERVATION_FIELDS if field.name not in obs]
+    if missing:
+        raise ValueError(f"Observation is missing auxiliary fields: {missing}")
+    for field in AUXILIARY_OBSERVATION_FIELDS:
+        value = np.asarray(obs[field.name])
+        if value.shape != field.shape:
+            raise ValueError(
+                f"Auxiliary observation field '{field.name}' has shape {value.shape}, "
+                f"expected {field.shape}"
+            )
+
+
 def build_observation(
     *,
     robot,
@@ -105,8 +198,9 @@ def build_observation(
     human_left_hand_pos: np.ndarray | None = None,
     human_right_hand_pos: np.ndarray | None = None,
     gripper_center_pos: np.ndarray | None = None,
-    human_robot_collision: bool = False,
+    human_robot_collision: bool | None = None,
     near_human: bool | None = None,
+    near_miss: bool | None = None,
     collision_green: bool = False,
     pick_miss_recent: bool = False,
     drop_throw_recent: bool = False,
@@ -116,6 +210,17 @@ def build_observation(
     controller_t: float = 0.0,
     near_human_threshold_m: float = DEFAULT_NEAR_HUMAN_THRESHOLD_M,
     min_hand_gripper_dist_override: float | None = None,
+    min_hand_gripper_surface_gap_override: float | None = None,
+    left_hand_surface_gap_override: float | None = None,
+    right_hand_surface_gap_override: float | None = None,
+    left_hand_contact: bool | None = None,
+    right_hand_contact: bool | None = None,
+    distance_gate_override: float | None = None,
+    geometry_valid_override: bool | None = None,
+    near_miss_threshold_m: float = DEFAULT_NEAR_MISS_THRESHOLD_M,
+    collision_surface_gap_m: float = DEFAULT_COLLISION_SURFACE_GAP_M,
+    hand_proxy_radius_m: float = DEFAULT_HAND_PROXY_RADIUS_M,
+    gripper_proxy_radius_m: float = DEFAULT_GRIPPER_PROXY_RADIUS_M,
 ) -> dict[str, np.ndarray]:
     """Build the state observation from Isaac runtime objects.
 
@@ -169,17 +274,114 @@ def build_observation(
         hand_distances.append(float(np.linalg.norm(left_pos - gripper_pos)))
     if human_right_hand_pos is not None:
         hand_distances.append(float(np.linalg.norm(right_pos - gripper_pos)))
-    min_dist = (
+    center_dist = (
         float(min_hand_gripper_dist_override)
         if min_hand_gripper_dist_override is not None
         else min(hand_distances) if hand_distances else MISSING_DISTANCE_M
     )
-    obs["min_hand_gripper_dist"] = np.array([min_dist], dtype=np.float32)
+    left_surface_gap = (
+        float(left_hand_surface_gap_override)
+        if left_hand_surface_gap_override is not None
+        else MISSING_DISTANCE_M
+    )
+    right_surface_gap = (
+        float(right_hand_surface_gap_override)
+        if right_hand_surface_gap_override is not None
+        else MISSING_DISTANCE_M
+    )
+    per_hand_surface_gaps = [
+        gap
+        for gap in (left_surface_gap, right_surface_gap)
+        if np.isfinite(gap) and gap < MISSING_DISTANCE_M
+    ]
+    if per_hand_surface_gaps:
+        surface_gap = min(per_hand_surface_gaps)
+    elif min_hand_gripper_surface_gap_override is not None:
+        surface_gap = float(min_hand_gripper_surface_gap_override)
+    elif center_dist >= MISSING_DISTANCE_M:
+        surface_gap = MISSING_DISTANCE_M
+    else:
+        surface_gap = center_dist - max(0.0, float(hand_proxy_radius_m)) - max(
+            0.0, float(gripper_proxy_radius_m)
+        )
+
+    # min_hand_gripper_dist remains in the fixed 84-D policy schema, but from
+    # observation v2 onward its canonical meaning is signed surface gap.
+    obs["min_hand_gripper_dist"] = np.array([surface_gap], dtype=np.float32)
+    obs["min_hand_gripper_center_dist"] = np.array([center_dist], dtype=np.float32)
+    obs["min_hand_gripper_surface_gap"] = np.array([surface_gap], dtype=np.float32)
+    obs["left_hand_end_effector_surface_gap"] = np.array(
+        [left_surface_gap], dtype=np.float32
+    )
+    obs["right_hand_end_effector_surface_gap"] = np.array(
+        [right_surface_gap], dtype=np.float32
+    )
+    obs["min_hand_end_effector_surface_gap"] = np.array(
+        [surface_gap], dtype=np.float32
+    )
+
+    geometry_valid = (
+        bool(geometry_valid_override)
+        if geometry_valid_override is not None
+        else bool(np.isfinite(surface_gap) and surface_gap < MISSING_DISTANCE_M)
+    )
+    thresholds = SafetyThresholds(
+        hand_radius_m=max(0.001, float(hand_proxy_radius_m)),
+        collision_gap_m=float(collision_surface_gap_m),
+        near_miss_gap_m=float(near_miss_threshold_m),
+        near_gap_m=float(near_human_threshold_m),
+        gate_full_gap_m=DEFAULT_DISTANCE_GATE_FULL_GAP_M,
+        gate_start_gap_m=DEFAULT_DISTANCE_GATE_START_GAP_M,
+        max_query_gap_m=max(
+            _SAFETY_THRESHOLDS.max_query_gap_m,
+            DEFAULT_DISTANCE_GATE_START_GAP_M,
+        ),
+    ).validated()
+    left_classification = classify_surface_gap(
+        left_surface_gap,
+        thresholds,
+        contact=bool(left_hand_contact),
+        geometry_valid=geometry_valid and left_surface_gap < MISSING_DISTANCE_M,
+    )
+    right_classification = classify_surface_gap(
+        right_surface_gap,
+        thresholds,
+        contact=bool(right_hand_contact),
+        geometry_valid=geometry_valid and right_surface_gap < MISSING_DISTANCE_M,
+    )
+    aggregate_classification = classify_surface_gap(
+        surface_gap,
+        thresholds,
+        contact=bool(left_hand_contact) or bool(right_hand_contact),
+        geometry_valid=geometry_valid,
+    )
 
     if near_human is None:
-        near_human = min_dist < float(near_human_threshold_m)
-    obs["human_robot_collision"] = _flag(human_robot_collision)
+        near_human = aggregate_classification.near
+    if human_robot_collision is None:
+        human_robot_collision = aggregate_classification.collision
+    if near_miss is None:
+        near_miss = aggregate_classification.near_miss
+    gate = (
+        float(np.clip(distance_gate_override, 0.0, 1.0))
+        if distance_gate_override is not None
+        else aggregate_classification.distance_gate
+    )
+    obs["human_robot_collision"] = _flag(bool(human_robot_collision))
     obs["near_human"] = _flag(near_human)
+    obs["near_miss"] = _flag(near_miss)
+    obs["left_hand_contact"] = _flag(
+        bool(left_hand_contact)
+        if left_hand_contact is not None
+        else left_classification.collision
+    )
+    obs["right_hand_contact"] = _flag(
+        bool(right_hand_contact)
+        if right_hand_contact is not None
+        else right_classification.collision
+    )
+    obs["distance_gate"] = np.array([gate], dtype=np.float32)
+    obs["geometry_valid"] = _flag(geometry_valid)
     obs["collision_green"] = _flag(collision_green)
     obs["pick_miss_recent"] = _flag(pick_miss_recent)
     obs["drop_throw_recent"] = _flag(drop_throw_recent)
@@ -188,6 +390,7 @@ def build_observation(
     obs["controller_event"] = controller_event_onehot(controller_event)
     obs["controller_t"] = np.array([np.clip(float(controller_t), 0.0, 1.0)], dtype=np.float32)
     validate_observation(obs)
+    validate_auxiliary_observation(obs)
     return obs
 
 
