@@ -133,6 +133,44 @@ RECORDED_OBSERVATION_FIELDS = OBSERVATION_FIELDS + AUXILIARY_OBSERVATION_FIELDS
 OBSERVATION_DIM = sum(field.dim for field in OBSERVATION_FIELDS)
 _FIELD_MAP = {field.name: field for field in RECORDED_OBSERVATION_FIELDS}
 
+# Safety residual input. This remains separate from the frozen 84-D task
+# observation and uses the canonical v4 PhysX safety fields.
+HRI_OBS_FIELD_NAMES = (
+    "robot_joint_pos",
+    "robot_joint_vel",
+    "gripper_width",
+    "ee_pos",
+    "ee_quat",
+    "cube_pos",
+    "cube_quat",
+    "place_target_pos",
+    "ee_to_cube",
+    "cube_to_place_target",
+    "ee_to_place_target",
+    "human_head_pos",
+    "human_left_hand_pos",
+    "human_right_hand_pos",
+    "ee_to_left_hand",
+    "ee_to_right_hand",
+    "min_hand_gripper_dist",
+    "min_hand_gripper_surface_gap",
+    "left_hand_end_effector_surface_gap",
+    "right_hand_end_effector_surface_gap",
+    "min_hand_end_effector_surface_gap",
+    "human_robot_collision",
+    "near_human",
+    "near_miss",
+    "left_hand_contact",
+    "right_hand_contact",
+    "distance_gate",
+    "geometry_valid",
+    "has_grasped_cube",
+    "task_phase",
+    "controller_event",
+)
+HRI_OBS_DIM = int(sum(_FIELD_MAP[name].dim for name in HRI_OBS_FIELD_NAMES))
+HRI_OBSERVATION_VERSION = "hri_policy_obs_v1_83d_surface_gap"
+
 
 def observation_slices() -> dict[str, slice]:
     slices = {}
@@ -160,6 +198,16 @@ def flatten_observation(obs: Mapping[str, np.ndarray], dtype=np.float32) -> np.n
     validate_observation(obs)
     return np.concatenate(
         [np.asarray(obs[field.name], dtype=dtype).reshape(-1) for field in OBSERVATION_FIELDS]
+    ).astype(dtype, copy=False)
+
+
+def flatten_hri_observation(
+    obs: Mapping[str, np.ndarray], dtype=np.float32
+) -> np.ndarray:
+    validate_observation(obs)
+    validate_auxiliary_observation(obs)
+    return np.concatenate(
+        [np.asarray(obs[name], dtype=dtype).reshape(-1) for name in HRI_OBS_FIELD_NAMES]
     ).astype(dtype, copy=False)
 
 

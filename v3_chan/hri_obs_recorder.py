@@ -25,57 +25,14 @@ AUXILIARY_OBSERVATION_FIELDS = _obs.AUXILIARY_OBSERVATION_FIELDS
 RECORDED_OBSERVATION_FIELDS = _obs.RECORDED_OBSERVATION_FIELDS
 OBSERVATION_DIM = _obs.OBSERVATION_DIM
 OBSERVATION_VERSION = _obs.OBSERVATION_VERSION
+HRI_OBS_DIM = _obs.HRI_OBS_DIM
+HRI_OBS_FIELD_NAMES = _obs.HRI_OBS_FIELD_NAMES
+HRI_OBSERVATION_VERSION = _obs.HRI_OBSERVATION_VERSION
 build_observation = _obs.build_observation
+flatten_hri_observation = _obs.flatten_hri_observation
 flatten_observation = _obs.flatten_observation
 validate_observation = _obs.validate_observation
 validate_auxiliary_observation = _obs.validate_auxiliary_observation
-
-HRI_OBS_FIELD_NAMES = (
-    "robot_joint_pos",
-    "robot_joint_vel",
-    "gripper_width",
-    "ee_pos",
-    "ee_quat",
-    "cube_pos",
-    "cube_quat",
-    "place_target_pos",
-    "ee_to_cube",
-    "cube_to_place_target",
-    "ee_to_place_target",
-    "human_head_pos",
-    "human_left_hand_pos",
-    "human_right_hand_pos",
-    "ee_to_left_hand",
-    "ee_to_right_hand",
-    "min_hand_gripper_dist",
-    "min_hand_gripper_center_dist",
-    "min_hand_gripper_surface_gap",
-    "left_hand_end_effector_surface_gap",
-    "right_hand_end_effector_surface_gap",
-    "min_hand_end_effector_surface_gap",
-    "human_robot_collision",
-    "near_human",
-    "near_miss",
-    "left_hand_contact",
-    "right_hand_contact",
-    "distance_gate",
-    "geometry_valid",
-    "has_grasped_cube",
-    "task_phase",
-    "controller_event",
-)
-_RECORDED_FIELD_MAP = {field.name: field for field in RECORDED_OBSERVATION_FIELDS}
-HRI_OBS_DIM = int(sum(_RECORDED_FIELD_MAP[name].dim for name in HRI_OBS_FIELD_NAMES))
-
-
-def flatten_hri_observation(obs: dict[str, np.ndarray]) -> np.ndarray:
-    validate_observation(obs)
-    validate_auxiliary_observation(obs)
-    values = [
-        np.asarray(obs[name], dtype=np.float32).reshape(-1)
-        for name in HRI_OBS_FIELD_NAMES
-    ]
-    return np.concatenate(values).astype(np.float32, copy=False)
 
 
 class HRIObsRecorder:
@@ -85,7 +42,7 @@ class HRIObsRecorder:
     directly into the existing policy/training readers.
     """
 
-    SCHEMA_VERSION = "hri_obs_v6_surface_point_dynamic_safety"
+    SCHEMA_VERSION = "hri_obs_v7_83d_surface_point_dynamic_safety_sync"
 
     def __init__(
         self,
@@ -155,6 +112,7 @@ class HRIObsRecorder:
             self._file.attrs["schema_version"] = self.SCHEMA_VERSION
             self._file.attrs["observation_version"] = OBSERVATION_VERSION
             self._file.attrs["observation_dim"] = int(OBSERVATION_DIM)
+            self._file.attrs["hri_observation_version"] = HRI_OBSERVATION_VERSION
             self._file.attrs["hri_observation_dim"] = int(HRI_OBS_DIM)
             self._file.attrs["hri_observation_fields"] = ",".join(HRI_OBS_FIELD_NAMES)
             self._file.attrs["sample_interval_steps"] = int(self.sample_interval_steps)
@@ -170,6 +128,9 @@ class HRIObsRecorder:
                     "attrs/schema_version": np.asarray(self.SCHEMA_VERSION),
                     "attrs/observation_version": np.asarray(OBSERVATION_VERSION),
                     "attrs/observation_dim": np.asarray(int(OBSERVATION_DIM), dtype=np.int32),
+                    "attrs/hri_observation_version": np.asarray(
+                        HRI_OBSERVATION_VERSION
+                    ),
                     "attrs/hri_observation_dim": np.asarray(int(HRI_OBS_DIM), dtype=np.int32),
                     "attrs/hri_observation_fields": np.asarray(",".join(HRI_OBS_FIELD_NAMES)),
                     "attrs/sample_interval_steps": np.asarray(
@@ -197,9 +158,15 @@ class HRIObsRecorder:
         if self._open:
             return
         self._open = True
-        self._attrs = dict(metadata or {})
+        self._attrs = {
+            "episode_start_monotonic_ns": int(time.monotonic_ns()),
+            "episode_start_wall_time_unix_ns": int(time.time_ns()),
+            **dict(metadata or {}),
+        }
         self._buffers = {
             "sim_time": [],
+            "monotonic_time_ns": [],
+            "wall_time_unix_ns": [],
             "step": [],
             "obs": {field.name: [] for field in RECORDED_OBSERVATION_FIELDS},
             "obs_policy": [],
@@ -332,6 +299,8 @@ class HRIObsRecorder:
         *,
         step: int,
         sim_time: float,
+        monotonic_time_ns: int | None = None,
+        wall_time_unix_ns: int | None = None,
         obs: dict[str, np.ndarray],
         current_pick_idx: int = 0,
         completed_picks: int = 0,
@@ -351,6 +320,12 @@ class HRIObsRecorder:
         validate_observation(obs)
         validate_auxiliary_observation(obs)
         self._buffers["sim_time"].append(float(sim_time))
+        self._buffers["monotonic_time_ns"].append(
+            int(time.monotonic_ns() if monotonic_time_ns is None else monotonic_time_ns)
+        )
+        self._buffers["wall_time_unix_ns"].append(
+            int(time.time_ns() if wall_time_unix_ns is None else wall_time_unix_ns)
+        )
         self._buffers["step"].append(int(step))
         for field in RECORDED_OBSERVATION_FIELDS:
             self._buffers["obs"][field.name].append(
@@ -397,6 +372,8 @@ class HRIObsRecorder:
         attrs = {**self._attrs, **dict(metadata or {})}
         attrs["success"] = bool(success)
         attrs["episode_length"] = int(len(self._buffers["step"]))
+        attrs["episode_end_monotonic_ns"] = int(time.monotonic_ns())
+        attrs["episode_end_wall_time_unix_ns"] = int(time.time_ns())
         if not self._use_hdf5:
             self._save_npz_episode(episode_name, attrs)
             self._npz_episode_count += 1
@@ -411,6 +388,12 @@ class HRIObsRecorder:
             group.attrs[key] = value
 
         self._write_dataset(group, "sim_time", self._buffers["sim_time"])
+        self._write_dataset(
+            group, "monotonic_time_ns", self._buffers["monotonic_time_ns"]
+        )
+        self._write_dataset(
+            group, "wall_time_unix_ns", self._buffers["wall_time_unix_ns"]
+        )
         self._write_dataset(group, "step", self._buffers["step"])
         self._write_dataset(group, "obs_policy", self._buffers["obs_policy"])
         self._write_dataset(group, "hri_obs_policy", self._buffers["hri_obs_policy"])
@@ -461,6 +444,12 @@ class HRIObsRecorder:
         for key, value in attrs.items():
             self._npz_payload[f"{base}/attrs/{key}"] = np.asarray(value)
         self._npz_payload[f"{base}/sim_time"] = np.asarray(self._buffers["sim_time"])
+        self._npz_payload[f"{base}/monotonic_time_ns"] = np.asarray(
+            self._buffers["monotonic_time_ns"], dtype=np.int64
+        )
+        self._npz_payload[f"{base}/wall_time_unix_ns"] = np.asarray(
+            self._buffers["wall_time_unix_ns"], dtype=np.int64
+        )
         self._npz_payload[f"{base}/step"] = np.asarray(self._buffers["step"])
         self._npz_payload[f"{base}/obs_policy"] = np.asarray(self._buffers["obs_policy"])
         self._npz_payload[f"{base}/hri_obs_policy"] = np.asarray(self._buffers["hri_obs_policy"])

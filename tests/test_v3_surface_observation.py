@@ -3,6 +3,7 @@ import numpy as np
 
 from v3_chan.hri_obs_recorder import (
     HRI_OBS_DIM,
+    HRI_OBS_FIELD_NAMES,
     HRIObsRecorder,
     OBSERVATION_DIM,
     build_observation,
@@ -83,22 +84,52 @@ def test_surface_gap_flags_and_policy_compatibility():
 
 def test_hri_recorder_writes_surface_schema(tmp_path):
     path = tmp_path / "surface_obs.hdf5"
-    recorder = HRIObsRecorder(str(path), overwrite=True, compression=None)
+    recorder = HRIObsRecorder(
+        str(path),
+        overwrite=True,
+        compression=None,
+        file_metadata={
+            "session_id": "session_test",
+            "participant_id": "participant_test",
+            "collection_protocol_version": "protocol_test",
+            "time_sync_schema": "sim_monotonic_unix_v1",
+        },
+    )
     recorder.start_episode()
-    recorder.add_sample(step=1, sim_time=0.01, obs=_observation(0.01))
+    recorder.add_sample(
+        step=1,
+        sim_time=0.01,
+        monotonic_time_ns=123,
+        wall_time_unix_ns=456,
+        obs=_observation(0.01),
+    )
     recorder.end_episode(success=True)
     recorder.close()
 
-    assert HRI_OBS_DIM == 84
+    assert HRI_OBS_DIM == 83
+    assert "min_hand_gripper_center_dist" not in HRI_OBS_FIELD_NAMES
     with h5py.File(path, "r") as data:
         episode = data["episodes/episode_000000"]
         assert data.attrs["schema_version"] == (
-            "hri_obs_v6_surface_point_dynamic_safety"
+            "hri_obs_v7_83d_surface_point_dynamic_safety_sync"
         )
         assert int(data.attrs["observation_dim"]) == 84
-        assert int(data.attrs["hri_observation_dim"]) == 84
+        assert int(data.attrs["hri_observation_dim"]) == 83
+        assert data.attrs["hri_observation_version"] == (
+            "hri_policy_obs_v1_83d_surface_gap"
+        )
+        assert data.attrs["session_id"] == "session_test"
+        assert data.attrs["participant_id"] == "participant_test"
+        assert data.attrs["collection_protocol_version"] == "protocol_test"
+        assert data.attrs["time_sync_schema"] == "sim_monotonic_unix_v1"
         assert episode["obs_policy"].shape == (1, 84)
-        assert episode["hri_obs_policy"].shape == (1, 84)
+        assert episode["hri_obs_policy"].shape == (1, 83)
+        assert episode["monotonic_time_ns"].shape == (1,)
+        assert episode["wall_time_unix_ns"].shape == (1,)
+        assert int(episode["monotonic_time_ns"][0]) == 123
+        assert int(episode["wall_time_unix_ns"][0]) == 456
+        assert "episode_start_monotonic_ns" in episode.attrs
+        assert "episode_end_monotonic_ns" in episode.attrs
         assert "min_hand_gripper_center_dist" in episode["obs"]
         assert "min_hand_gripper_surface_gap" in episode["obs"]
         assert "near_miss" in episode["obs"]
@@ -130,5 +161,5 @@ def test_hri_recorder_preserves_nonempty_legacy_schema(tmp_path):
         assert "episode_000000" in data["episodes"]
     with h5py.File(new_path, "r") as data:
         assert data.attrs["schema_version"] == (
-            "hri_obs_v6_surface_point_dynamic_safety"
+            "hri_obs_v7_83d_surface_point_dynamic_safety_sync"
         )
