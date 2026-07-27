@@ -75,14 +75,15 @@ distance_gate = clip((0.13 - surface_gap) / (0.13 - 0.05), 0, 1)
 
 수집 당시의 `recorded_human_robot_collision`과 `recorded_near_human`은 replay metadata로만 보존되고 현재 rollout 라벨로 재사용되지 않는다.
 
-## HDF5 v6
+## HDF5 v7
 
-새 schema는 `hri_obs_v6_surface_point_dynamic_safety`이다.
+새 schema는 `hri_obs_v7_83d_surface_point_dynamic_safety_sync`이다.
 
 - `obs_policy`: 기존 robot-only checkpoint 호환을 위해 `84`차원 유지
 - `hri_obs_policy`: 현재 HRI 보조 field `83`차원
 - 기존 v1/v2/v3/v5 HDF5는 수정하지 않음
-- 기존 schema 파일 경로를 재사용하면 v6용 새 파일로 자동 분기
+- 기존 schema 파일 경로를 재사용하면 v7용 새 파일로 자동 분기
+- step별 `monotonic_time_ns`, `wall_time_unix_ns`를 기록해 EEG 동기화 기준을 제공
 
 주요 신규 `safety/*` dataset:
 

@@ -8,8 +8,11 @@ import sys; print("[main.py] Python started:", sys.version, flush=True); del sys
 
 # ── 반드시 가장 먼저 임포트 (표준 라이브러리 제외) ────────────────────────────
 import os
+import json
 import signal
+import subprocess
 import time
+from datetime import datetime, timezone
 
 # SteamVR OpenXR 런타임 경로 자동 설정
 _initial_xr_mode = os.environ.get("ISAAC_XR_MODE", "vr").strip().lower()
@@ -121,6 +124,10 @@ from app_config import (
     GRIPPER_CAMERA_RECORD_RESOLUTION,
     HAND_TRACKING_UDP_HOST,
     HAND_TRACKING_UDP_PORT,
+    HRI_PARTICIPANT_ID,
+    HRI_PROTOCOL_VERSION,
+    HRI_ROOM_CALIBRATION_ID,
+    HRI_SESSION_ID,
     HRI_TRAJECTORY_MAX_EPISODES,
     HRI_TRAJECTORY_OVERWRITE,
     HRI_TRAJECTORY_PATH,
@@ -150,6 +157,69 @@ from vr_avatar import (
     ROOM_TO_WORLD_MATRIX_ROWS,
     room_to_world_point,
 )
+
+
+def _git_collection_metadata() -> dict[str, str | int]:
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=project_root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        )
+    except Exception:
+        return {"git_commit": "unknown", "git_worktree_dirty": -1}
+    return {"git_commit": commit, "git_worktree_dirty": int(dirty)}
+
+
+def _collection_file_metadata(world) -> dict[str, str | int | float]:
+    wall_ns = time.time_ns()
+    monotonic_ns = time.monotonic_ns()
+    try:
+        isaac_version = str(omni.kit.app.get_app().get_version())
+    except Exception:
+        isaac_version = "unknown"
+    try:
+        physics_dt = float(world.get_physics_dt())
+    except Exception:
+        physics_dt = float("nan")
+    try:
+        rendering_dt = float(world.get_rendering_dt())
+    except Exception:
+        rendering_dt = float("nan")
+    return {
+        "session_id": HRI_SESSION_ID,
+        "participant_id": HRI_PARTICIPANT_ID,
+        "collection_protocol_version": HRI_PROTOCOL_VERSION,
+        "room_calibration_id": HRI_ROOM_CALIBRATION_ID,
+        "room_to_world_matrix_rows": json.dumps(ROOM_TO_WORLD_MATRIX_ROWS),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "session_start_wall_time_unix_ns": wall_ns,
+        "session_start_monotonic_ns": monotonic_ns,
+        "wall_minus_monotonic_ns_at_start": wall_ns - monotonic_ns,
+        "time_sync_schema": "sim_monotonic_unix_v1",
+        "isaac_sim_version": isaac_version,
+        "physics_dt_s": physics_dt,
+        "rendering_dt_s": rendering_dt,
+        "xr_mode": _xr_mode,
+        "xr_backend": _xr_backend,
+        "controller_pose_mode": os.environ.get(
+            "XR_CONTROLLER_POSE_MODE", "unspecified"
+        ),
+        "external_hand_tracking": int(
+            _env_bool("XR_EXTERNAL_HAND_TRACKING", False)
+        ),
+        **_git_collection_metadata(),
+    }
 
 
 def _enable_vr_extensions() -> None:
@@ -569,6 +639,11 @@ def main():
     # change dataset semantics.
     safety_geometry = PandaEndEffectorSafetyRuntime(robot_prim_path="/World/Franka")
     dynamic_safety = DynamicSafetyEstimator()
+    collection_file_metadata = {
+        **_collection_file_metadata(world),
+        **safety_geometry.metadata(),
+        **dynamic_safety.metadata(),
+    }
 
     place_target.set_world_pose(
         position=np.array([stack_base_xy[0], stack_base_xy[1], table_top_z + cube_half])
@@ -622,6 +697,7 @@ def main():
         max_human_collisions=1000,
         sample_path=SESSION_SAMPLES_PATH,
         sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
+        session_id=HRI_SESSION_ID,
     )
     haptics = HapticsUdpClient(
         BHAPTICS_NOTEBOOK_IP,
@@ -636,10 +712,7 @@ def main():
                 HRI_TRAJECTORY_PATH,
                 overwrite=HRI_TRAJECTORY_OVERWRITE,
                 sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
-                file_metadata={
-                    **safety_geometry.metadata(),
-                    **dynamic_safety.metadata(),
-                },
+                file_metadata=collection_file_metadata,
             )
             if (
                 HRI_TRAJECTORY_MAX_EPISODES > 0
@@ -657,10 +730,7 @@ def main():
                     continued_path,
                     overwrite=False,
                     sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
-                    file_metadata={
-                        **safety_geometry.metadata(),
-                        **dynamic_safety.metadata(),
-                    },
+                    file_metadata=collection_file_metadata,
                 )
             if (
                 HRI_TRAJECTORY_MAX_EPISODES <= 0
@@ -747,7 +817,14 @@ def main():
 
             step += 1
             sim_time = _sim_time(world, step)
-            logger.update_context(step, sim_time)
+            sample_monotonic_time_ns = time.monotonic_ns()
+            sample_wall_time_unix_ns = time.time_ns()
+            logger.update_context(
+                step,
+                sim_time,
+                monotonic_time_ns=sample_monotonic_time_ns,
+                wall_time_unix_ns=sample_wall_time_unix_ns,
+            )
             logger.ensure_episode_started()
 
             hand_tracking.poll()
@@ -944,6 +1021,8 @@ def main():
                 hri_recorder.add_sample(
                     step=step,
                     sim_time=sim_time,
+                    monotonic_time_ns=sample_monotonic_time_ns,
+                    wall_time_unix_ns=sample_wall_time_unix_ns,
                     obs=obs,
                     current_pick_idx=current_pick_idx,
                     completed_picks=completed_picks,

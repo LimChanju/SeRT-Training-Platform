@@ -1,9 +1,32 @@
 import os
+import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(BASE_DIR)
-ERRP_MARKERS_PATH = os.path.join(BASE_DIR, "errp_markers.csv")
-SESSION_SAMPLES_PATH = os.path.join(BASE_DIR, "session_samples.csv")
+HRI_SESSION_ID = os.environ.get("HRI_SESSION_ID", "").strip() or (
+    f"local_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+)
+HRI_PARTICIPANT_ID = os.environ.get("HRI_PARTICIPANT_ID", "unspecified").strip()
+HRI_PROTOCOL_VERSION = os.environ.get(
+    "HRI_PROTOCOL_VERSION", "surface_gap_dynamic_v1"
+).strip()
+HRI_ROOM_CALIBRATION_ID = os.environ.get(
+    "HRI_ROOM_CALIBRATION_ID", "room_to_world_default_v1"
+).strip()
+_log_dir = os.environ.get("HRI_LOG_DIR", os.path.join(BASE_DIR, "logs"))
+HRI_LOG_DIR = (
+    _log_dir
+    if os.path.isabs(_log_dir)
+    else os.path.abspath(os.path.join(PROJECT_DIR, _log_dir))
+)
+ERRP_MARKERS_PATH = os.environ.get(
+    "ERRP_MARKERS_PATH",
+    os.path.join(HRI_LOG_DIR, f"errp_markers_{HRI_SESSION_ID}.csv"),
+)
+SESSION_SAMPLES_PATH = os.environ.get(
+    "SESSION_SAMPLES_PATH",
+    os.path.join(HRI_LOG_DIR, f"session_samples_{HRI_SESSION_ID}.csv"),
+)
 SAMPLE_LOG_INTERVAL_STEPS = int(os.environ.get("SAMPLE_LOG_INTERVAL_STEPS", "1"))
 ENABLE_HRI_TRAJECTORY_RECORDING = os.environ.get(
     "ENABLE_HRI_TRAJECTORY_RECORDING", "0"

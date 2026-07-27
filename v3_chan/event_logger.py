@@ -1,5 +1,6 @@
 import csv
 import os
+import time
 from typing import Dict, Iterable, Optional
 
 import numpy as np
@@ -20,10 +21,12 @@ class EventLogger:
         max_human_collisions: int,
         sample_path: Optional[str] = None,
         sample_interval_steps: int = 1,
+        session_id: str = "unspecified",
     ) -> None:
         self._log_path = log_path
         self._sample_path = sample_path
         self._sample_interval_steps = max(1, int(sample_interval_steps))
+        self._session_id = str(session_id)
         self._cube_size = cube_size
         self._speed_threshold = speed_threshold
         self._collision_dist = collision_dist
@@ -38,18 +41,35 @@ class EventLogger:
         self._miss_logged_for_pick = False
         self._human_collision_count = 0
         self._episode_started = False
+        self._episode_index = -1
         self._sim_time = 0.0
         self._step = 0
+        self._monotonic_time_ns = 0
+        self._wall_time_unix_ns = 0
 
-    def update_context(self, step: int, sim_time: float) -> None:
+    def update_context(
+        self,
+        step: int,
+        sim_time: float,
+        *,
+        monotonic_time_ns: int | None = None,
+        wall_time_unix_ns: int | None = None,
+    ) -> None:
         self._step = step
         self._sim_time = sim_time
+        self._monotonic_time_ns = int(
+            time.monotonic_ns() if monotonic_time_ns is None else monotonic_time_ns
+        )
+        self._wall_time_unix_ns = int(
+            time.time_ns() if wall_time_unix_ns is None else wall_time_unix_ns
+        )
 
     def ensure_episode_started(self) -> None:
         self.start_episode("reason=run_start")
 
     def start_episode(self, details: str = "") -> None:
         if not self._episode_started:
+            self._episode_index += 1
             self.log_event("episode_start", details)
             self._episode_started = True
 
@@ -59,12 +79,35 @@ class EventLogger:
             self._episode_started = False
 
     def log_event(self, event: str, details: str = "") -> None:
+        os.makedirs(os.path.dirname(os.path.abspath(self._log_path)), exist_ok=True)
         file_exists = os.path.exists(self._log_path)
         with open(self._log_path, "a", newline="") as csvfile:
             writer = csv.writer(csvfile)
             if not file_exists:
-                writer.writerow(["sim_time", "event", "details"])
-            writer.writerow([self._sim_time, event, details])
+                writer.writerow(
+                    [
+                        "session_id",
+                        "episode_index",
+                        "sim_time",
+                        "step",
+                        "monotonic_time_ns",
+                        "wall_time_unix_ns",
+                        "event",
+                        "details",
+                    ]
+                )
+            writer.writerow(
+                [
+                    self._session_id,
+                    self._episode_index,
+                    self._sim_time,
+                    self._step,
+                    self._monotonic_time_ns,
+                    self._wall_time_unix_ns,
+                    event,
+                    details,
+                ]
+            )
         print(f"[ErrP] {event} | {details}")
 
     def log_sample(
@@ -80,6 +123,7 @@ class EventLogger:
             return
 
         file_exists = os.path.exists(self._sample_path)
+        os.makedirs(os.path.dirname(os.path.abspath(self._sample_path)), exist_ok=True)
         with open(self._sample_path, "a", newline="") as csvfile:
             writer = csv.writer(csvfile)
             if not file_exists:
@@ -87,6 +131,10 @@ class EventLogger:
                     [
                         "sim_time",
                         "step",
+                        "session_id",
+                        "episode_index",
+                        "monotonic_time_ns",
+                        "wall_time_unix_ns",
                         "left_hand_gripper_dist_m",
                         "right_hand_gripper_dist_m",
                         "min_hand_gripper_dist_m",
@@ -97,6 +145,10 @@ class EventLogger:
                 [
                     self._sim_time,
                     self._step,
+                    self._session_id,
+                    self._episode_index,
+                    self._monotonic_time_ns,
+                    self._wall_time_unix_ns,
                     self._format_optional_float(left_hand_gripper_dist),
                     self._format_optional_float(right_hand_gripper_dist),
                     self._format_optional_float(min_hand_gripper_dist),
@@ -114,6 +166,10 @@ class EventLogger:
         self._stack_failed_cubes = set()
         self._last_contact_step = {}
         self._drop_logged_cubes = set()
+        self._last_event_step = {}
+        self._last_human_contact_step = {}
+        self._human_collision_count = 0
+        self._miss_logged_for_pick = False
 
     def reset_pick_miss(self) -> None:
         self._miss_logged_for_pick = False

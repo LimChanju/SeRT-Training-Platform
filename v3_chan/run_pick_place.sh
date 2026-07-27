@@ -6,6 +6,9 @@ cd "$PROJECT_ROOT"
 
 HRI_SESSION_ID="$(date +%Y%m%d_%H%M%S_%N)_$$"
 export HRI_SESSION_ID
+export HRI_PARTICIPANT_ID="${HRI_PARTICIPANT_ID:-unspecified}"
+export HRI_PROTOCOL_VERSION="${HRI_PROTOCOL_VERSION:-surface_gap_dynamic_v1}"
+export HRI_ROOM_CALIBRATION_ID="${HRI_ROOM_CALIBRATION_ID:-room_to_world_default_v1}"
 HRI_COLLECTION_TEST_MODE="${HRI_COLLECTION_TEST_MODE:-0}"
 
 export BHAPTICS_NOTEBOOK_IP=10.3.129.185
@@ -79,11 +82,18 @@ export XR_STAGE_VISUAL_SEARCH_INTERVAL_STEPS=30
 export HAPTICS_CONTACT_MIN_STEPS=1
 
 LOG_PATH="$PROJECT_ROOT/v3_chan/logs/pick_place_${HRI_SESSION_ID}.log"
+export HRI_LOG_DIR="$PROJECT_ROOT/v3_chan/logs"
+export ERRP_MARKERS_PATH="$HRI_LOG_DIR/errp_markers_${HRI_SESSION_ID}.csv"
+export SESSION_SAMPLES_PATH="$HRI_LOG_DIR/session_samples_${HRI_SESSION_ID}.csv"
 mkdir -p "$PROJECT_ROOT/v3_chan/logs" "$PROJECT_ROOT/v3_chan/trajectories"
 
 printf '[Collect] session=%s\n' "$HRI_SESSION_ID"
 printf '[Collect] hdf5=%s\n' "$HRI_TRAJECTORY_PATH"
 printf '[Collect] log=%s\n' "$LOG_PATH"
+printf '[Collect] markers=%s\n' "$ERRP_MARKERS_PATH"
+printf '[Collect] samples=%s\n' "$SESSION_SAMPLES_PATH"
+printf '[Collect] participant=%s protocol=%s calibration=%s\n' \
+    "$HRI_PARTICIPANT_ID" "$HRI_PROTOCOL_VERSION" "$HRI_ROOM_CALIBRATION_ID"
 printf '[Collect] test_mode=%s episodes=%s recording=%s debug_visualization=%s\n' \
     "$HRI_COLLECTION_TEST_MODE" \
     "$HRI_TRAJECTORY_MAX_EPISODES" \

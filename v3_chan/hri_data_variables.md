@@ -1,12 +1,17 @@
 # HRI Data Variables
 
-## 1. `v3_chan/errp_markers.csv`
+## 1. `v3_chan/logs/errp_markers_<session_id>.csv`
 
 이 파일은 이벤트가 발생한 시점만 기록하는 marker 로그이다.
 
 | 변수명 | 의미 |
 |---|---|
+| `session_id` | 수집 실행 단위의 고유 ID |
+| `episode_index` | 해당 session 안의 episode index |
 | `sim_time` | 이벤트가 발생한 시뮬레이션 시간 |
+| `step` | simulation step index |
+| `monotonic_time_ns` | 프로세스 monotonic clock. EEG/외부 marker 정렬용 |
+| `wall_time_unix_ns` | Unix epoch 기준 wall-clock time |
 | `event` | 이벤트 이름 |
 | `details` | 이벤트 상세 정보. 사람-로봇 event에는 hand, collider path와 `surface_gap_m` 포함 |
 
@@ -23,7 +28,7 @@
 | `pick_attempt_success` | grasp, lift, 목표 위치 및 안정성 검증을 통과한 pick-place attempt |
 | `pick_attempt_failed` | 실제 place 검증에 실패하여 같은 cube를 재시도하는 attempt |
 
-## 2. `v3_chan/session_samples.csv`
+## 2. `v3_chan/logs/session_samples_<session_id>.csv`
 
 이 파일은 매 simulation step마다 손과 gripper 사이의 거리 및 충돌 flag를 저장하는 가벼운 시계열 로그이다.
 
@@ -31,6 +36,10 @@
 |---|---|
 | `sim_time` | 샘플이 기록된 시뮬레이션 시간 |
 | `step` | simulation step index |
+| `session_id` | 수집 실행 단위의 고유 ID |
+| `episode_index` | 해당 session 안의 episode index |
+| `monotonic_time_ns` | 프로세스 monotonic clock. EEG/외부 marker 정렬용 |
+| `wall_time_unix_ns` | Unix epoch 기준 wall-clock time |
 | `left_hand_gripper_dist_m` | 왼손 sphere proxy와 gripper 사이 거리 |
 | `right_hand_gripper_dist_m` | 오른손 sphere proxy와 gripper 사이 거리 |
 | `min_hand_gripper_dist_m` | 양손 중 gripper와 더 가까운 거리 |
@@ -47,6 +56,7 @@
 | `schema_version` | HDF5 schema 이름 |
 | `observation_version` | 원본 observation schema 이름 |
 | `observation_dim` | `obs_policy` 차원 |
+| `hri_observation_version` | 83D safety observation schema 이름 |
 | `hri_observation_dim` | `hri_obs_policy` 차원 |
 | `hri_observation_fields` | `hri_obs_policy`를 구성하는 field 목록 |
 | `sample_interval_steps` | 몇 step마다 샘플을 저장했는지 |
@@ -58,6 +68,8 @@
 | 변수명 | 의미 |
 |---|---|
 | `sim_time` | 각 sample의 시뮬레이션 시간 |
+| `monotonic_time_ns` | 각 sample의 monotonic clock timestamp |
+| `wall_time_unix_ns` | 각 sample의 Unix epoch timestamp |
 | `step` | 각 sample의 simulation step index |
 | `obs_policy` | 기존 전체 observation을 flatten한 vector |
 | `hri_obs_policy` | HRI cognitive safety 연구용 핵심 observation을 flatten한 vector |
@@ -67,7 +79,7 @@
 
 새 수집 데이터에서 episode 길이는 고정값이 아니다. 실제 place 검증에 실패하면 같은 cube를 재시도하므로, 3회보다 많은 pick-and-place controller attempt가 포함될 수 있다.
 
-새 recorder schema는 `hri_obs_v6_surface_point_dynamic_safety`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 현재 HRI 보조 변수 83차원을 저장한다. 기존 v1/v2의 74차원, v3의 77차원, v5 파일은 과거 데이터로 그대로 유지된다.
+새 recorder schema는 `hri_obs_v7_83d_surface_point_dynamic_safety_sync`이며, safety observation schema는 `hri_policy_obs_v1_83d_surface_gap`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원을 저장한다. 기존 v1/v2의 74차원, v3의 77차원, v5/v6 파일은 과거 데이터로 그대로 유지된다.
 
 `human/*`에는 `left_hand_vel_raw_mps`, `right_hand_vel_raw_mps`, `left_hand_vel_filtered_mps`, `right_hand_vel_filtered_mps`, `left_hand_velocity_valid`, `right_hand_velocity_valid`가 추가된다. `safety/*`에는 closest surface point, link origin linear velocity, link angular velocity, 회전 보정 속도, 최종 surface-point velocity, hand-relative velocity, per-hand surface-gap rate, closing speed, TTC, dynamic valid flag, collider-switch flag와 양손 aggregate(`min_ttc_s`, `max_closing_speed_mps`, `dynamic_valid`)가 추가된다. 이 값들은 policy observation에 포함되지 않는다.
 
@@ -103,7 +115,6 @@ surface 기반 flag의 기본 기준은 다음과 같다.
 | `ee_to_left_hand` | `human_left_hand_pos - ee_pos` |
 | `ee_to_right_hand` | `human_right_hand_pos - ee_pos` |
 | `min_hand_gripper_dist` | 호환용 canonical signed surface gap. v2 surface observation부터 음수는 겹침을 뜻함 |
-| `min_hand_gripper_center_dist` | 양손 sphere 중심 중 gripper 중심과 가장 가까운 Euclidean 거리 |
 | `min_hand_gripper_surface_gap` | 호환용 이름. 손 sphere와 distal end-effector collider 사이 signed surface gap |
 | `human_robot_collision` | 사람 손 proxy와 distal end-effector collider 충돌 flag |
 | `near_human` | 손이 인지적 안전 근접 거리 안에 있는지 |

@@ -25,12 +25,16 @@ distance_gate: clip((0.13 - surface_gap) / (0.13 - 0.05), 0, 1)
 
 ## 수집 데이터
 
-- HDF5 schema: `hri_obs_v6_surface_point_dynamic_safety`
+- HDF5 schema: `hri_obs_v7_83d_surface_point_dynamic_safety_sync`
 - 기존 84차원 `obs_policy`는 robot-only checkpoint 호환을 위해 유지한다.
+- safety residual용 `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원으로 고정한다.
 - 양손 surface gap, closest link/collider ID, contact, penetration, near, near-miss, gate, haptic pulse, geometry validity를 매 step 저장한다.
 - 양손의 world-frame velocity, exact closest surface point, link linear/angular velocity, 회전 보정 속도, 최종 surface-point velocity, relative velocity, surface-gap rate, closing speed, TTC도 매 step 저장한다.
 - link origin 선속도는 world pose를 simulation time으로 미분하고, 각속도는 Isaac Sim `SingleRigidPrim`의 world-frame 값을 사용한다. 각속도를 직접 읽을 수 없을 때만 quaternion finite difference를 fallback으로 사용한다. 손 속도와 gap rate에는 `0.1 s` dt 기반 EMA를 적용한다. TTC cap은 `10 s`이며, tracking/query invalid와 closest collider 변경 frame은 별도 valid flag로 표시한다.
 - 기존 HDF5는 덮어쓰지 않고 session별 새 파일을 생성한다.
+- HDF5 root에는 session/participant/protocol/git/Isaac/physics dt/room calibration metadata를 저장한다.
+- 각 step에는 simulation time, monotonic time, Unix epoch time을 함께 저장해 이후 EEG marker와 정렬할 수 있게 한다.
+- marker와 sample CSV도 session별 파일로 저장하고 `session_id`, `episode_index`를 포함한다.
 
 ## 이전 데이터 보관
 
