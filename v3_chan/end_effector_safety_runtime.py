@@ -58,14 +58,13 @@ class PandaEndEffectorSafetyRuntime:
             if debug is None
             else bool(debug)
         )
-        self.debug_visualization = _env_bool(
-            "HRI_DEBUG_SAFETY_VISUALIZATION", False
-        )
+        self.debug_visualization = _env_bool("HRI_DEBUG_SAFETY_VISUALIZATION", False)
         self.debug_print_every = max(
             1, int(os.environ.get("HRI_SAFETY_DEBUG_PRINT_EVERY", "30"))
         )
         self._stage = omni.usd.get_context().get_stage()
         self._scene_query = omni.physx.get_physx_scene_query_interface()
+        self._attachment_query = omni.physx.get_physx_attachment_interface()
         self._collider_to_link: dict[str, str] = {}
         self._collider_id_by_path: dict[str, int] = {}
         self._collider_properties: dict[str, dict[str, object]] = {}
@@ -75,7 +74,10 @@ class PandaEndEffectorSafetyRuntime:
         # These wrappers only read the existing Panda link transforms.  They do
         # not issue a second PhysX closest-point or overlap query.
         self._link_pose_prims: dict[str, object] = {}
+        self._link_rigid_prims: dict[str, object] = {}
         self._link_pose_error_logged: set[str] = set()
+        self._link_velocity_error_logged: set[str] = set()
+        self._closest_point_error_logged: set[str] = set()
         self._debug_counts = {"left": 0, "right": 0}
         self._last_debug_state: dict[str, tuple | None] = {
             "left": None,
@@ -115,24 +117,31 @@ class PandaEndEffectorSafetyRuntime:
         """Discard cached single-prim pose wrappers after a world reset."""
 
         self._link_pose_prims.clear()
+        self._link_rigid_prims.clear()
 
     def closest_link_origin_world_position(
         self, hand_result: HandSafetyResult
     ) -> tuple[np.ndarray | None, bool]:
-        """Return the current closest link origin without another PhysX query.
+        """Return the current closest link origin without another PhysX query."""
+
+        position, _, valid = self.closest_link_world_pose(hand_result)
+        return position, valid
+
+    def closest_link_world_pose(
+        self, hand_result: HandSafetyResult
+    ) -> tuple[np.ndarray | None, np.ndarray | None, bool]:
+        """Return closest-link world position and wxyz orientation.
 
         Sphere-overlap queries identify a collider path but do not expose the
-        exact closest surface point.  The caller therefore finite-differences
-        this link-origin pose using simulation time and records that reference
-        explicitly in HDF5 metadata.
+        link twist. The caller finite-differences this pose in simulation time.
         """
 
         link_name = str(hand_result.closest_link or "")
         if not link_name:
-            return None, False
+            return None, None, False
         prim_path = f"{self.robot_prim_path}/{link_name}"
         if not self._stage.GetPrimAtPath(prim_path).IsValid():
-            return None, False
+            return None, None, False
         wrapper = self._link_pose_prims.get(link_name)
         if wrapper is None:
             try:
@@ -146,16 +155,101 @@ class PandaEndEffectorSafetyRuntime:
                 self._link_pose_prims[link_name] = wrapper
             except Exception as exc:
                 self._log_link_pose_error(link_name, exc)
-                return None, False
+                return None, None, False
         try:
-            position, _ = wrapper.get_world_pose()
+            position, orientation = wrapper.get_world_pose()
             position = np.asarray(position, dtype=float).reshape(-1)
-            if position.size < 3 or not np.all(np.isfinite(position[:3])):
-                return None, False
-            return position[:3].copy(), True
+            orientation = np.asarray(orientation, dtype=float).reshape(-1)
+            if (
+                position.size < 3
+                or orientation.size < 4
+                or not np.all(np.isfinite(position[:3]))
+                or not np.all(np.isfinite(orientation[:4]))
+                or np.linalg.norm(orientation[:4]) <= 1e-9
+            ):
+                return None, None, False
+            orientation = orientation[:4] / np.linalg.norm(orientation[:4])
+            return position[:3].copy(), orientation.copy(), True
         except Exception as exc:
             self._log_link_pose_error(link_name, exc)
+            return None, None, False
+
+    def closest_surface_point_world_position(
+        self, hand_result: HandSafetyResult, hand_pos
+    ) -> tuple[np.ndarray | None, bool]:
+        """Return the exact closest point on the selected PhysX collider.
+
+        PhysX only defines this point while the tracked hand center is outside
+        the collider. A hand sphere may overlap while its center remains
+        outside, so ordinary virtual contacts still retain a valid point.
+        """
+
+        import carb
+
+        pos = _valid_position(hand_pos)
+        collider_path = str(hand_result.closest_collider_path or "")
+        if pos is None or not collider_path:
             return None, False
+        try:
+            output = self._attachment_query.get_closest_points(
+                [carb.Float3(*[float(value) for value in pos])], collider_path
+            )
+            distances = np.asarray(output.get("dists", []), dtype=float).reshape(-1)
+            points = output.get("closest_points", [])
+            if distances.size < 1 or distances[0] <= 0.0 or len(points) < 1:
+                return None, False
+            point = np.asarray(points[0], dtype=float).reshape(-1)
+            if point.size < 3 or not np.all(np.isfinite(point[:3])):
+                return None, False
+            return point[:3].copy(), True
+        except Exception as exc:
+            if collider_path not in self._closest_point_error_logged:
+                self._closest_point_error_logged.add(collider_path)
+                print(
+                    "[SafetyGeometry] closest surface point unavailable; "
+                    f"surface velocity will be invalid for collider={collider_path}: {exc}",
+                    flush=True,
+                )
+            return None, False
+
+    def closest_link_world_velocity(
+        self, hand_result: HandSafetyResult
+    ) -> tuple[np.ndarray | None, np.ndarray | None, bool]:
+        """Return Isaac Sim's world-frame linear and angular link velocity."""
+
+        link_name = str(hand_result.closest_link or "")
+        if not link_name:
+            return None, None, False
+        prim_path = f"{self.robot_prim_path}/{link_name}"
+        if not self._stage.GetPrimAtPath(prim_path).IsValid():
+            return None, None, False
+        wrapper = self._link_rigid_prims.get(link_name)
+        if wrapper is None:
+            try:
+                from isaacsim.core.prims import SingleRigidPrim
+
+                wrapper = SingleRigidPrim(prim_path=prim_path)
+                wrapper.initialize()
+                self._link_rigid_prims[link_name] = wrapper
+            except Exception as exc:
+                self._log_link_velocity_error(link_name, exc)
+                return None, None, False
+        try:
+            linear = np.asarray(wrapper.get_linear_velocity(), dtype=float).reshape(-1)
+            angular = np.asarray(wrapper.get_angular_velocity(), dtype=float).reshape(
+                -1
+            )
+            if (
+                linear.size < 3
+                or angular.size < 3
+                or not np.all(np.isfinite(linear[:3]))
+                or not np.all(np.isfinite(angular[:3]))
+            ):
+                return None, None, False
+            return linear[:3].copy(), angular[:3].copy(), True
+        except Exception as exc:
+            self._log_link_velocity_error(link_name, exc)
+            return None, None, False
 
     def refresh(self) -> None:
         from pxr import PhysxSchema, Usd, UsdPhysics
@@ -188,7 +282,9 @@ class PandaEndEffectorSafetyRuntime:
             properties[path] = {
                 "link": link,
                 "prim_type": str(prim.GetTypeName()),
-                "approximation": str(approximation) if approximation is not None else "",
+                "approximation": (
+                    str(approximation) if approximation is not None else ""
+                ),
                 "contact_offset_m": _finite_or_none(contact_offset),
                 "rest_offset_m": _finite_or_none(rest_offset),
             }
@@ -289,9 +385,10 @@ class PandaEndEffectorSafetyRuntime:
                     else:
                         low = mid
                 nearest_radius = high
-                final_hits = self._overlap_distal(
-                    high + self.thresholds.query_tolerance_m, pos
-                ) or final_hits
+                final_hits = (
+                    self._overlap_distal(high + self.thresholds.query_tolerance_m, pos)
+                    or final_hits
+                )
             surface_gap = nearest_radius - hand_radius
         else:
             low = hand_radius
@@ -318,9 +415,10 @@ class PandaEndEffectorSafetyRuntime:
                 else:
                     low = mid
             surface_gap = high - hand_radius
-            final_hits = self._overlap_distal(
-                high + self.thresholds.query_tolerance_m, pos
-            ) or final_hits
+            final_hits = (
+                self._overlap_distal(high + self.thresholds.query_tolerance_m, pos)
+                or final_hits
+            )
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         result = self._result(
@@ -343,15 +441,17 @@ class PandaEndEffectorSafetyRuntime:
             "safety_available_links_json": json.dumps(self.available_links),
             "safety_missing_links_json": json.dumps(self.missing_links),
             "safety_missing_link_notes_json": json.dumps(
-                {
-                    "panda_link8": (
-                        "The Isaac Sim 4.5 Franka asset has no CollisionAPI below "
-                        "panda_link8; its coincident physical flange is covered by "
-                        "the built-in panda_hand collider."
-                    )
-                }
-                if "panda_link8" in self.missing_links
-                else {},
+                (
+                    {
+                        "panda_link8": (
+                            "The Isaac Sim 4.5 Franka asset has no CollisionAPI below "
+                            "panda_link8; its coincident physical flange is covered by "
+                            "the built-in panda_hand collider."
+                        )
+                    }
+                    if "panda_link8" in self.missing_links
+                    else {}
+                ),
                 sort_keys=True,
             ),
             "safety_link_id_map_json": json.dumps(LINK_ID_BY_NAME, sort_keys=True),
@@ -379,12 +479,16 @@ class PandaEndEffectorSafetyRuntime:
                 "Tracked hands are non-physical query spheres; contact is exact "
                 "PhysX overlap against Panda colliders and force is unavailable."
             ),
-            "dynamic_robot_velocity_method": "link_origin",
+            "dynamic_robot_velocity_method": "closest_surface_point_rigid_body_twist",
             "dynamic_robot_velocity_source": (
-                "cached_link_world_pose_sim_time_finite_difference"
+                "link_origin_pose_finite_difference_plus_isaacsim_angular_velocity"
             ),
-            "dynamic_exact_closest_surface_point_velocity_available": False,
-            "dynamic_angular_velocity_correction_used": False,
+            "dynamic_closest_surface_point_source": (
+                "physx_attachment_get_closest_points"
+            ),
+            "dynamic_exact_closest_surface_point_velocity_available": True,
+            "dynamic_angular_velocity_correction_used": True,
+            "dynamic_surface_point_inside_collider_behavior": "invalid",
         }
 
     def _log_link_pose_error(self, link_name: str, exc: Exception) -> None:
@@ -394,6 +498,16 @@ class PandaEndEffectorSafetyRuntime:
         print(
             "[SafetyGeometry] closest link origin pose unavailable; "
             f"dynamic relative velocity will be invalid for link={link_name}: {exc}",
+            flush=True,
+        )
+
+    def _log_link_velocity_error(self, link_name: str, exc: Exception) -> None:
+        if link_name in self._link_velocity_error_logged:
+            return
+        self._link_velocity_error_logged.add(link_name)
+        print(
+            "[SafetyGeometry] direct Isaac link velocity unavailable; "
+            f"using pose finite-difference fallback for link={link_name}: {exc}",
             flush=True,
         )
 
@@ -484,9 +598,7 @@ class PandaEndEffectorSafetyRuntime:
             )
             if collider_center is None:
                 continue
-            collider_point = Gf.Vec3f(
-                *[float(value) for value in collider_center]
-            )
+            collider_point = Gf.Vec3f(*[float(value) for value in collider_center])
             try:
                 self._debug_draw.draw_line(
                     hand_point,
@@ -558,7 +670,9 @@ class PandaEndEffectorSafetyRuntime:
         query_time_ms: float,
         query_count: int,
     ) -> HandSafetyResult:
-        hit_paths = tuple(sorted(path for path in hits if path in self._collider_to_link))
+        hit_paths = tuple(
+            sorted(path for path in hits if path in self._collider_to_link)
+        )
         closest_path = hit_paths[0] if hit_paths else ""
         closest_link = self._collider_to_link.get(closest_path, "")
         classification = classify_surface_gap(

@@ -67,9 +67,9 @@
 
 새 수집 데이터에서 episode 길이는 고정값이 아니다. 실제 place 검증에 실패하면 같은 cube를 재시도하므로, 3회보다 많은 pick-and-place controller attempt가 포함될 수 있다.
 
-새 recorder schema는 `hri_obs_v5_builtin_panda_collision_dynamic_safety`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 built-in Panda collider 보조 변수를 포함해 84차원이다. 기존 v1/v2의 74차원과 v3의 77차원 파일은 과거 데이터로 그대로 유지된다.
+새 recorder schema는 `hri_obs_v6_surface_point_dynamic_safety`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 현재 HRI 보조 변수 83차원을 저장한다. 기존 v1/v2의 74차원, v3의 77차원, v5 파일은 과거 데이터로 그대로 유지된다.
 
-`human/*`에는 `left_hand_vel_raw_mps`, `right_hand_vel_raw_mps`, `left_hand_vel_filtered_mps`, `right_hand_vel_filtered_mps`, `left_hand_velocity_valid`, `right_hand_velocity_valid`가 추가된다. `safety/*`에는 closest link origin velocity, hand-relative velocity, per-hand surface-gap rate, closing speed, TTC, dynamic valid flag, collider-switch flag와 양손 aggregate(`min_ttc_s`, `max_closing_speed_mps`, `dynamic_valid`)가 추가된다. 이 값들은 policy observation에 포함되지 않는다.
+`human/*`에는 `left_hand_vel_raw_mps`, `right_hand_vel_raw_mps`, `left_hand_vel_filtered_mps`, `right_hand_vel_filtered_mps`, `left_hand_velocity_valid`, `right_hand_velocity_valid`가 추가된다. `safety/*`에는 closest surface point, link origin linear velocity, link angular velocity, 회전 보정 속도, 최종 surface-point velocity, hand-relative velocity, per-hand surface-gap rate, closing speed, TTC, dynamic valid flag, collider-switch flag와 양손 aggregate(`min_ttc_s`, `max_closing_speed_mps`, `dynamic_valid`)가 추가된다. 이 값들은 policy observation에 포함되지 않는다.
 
 surface 기반 flag의 기본 기준은 다음과 같다.
 

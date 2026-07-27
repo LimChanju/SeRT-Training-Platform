@@ -85,7 +85,7 @@ class HRIObsRecorder:
     directly into the existing policy/training readers.
     """
 
-    SCHEMA_VERSION = "hri_obs_v5_builtin_panda_collision_dynamic_safety"
+    SCHEMA_VERSION = "hri_obs_v6_surface_point_dynamic_safety"
 
     def __init__(
         self,
@@ -268,8 +268,18 @@ class HRIObsRecorder:
                 "query_time_right_ms": [],
                 "query_count_left": [],
                 "query_count_right": [],
+                "left_closest_surface_point_world_pos": [],
+                "right_closest_surface_point_world_pos": [],
+                "left_closest_robot_origin_velocity_world_mps": [],
+                "right_closest_robot_origin_velocity_world_mps": [],
+                "left_closest_robot_angular_velocity_world_radps": [],
+                "right_closest_robot_angular_velocity_world_radps": [],
+                "left_closest_robot_rotational_velocity_world_mps": [],
+                "right_closest_robot_rotational_velocity_world_mps": [],
                 "left_closest_robot_velocity_world_mps": [],
                 "right_closest_robot_velocity_world_mps": [],
+                "left_robot_surface_velocity_valid": [],
+                "right_robot_surface_velocity_valid": [],
                 "left_relative_velocity_world_mps": [],
                 "right_relative_velocity_world_mps": [],
                 "left_surface_gap_rate_raw_mps": [],
@@ -643,11 +653,41 @@ class HRIObsRecorder:
                 self._buffers["human"][name].append(_finite_scalar(value, 0.0))
 
         safety_values = {
+            "left_closest_surface_point_world_pos": dynamic.get(
+                "left_closest_surface_point_world_pos", zero_vec
+            ),
+            "right_closest_surface_point_world_pos": dynamic.get(
+                "right_closest_surface_point_world_pos", zero_vec
+            ),
+            "left_closest_robot_origin_velocity_world_mps": dynamic.get(
+                "left_closest_robot_origin_velocity_world_mps", zero_vec
+            ),
+            "right_closest_robot_origin_velocity_world_mps": dynamic.get(
+                "right_closest_robot_origin_velocity_world_mps", zero_vec
+            ),
+            "left_closest_robot_angular_velocity_world_radps": dynamic.get(
+                "left_closest_robot_angular_velocity_world_radps", zero_vec
+            ),
+            "right_closest_robot_angular_velocity_world_radps": dynamic.get(
+                "right_closest_robot_angular_velocity_world_radps", zero_vec
+            ),
+            "left_closest_robot_rotational_velocity_world_mps": dynamic.get(
+                "left_closest_robot_rotational_velocity_world_mps", zero_vec
+            ),
+            "right_closest_robot_rotational_velocity_world_mps": dynamic.get(
+                "right_closest_robot_rotational_velocity_world_mps", zero_vec
+            ),
             "left_closest_robot_velocity_world_mps": dynamic.get(
                 "left_closest_robot_velocity_world_mps", zero_vec
             ),
             "right_closest_robot_velocity_world_mps": dynamic.get(
                 "right_closest_robot_velocity_world_mps", zero_vec
+            ),
+            "left_robot_surface_velocity_valid": dynamic.get(
+                "left_robot_surface_velocity_valid", 0.0
+            ),
+            "right_robot_surface_velocity_valid": dynamic.get(
+                "right_robot_surface_velocity_valid", 0.0
             ),
             "left_relative_velocity_world_mps": dynamic.get(
                 "left_relative_velocity_world_mps", zero_vec
@@ -684,7 +724,7 @@ class HRIObsRecorder:
             ),
         }
         for name, value in safety_values.items():
-            if name.endswith("_world_mps"):
+            if name.endswith(("_world_mps", "_world_radps", "_world_pos")):
                 self._buffers["safety"][name].append(_finite_array(value, 3))
             else:
                 default = 10.0 if name.endswith("_ttc_s") or name == "min_ttc_s" else 0.0

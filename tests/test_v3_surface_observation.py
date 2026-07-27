@@ -93,7 +93,7 @@ def test_hri_recorder_writes_surface_schema(tmp_path):
     with h5py.File(path, "r") as data:
         episode = data["episodes/episode_000000"]
         assert data.attrs["schema_version"] == (
-            "hri_obs_v5_builtin_panda_collision_dynamic_safety"
+            "hri_obs_v6_surface_point_dynamic_safety"
         )
         assert int(data.attrs["observation_dim"]) == 84
         assert int(data.attrs["hri_observation_dim"]) == 84
@@ -130,5 +130,5 @@ def test_hri_recorder_preserves_nonempty_legacy_schema(tmp_path):
         assert "episode_000000" in data["episodes"]
     with h5py.File(new_path, "r") as data:
         assert data.attrs["schema_version"] == (
-            "hri_obs_v5_builtin_panda_collision_dynamic_safety"
+            "hri_obs_v6_surface_point_dynamic_safety"
         )

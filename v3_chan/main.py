@@ -806,11 +806,23 @@ def main():
             safety_result = safety_geometry.evaluate(left_pos, right_pos)
             dynamic_sample = None
             if hri_recorder is not None and hri_recorder.is_open:
-                left_robot_origin, _ = safety_geometry.closest_link_origin_world_position(
-                    safety_result.left
+                left_robot_origin, left_robot_orientation, _ = (
+                    safety_geometry.closest_link_world_pose(safety_result.left)
                 )
-                right_robot_origin, _ = safety_geometry.closest_link_origin_world_position(
-                    safety_result.right
+                right_robot_origin, right_robot_orientation, _ = (
+                    safety_geometry.closest_link_world_pose(safety_result.right)
+                )
+                _, left_robot_angular_velocity, _ = (
+                    safety_geometry.closest_link_world_velocity(safety_result.left)
+                )
+                _, right_robot_angular_velocity, _ = (
+                    safety_geometry.closest_link_world_velocity(safety_result.right)
+                )
+                left_surface_point, _ = safety_geometry.closest_surface_point_world_position(
+                    safety_result.left, left_pos
+                )
+                right_surface_point, _ = safety_geometry.closest_surface_point_world_position(
+                    safety_result.right, right_pos
                 )
                 dynamic_sample = dynamic_safety.update(
                     sim_time_s=sim_time,
@@ -826,6 +838,16 @@ def main():
                     right_closest_collider_id=safety_result.right.closest_collider_id,
                     left_closest_robot_origin_pos=left_robot_origin,
                     right_closest_robot_origin_pos=right_robot_origin,
+                    left_closest_robot_orientation_wxyz=left_robot_orientation,
+                    right_closest_robot_orientation_wxyz=right_robot_orientation,
+                    left_closest_surface_point_world_pos=left_surface_point,
+                    right_closest_surface_point_world_pos=right_surface_point,
+                    left_closest_robot_angular_velocity_world_radps=(
+                        left_robot_angular_velocity
+                    ),
+                    right_closest_robot_angular_velocity_world_radps=(
+                        right_robot_angular_velocity
+                    ),
                 )
             human_robot_collision_active = safety_result.collision
             haptic_pulse_by_hand = {"left": False, "right": False}

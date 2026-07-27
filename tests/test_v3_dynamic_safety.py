@@ -59,7 +59,30 @@ def _config():
     )
 
 
-def _update(estimator, time_s, left_pos, left_gap, left_collider=1, *, left_valid=True):
+def _update(
+    estimator,
+    time_s,
+    left_pos,
+    left_gap,
+    left_collider=1,
+    *,
+    left_valid=True,
+    robot_origin=None,
+    robot_orientation=None,
+    surface_point=None,
+    robot_angular_velocity=None,
+):
+    if left_valid:
+        robot_origin = np.zeros(3) if robot_origin is None else robot_origin
+        robot_orientation = (
+            np.array([1.0, 0.0, 0.0, 0.0])
+            if robot_orientation is None
+            else robot_orientation
+        )
+        surface_point = np.zeros(3) if surface_point is None else surface_point
+        robot_angular_velocity = (
+            np.zeros(3) if robot_angular_velocity is None else robot_angular_velocity
+        )
     return estimator.update(
         sim_time_s=time_s,
         left_hand_pos=left_pos,
@@ -72,8 +95,13 @@ def _update(estimator, time_s, left_pos, left_gap, left_collider=1, *, left_vali
         right_geometry_valid=False,
         left_closest_collider_id=left_collider if left_valid else 0,
         right_closest_collider_id=0,
-        left_closest_robot_origin_pos=np.zeros(3) if left_valid else None,
+        left_closest_robot_origin_pos=robot_origin if left_valid else None,
         right_closest_robot_origin_pos=None,
+        left_closest_robot_orientation_wxyz=(robot_orientation if left_valid else None),
+        left_closest_surface_point_world_pos=(surface_point if left_valid else None),
+        left_closest_robot_angular_velocity_world_radps=(
+            robot_angular_velocity if left_valid else None
+        ),
     )
 
 
@@ -101,6 +129,37 @@ def test_receding_hand_has_no_closing_speed_and_invalid_ttc():
     assert not sample.left.dynamic_valid
     assert sample.left.closing_speed_mps == 0.0
     assert sample.left.ttc_s == 10.0
+
+
+def test_surface_point_velocity_includes_link_rotation():
+    estimator = DynamicSafetyEstimator(_config())
+    _update(
+        estimator,
+        0.0,
+        [1.0, 0.0, 0.0],
+        0.2,
+        robot_origin=np.array([-0.05, 0.0, 0.0]),
+        surface_point=np.array([0.95, 0.0, 0.0]),
+        robot_angular_velocity=np.array([0.0, 0.0, 2.0]),
+    )
+    sample = _update(
+        estimator,
+        0.1,
+        [0.9, 0.0, 0.0],
+        0.1,
+        robot_origin=np.zeros(3),
+        surface_point=np.array([1.0, 0.0, 0.0]),
+        robot_angular_velocity=np.array([0.0, 0.0, 2.0]),
+    )
+
+    assert sample.left.robot_surface_velocity_valid
+    assert np.allclose(
+        sample.left.closest_robot_origin_velocity_world_mps, [0.5, 0.0, 0.0]
+    )
+    assert np.allclose(
+        sample.left.closest_robot_rotational_velocity_world_mps, [0.0, 2.0, 0.0]
+    )
+    assert np.allclose(sample.left.closest_robot_velocity_world_mps, [0.5, 2.0, 0.0])
 
 
 def test_penetration_has_zero_ttc():
@@ -156,9 +215,7 @@ def test_abnormal_simulation_dt_resets_the_estimator():
 def test_closest_collider_change_preserves_hand_velocity_and_resets_geometry():
     estimator = DynamicSafetyEstimator(_config())
     _update(estimator, 0.0, [0.0, 0.0, 0.0], 0.5, left_collider=1)
-    before_switch = _update(
-        estimator, 0.1, [0.1, 0.0, 0.0], 0.4, left_collider=1
-    )
+    before_switch = _update(estimator, 0.1, [0.1, 0.0, 0.0], 0.4, left_collider=1)
     switched = _update(estimator, 0.2, [0.3, 0.0, 0.0], 0.3, left_collider=2)
     resumed = _update(estimator, 0.3, [0.4, 0.0, 0.0], 0.2, left_collider=2)
 
@@ -206,14 +263,20 @@ def test_recorder_dynamic_dataset_lengths_match_episode_frames(tmp_path):
 
     with h5py.File(path, "r") as data:
         episode = data["episodes/episode_000000"]
-        assert data.attrs["schema_version"] == "hri_obs_v5_builtin_panda_collision_dynamic_safety"
+        assert data.attrs["schema_version"] == "hri_obs_v6_surface_point_dynamic_safety"
         assert np.isclose(data.attrs["dynamic_ema_time_constant_s"], 0.1)
         assert np.isclose(data.attrs["dynamic_ttc_cap_s"], 10.0)
         assert (
             data.attrs["dynamic_collider_switch_reset_scope"]
-            == "gap_rate_and_robot_origin_only"
+            == "gap_rate_and_robot_link_pose_only"
         )
-        assert bool(data.attrs["dynamic_hand_velocity_preserved_across_collider_switch"])
+        assert bool(
+            data.attrs["dynamic_hand_velocity_preserved_across_collider_switch"]
+        )
+        assert data.attrs["dynamic_robot_velocity_method"] == (
+            "closest_surface_point_rigid_body_twist"
+        )
+        assert bool(data.attrs["dynamic_angular_velocity_correction_used"])
         expected_human = {
             "left_hand_vel_raw_mps",
             "right_hand_vel_raw_mps",
@@ -223,8 +286,18 @@ def test_recorder_dynamic_dataset_lengths_match_episode_frames(tmp_path):
             "right_hand_velocity_valid",
         }
         expected_safety = {
+            "left_closest_surface_point_world_pos",
+            "right_closest_surface_point_world_pos",
+            "left_closest_robot_origin_velocity_world_mps",
+            "right_closest_robot_origin_velocity_world_mps",
+            "left_closest_robot_angular_velocity_world_radps",
+            "right_closest_robot_angular_velocity_world_radps",
+            "left_closest_robot_rotational_velocity_world_mps",
+            "right_closest_robot_rotational_velocity_world_mps",
             "left_closest_robot_velocity_world_mps",
             "right_closest_robot_velocity_world_mps",
+            "left_robot_surface_velocity_valid",
+            "right_robot_surface_velocity_valid",
             "left_relative_velocity_world_mps",
             "right_relative_velocity_world_mps",
             "left_surface_gap_rate_raw_mps",
@@ -248,6 +321,7 @@ def test_recorder_dynamic_dataset_lengths_match_episode_frames(tmp_path):
         assert episode["human/left_hand_vel_raw_mps"].shape == (3, 3)
         assert episode["human/right_hand_velocity_valid"].shape == (3,)
         assert episode["safety/left_relative_velocity_world_mps"].shape == (3, 3)
+        assert episode["safety/left_closest_surface_point_world_pos"].shape == (3, 3)
         assert episode["safety/left_ttc_s"].shape == (3,)
         assert episode["safety/closest_collider_switched_left"].shape == (3,)
         for group_name in ("human", "safety"):

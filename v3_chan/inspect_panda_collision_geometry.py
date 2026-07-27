@@ -78,9 +78,7 @@ def main() -> None:
         contact_offset = (
             _attr_value(physx_api, "GetContactOffsetAttr") if physx_api else None
         )
-        rest_offset = (
-            _attr_value(physx_api, "GetRestOffsetAttr") if physx_api else None
-        )
+        rest_offset = _attr_value(physx_api, "GetRestOffsetAttr") if physx_api else None
         imageable = UsdGeom.Imageable(prim)
         purpose = imageable.GetPurposeAttr().Get() if imageable else None
         link = _owning_link(path)
@@ -101,8 +99,7 @@ def main() -> None:
     for link_name in DISTAL_LINK_NAMES:
         paths = [path for path, link in colliders if link == link_name]
         print(
-            f"[PandaColliderLink] {link_name}: "
-            f"{len(paths)} collider(s) {paths}",
+            f"[PandaColliderLink] {link_name}: " f"{len(paths)} collider(s) {paths}",
             flush=True,
         )
 
@@ -185,6 +182,63 @@ def main() -> None:
         f"samples={len(contact_query_times)} "
         f"mean_ms={float(np.mean(contact_query_times)):.4f} "
         f"max_ms={float(np.max(contact_query_times)):.4f}",
+        flush=True,
+    )
+
+    surface_probe = None
+    for path in runtime.collider_paths:
+        prim = stage.GetPrimAtPath(path)
+        world_range = bbox_cache.ComputeWorldBound(prim).ComputeAlignedRange()
+        center = np.asarray(
+            (world_range.GetMin() + world_range.GetMax()) * 0.5,
+            dtype=float,
+        )
+        extents = np.asarray(world_range.GetMax() - world_range.GetMin(), dtype=float)
+        for axis in range(3):
+            for sign in (-1.0, 1.0):
+                candidate = center.copy()
+                candidate[axis] += sign * (
+                    extents[axis] * 0.5 + runtime.thresholds.hand_radius_m + 0.02
+                )
+                hand_result = runtime.evaluate_hand("smoke", candidate)
+                point, point_valid = runtime.closest_surface_point_world_position(
+                    hand_result, candidate
+                )
+                if not point_valid:
+                    continue
+                linear, angular, velocity_valid = runtime.closest_link_world_velocity(
+                    hand_result
+                )
+                if not velocity_valid:
+                    continue
+                surface_probe = (candidate, point, linear, angular, hand_result)
+                break
+            if surface_probe is not None:
+                break
+        if surface_probe is not None:
+            break
+    if surface_probe is None:
+        raise AssertionError("No valid closest surface-point velocity probe found")
+    candidate, point, linear, angular, hand_result = surface_probe
+    print(
+        "[PandaSurfaceVelocitySmoke] "
+        f"hand={np.round(candidate, 4)} point={np.round(point, 4)} "
+        f"link={hand_result.closest_link} collider={hand_result.closest_collider_path} "
+        f"linear={np.round(linear, 5)} angular={np.round(angular, 5)}",
+        flush=True,
+    )
+    dynamic_query_frames = 120
+    started = time.perf_counter()
+    for _ in range(dynamic_query_frames):
+        hand_result = runtime.evaluate_hand("smoke", candidate)
+        runtime.closest_surface_point_world_position(hand_result, candidate)
+        runtime.closest_link_world_pose(hand_result)
+        runtime.closest_link_world_velocity(hand_result)
+    dynamic_query_ms = (time.perf_counter() - started) * 1000.0
+    print(
+        "[PandaSurfaceVelocityBenchmark] "
+        f"frames={dynamic_query_frames} total_ms={dynamic_query_ms:.3f} "
+        f"per_frame_ms={dynamic_query_ms / dynamic_query_frames:.3f}",
         flush=True,
     )
 
