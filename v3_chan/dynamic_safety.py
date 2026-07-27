@@ -98,6 +98,8 @@ class DynamicSafetyConfig:
             "dynamic_robot_velocity_source": "cached_link_world_pose_sim_time_finite_difference",
             "dynamic_exact_closest_surface_point_velocity_available": False,
             "dynamic_angular_velocity_correction_used": False,
+            "dynamic_collider_switch_reset_scope": "gap_rate_and_robot_origin_only",
+            "dynamic_hand_velocity_preserved_across_collider_switch": True,
         }
 
 
@@ -203,19 +205,6 @@ class _HandDynamicEstimator:
             self._seed(sim_time_s, pos, surface_gap_m, gap_valid, closest_collider_id, robot_origin)
             return self._empty_sample(gap_m=surface_gap_m if gap_valid else None)
 
-        collider_switched = bool(
-            gap_valid
-            and self._previous_collider_id > 0
-            and int(closest_collider_id) != self._previous_collider_id
-        )
-        if collider_switched:
-            self.reset()
-            self._seed(sim_time_s, pos, surface_gap_m, gap_valid, closest_collider_id, robot_origin)
-            return self._empty_sample(
-                gap_m=surface_gap_m,
-                closest_collider_switched=True,
-            )
-
         raw_hand_velocity = (pos - self._previous_hand_pos) / dt_s
         filtered_hand_velocity = self._ema_vector(
             raw_hand_velocity, self._filtered_hand_velocity, dt_s
@@ -233,10 +222,22 @@ class _HandDynamicEstimator:
             )
 
         gap_m = float(surface_gap_m)
+        collider_switched = bool(
+            self._previous_collider_id > 0
+            and int(closest_collider_id) != self._previous_collider_id
+        )
+        if collider_switched:
+            self._seed_gap_history(gap_m, closest_collider_id, robot_origin)
+            return self._empty_sample(
+                raw_hand_velocity=raw_hand_velocity,
+                filtered_hand_velocity=filtered_hand_velocity,
+                hand_velocity_valid=True,
+                gap_m=gap_m,
+                closest_collider_switched=True,
+            )
+
         if self._previous_gap_m is None:
-            self._previous_gap_m = gap_m
-            self._previous_collider_id = int(closest_collider_id)
-            self._previous_robot_origin_pos = robot_origin
+            self._seed_gap_history(gap_m, closest_collider_id, robot_origin)
             return self._empty_sample(
                 raw_hand_velocity=raw_hand_velocity,
                 filtered_hand_velocity=filtered_hand_velocity,
@@ -305,9 +306,18 @@ class _HandDynamicEstimator:
         self._previous_time_s = float(sim_time_s)
         self._previous_hand_pos = hand_pos.copy()
         if gap_valid:
-            self._previous_gap_m = float(gap_m)
-            self._previous_collider_id = int(collider_id)
-            self._previous_robot_origin_pos = robot_origin
+            self._seed_gap_history(gap_m, collider_id, robot_origin)
+
+    def _seed_gap_history(
+        self,
+        gap_m: float,
+        collider_id: int,
+        robot_origin: np.ndarray | None,
+    ) -> None:
+        self._previous_gap_m = float(gap_m)
+        self._previous_collider_id = int(collider_id)
+        self._previous_robot_origin_pos = robot_origin
+        self._filtered_gap_rate_mps = None
 
     def _clear_gap_history(self) -> None:
         self._previous_gap_m = None

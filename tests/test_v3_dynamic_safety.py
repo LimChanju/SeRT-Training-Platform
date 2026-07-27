@@ -153,17 +153,27 @@ def test_abnormal_simulation_dt_resets_the_estimator():
     assert np.allclose(resumed.left.hand_velocity_raw_mps, [1.0, 0.0, 0.0])
 
 
-def test_closest_collider_change_resets_gap_rate_estimator():
+def test_closest_collider_change_preserves_hand_velocity_and_resets_geometry():
     estimator = DynamicSafetyEstimator(_config())
-    _update(estimator, 0.0, [0.5, 0.0, 0.0], 0.5, left_collider=1)
-    _update(estimator, 0.1, [0.4, 0.0, 0.0], 0.4, left_collider=1)
+    _update(estimator, 0.0, [0.0, 0.0, 0.0], 0.5, left_collider=1)
+    before_switch = _update(
+        estimator, 0.1, [0.1, 0.0, 0.0], 0.4, left_collider=1
+    )
     switched = _update(estimator, 0.2, [0.3, 0.0, 0.0], 0.3, left_collider=2)
-    resumed = _update(estimator, 0.3, [0.2, 0.0, 0.0], 0.2, left_collider=2)
+    resumed = _update(estimator, 0.3, [0.4, 0.0, 0.0], 0.2, left_collider=2)
 
     assert switched.left.closest_collider_switched
+    assert switched.left.hand_velocity_valid
     assert not switched.left.dynamic_valid
     assert switched.left.surface_gap_rate_raw_mps == 0.0
-    assert np.allclose(switched.left.hand_velocity_raw_mps, 0.0)
+    assert np.allclose(switched.left.hand_velocity_raw_mps, [2.0, 0.0, 0.0])
+    assert (
+        switched.left.hand_velocity_filtered_mps[0]
+        > before_switch.left.hand_velocity_filtered_mps[0]
+    )
+    assert switched.left.hand_velocity_filtered_mps[0] < 2.0
+    assert np.allclose(switched.left.closest_robot_velocity_world_mps, 0.0)
+    assert np.allclose(switched.left.relative_velocity_world_mps, 0.0)
     assert resumed.left.dynamic_valid
     assert resumed.left.surface_gap_rate_raw_mps < 0.0
 
@@ -199,6 +209,11 @@ def test_recorder_dynamic_dataset_lengths_match_episode_frames(tmp_path):
         assert data.attrs["schema_version"] == "hri_obs_v5_builtin_panda_collision_dynamic_safety"
         assert np.isclose(data.attrs["dynamic_ema_time_constant_s"], 0.1)
         assert np.isclose(data.attrs["dynamic_ttc_cap_s"], 10.0)
+        assert (
+            data.attrs["dynamic_collider_switch_reset_scope"]
+            == "gap_rate_and_robot_origin_only"
+        )
+        assert bool(data.attrs["dynamic_hand_velocity_preserved_across_collider_switch"])
         expected_human = {
             "left_hand_vel_raw_mps",
             "right_hand_vel_raw_mps",
