@@ -55,6 +55,8 @@ class PickPlaceEnvConfig:
     pseudo_errp_sources: tuple[str, ...] = field(
         default_factory=lambda: DEFAULT_PSEUDO_ERRP_SOURCES
     )
+    visualize_human_replay: bool = False
+    human_replay_visual_z_offset: float = 0.0
     synthetic_human_enabled: bool = False
     synthetic_human_episode_prob: float = 0.35
     synthetic_human_start_min_step: int = 120
@@ -137,6 +139,9 @@ class IsaacPickPlaceEnv:
         self._synthetic_human_duration_steps = 0
         self._synthetic_human_side = 1.0
         self._synthetic_human_height_offset = 0.0
+        self._human_visual_prims: dict[str, Any] = {}
+        if self.config.visualize_human_replay:
+            self._setup_human_visuals()
 
     @property
     def action_shape(self) -> tuple[int, ...]:
@@ -246,13 +251,31 @@ class IsaacPickPlaceEnv:
 
     def _build_obs(self) -> dict[str, np.ndarray]:
         gripper_center = _gripper_center_from_fingers(self.robot)
+        ee_pos = None
+        try:
+            ee_pos, _ = self.robot.end_effector.get_world_pose()
+            ee_pos = np.asarray(ee_pos, dtype=float).reshape(-1)[:3]
+        except Exception:
+            ee_pos = None
         if gripper_center is None:
-            try:
-                gripper_center, _ = self.robot.end_effector.get_world_pose()
-                gripper_center = np.asarray(gripper_center, dtype=float)
-            except Exception:
-                gripper_center = None
+            gripper_center = ee_pos
         has_grasped = _has_grasped_cube(self.robot, self.active_cube, gripper_center)
+        task_phase = task_phase_from_event(self.phase_event)
+        replay_context_setter = getattr(
+            self.human_state_fn,
+            "set_runtime_context",
+            None,
+        )
+        if callable(replay_context_setter):
+            replay_context_setter(
+                step=self.step_count,
+                task_phase=task_phase,
+                controller_event=(
+                    -1 if self.phase_event is None else int(self.phase_event)
+                ),
+                controller_t=int(self.phase_t),
+                ee_pos=ee_pos,
+            )
         human_state = dict(self.human_state_fn() if self.human_state_fn is not None else {})
         synthetic_state = self._synthetic_human_state(gripper_center)
         human_state = {**synthetic_state, **human_state}
@@ -279,7 +302,6 @@ class IsaacPickPlaceEnv:
                 "geometry_valid_override": safety_result.geometry_valid,
             }
         )
-        task_phase = task_phase_from_event(self.phase_event)
         obs = build_observation(
             robot=self.robot,
             cube=self.active_cube,
@@ -293,7 +315,49 @@ class IsaacPickPlaceEnv:
         )
         if self.phase_event is None:
             obs["task_phase"] = task_phase_onehot("approach_cube")
+        self._update_human_visuals(obs)
         return obs
+
+    def _setup_human_visuals(self) -> None:
+        from omni.isaac.core.objects import VisualSphere
+
+        specs = (
+            ("head", "/World/HumanReplay/head", "human_replay_head", 0.045, np.array([0.8, 0.8, 0.8])),
+            ("left", "/World/HumanReplay/left_hand", "human_replay_left_hand", 0.035, np.array([0.45, 0.65, 1.0])),
+            ("right", "/World/HumanReplay/right_hand", "human_replay_right_hand", 0.035, np.array([1.0, 0.55, 0.25])),
+        )
+        parked = np.array([0.0, 0.0, -10.0], dtype=float)
+        for key, prim_path, name, radius, color in specs:
+            self._human_visual_prims[key] = self.world.scene.add(
+                VisualSphere(
+                    prim_path=prim_path,
+                    name=name,
+                    position=parked,
+                    radius=radius,
+                    color=color,
+                )
+            )
+
+    def _update_human_visuals(self, obs: dict[str, np.ndarray]) -> None:
+        if not self._human_visual_prims:
+            return
+        fields = {
+            "head": "human_head_pos",
+            "left": "human_left_hand_pos",
+            "right": "human_right_hand_pos",
+        }
+        parked = np.array([0.0, 0.0, -10.0], dtype=float)
+        for key, field_name in fields.items():
+            prim = self._human_visual_prims.get(key)
+            if prim is None:
+                continue
+            pos = np.asarray(obs.get(field_name, parked), dtype=float).reshape(-1)
+            if pos.size < 3 or not np.all(np.isfinite(pos[:3])) or np.linalg.norm(pos[:3]) < 1e-6:
+                pos = parked
+            else:
+                pos = pos[:3].copy()
+                pos[2] += float(self.config.human_replay_visual_z_offset)
+            prim.set_world_pose(position=pos[:3])
 
     def _reset_synthetic_human(self) -> None:
         cfg = self.config

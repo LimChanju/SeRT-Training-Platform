@@ -1,0 +1,1109 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from typing import Any
+
+import numpy as np
+
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
+for path in (
+    os.path.join(SCRIPT_DIR, "rl"),
+    os.path.join(SCRIPT_DIR, ".python_packages"),
+    SCRIPT_DIR,
+    PROJECT_DIR,
+):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train a TD3 HRI safety residual over a frozen task policy."
+    )
+    parser.add_argument(
+        "--task-checkpoint",
+        default=os.path.join(
+            SCRIPT_DIR,
+            "policies",
+            "ppo_pick_place_v7_residual_rewardv4_strict_best.pt",
+        ),
+    )
+    parser.add_argument(
+        "--output",
+        default=os.path.join(
+            SCRIPT_DIR,
+            "policies",
+            "td3_safety_residual_hri_v1.pt",
+        ),
+    )
+    parser.add_argument("--best-output", default="")
+    parser.add_argument("--best-min-episodes", type=int, default=5)
+    parser.add_argument("--human-replay-data", default="")
+    parser.add_argument("--human-replay-mode", choices=("step", "loop"), default="step")
+    parser.add_argument(
+        "--human-replay-episode-policy",
+        choices=("cycle", "random"),
+        default="cycle",
+    )
+    parser.add_argument("--encounter-manifest", default="")
+    parser.add_argument(
+        "--encounter-policy",
+        choices=("cycle", "random"),
+        default="random",
+    )
+    parser.add_argument(
+        "--encounter-severity-mix",
+        default="safe=0.40,gate_only=0.25,near=0.20,near_miss=0.10,collision=0.05",
+    )
+    parser.add_argument(
+        "--encounter-anchor-mode",
+        choices=("ee", "world"),
+        default="ee",
+    )
+    parser.add_argument(
+        "--no-encounter-phase-match",
+        dest="encounter_phase_match",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--no-encounter-event-match",
+        dest="encounter_event_match",
+        action="store_false",
+    )
+    parser.set_defaults(
+        encounter_phase_match=True,
+        encounter_event_match=True,
+    )
+    parser.add_argument("--total-steps", type=int, default=30000)
+    parser.add_argument("--max-episode-steps", type=int, default=1200)
+    parser.add_argument("--seed", type=int, default=23)
+    parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
+    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--hidden-dims", default="256,256")
+    parser.add_argument("--actor-lr", type=float, default=1e-4)
+    parser.add_argument("--critic-lr", type=float, default=3e-4)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--tau", type=float, default=0.005)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--replay-size", type=int, default=100000)
+    parser.add_argument("--learning-starts", type=int, default=1024)
+    parser.add_argument("--updates-per-step", type=int, default=1)
+    parser.add_argument("--policy-delay", type=int, default=2)
+    parser.add_argument("--exploration-noise", type=float, default=0.10)
+    parser.add_argument("--target-policy-noise", type=float, default=0.20)
+    parser.add_argument("--target-noise-clip", type=float, default=0.50)
+    parser.add_argument("--reward-scale", type=float, default=0.05)
+    parser.add_argument("--residual-reward-penalty", type=float, default=1.0)
+    parser.add_argument("--residual-actor-penalty", type=float, default=0.5)
+    parser.add_argument("--distance-progress-weight", type=float, default=0.0)
+    parser.add_argument("--distance-progress-clip-m", type=float, default=0.03)
+    parser.add_argument("--max-grad-norm", type=float, default=5.0)
+    parser.add_argument("--residual-alpha", type=float, default=0.1)
+    parser.add_argument("--xyz-only-residual", action="store_true")
+    parser.add_argument("--safety-gate-start-dist", type=float, default=0.13)
+    parser.add_argument("--safety-gate-full-dist", type=float, default=0.05)
+    parser.add_argument(
+        "--gate-sample-ratio",
+        type=float,
+        default=1.0,
+        help="Desired fraction of gate-active transitions in each TD3 batch.",
+    )
+    parser.add_argument("--action-scale", type=float, default=1.0)
+    parser.add_argument("--success-dist", type=float, default=0.06)
+    parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
+    parser.add_argument("--phase-gate-max-hold", type=int, default=320)
+    parser.add_argument("--release-gate-dist", type=float, default=-1.0)
+    parser.add_argument("--release-gate-max-hold", type=int, default=240)
+    parser.add_argument(
+        "--pseudo-errp",
+        dest="pseudo_errp_enabled",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-pseudo-errp",
+        dest="pseudo_errp_enabled",
+        action="store_false",
+    )
+    parser.set_defaults(pseudo_errp_enabled=False)
+    parser.add_argument("--pseudo-errp-sources", default="all")
+    parser.add_argument("--log-every-steps", type=int, default=1000)
+    parser.add_argument("--save-every-steps", type=int, default=5000)
+    return parser.parse_args()
+
+
+args = _parse_args()
+
+
+def _ensure_torch() -> None:
+    try:
+        import torch  # noqa: F401
+    except ModuleNotFoundError:
+        bundle = os.environ.get(
+            "ISAAC_TORCH_BUNDLE",
+            os.path.expanduser(
+                "~/isaac-sim-4.5.0/exts/omni.isaac.ml_archive/pip_prebundle"
+            ),
+        )
+        if os.path.isdir(bundle) and bundle not in sys.path:
+            sys.path.insert(0, bundle)
+        import torch  # noqa: F401
+
+
+_ensure_torch()
+
+from omni.isaac.kit import SimulationApp
+
+
+simulation_app = SimulationApp(
+    {
+        "headless": not args.render,
+        "width": 1280,
+        "height": 720,
+        "active_gpu": 0,
+        "physics_gpu": 0,
+        "multi_gpu": False,
+        "max_gpu_count": 1,
+    }
+)
+print(f"[TrainSafetyTD3] SimulationApp headless={not args.render}", flush=True)
+
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from torch import nn  # noqa: E402
+
+from rl import (  # noqa: E402
+    ACTION_DIM,
+    HRI_OBS_DIM,
+    HRI_OBS_FIELD_NAMES,
+    HumanEncounterReplay,
+    HumanTrajectoryReplay,
+    IsaacPickPlaceEnv,
+    PickPlaceEnvConfig,
+    flatten_hri_observation,
+    parse_pseudo_errp_sources,
+)
+from rl.actions import clip_action  # noqa: E402
+from rl.observations import MISSING_DISTANCE_M, observation_slices  # noqa: E402
+from rl.policies import MLPPolicy  # noqa: E402
+
+
+def _mlp(
+    input_dim: int,
+    output_dim: int,
+    hidden_dims: tuple[int, ...],
+) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    dim = input_dim
+    for hidden in hidden_dims:
+        layers.extend((nn.Linear(dim, hidden), nn.ReLU()))
+        dim = hidden
+    layers.append(nn.Linear(dim, output_dim))
+    return nn.Sequential(*layers)
+
+
+class ReplayBuffer:
+    def __init__(self, capacity: int) -> None:
+        self.capacity = int(capacity)
+        self.obs = np.zeros((capacity, HRI_OBS_DIM), dtype=np.float32)
+        self.actions = np.zeros((capacity, ACTION_DIM), dtype=np.float32)
+        self.rewards = np.zeros((capacity, 1), dtype=np.float32)
+        self.next_obs = np.zeros((capacity, HRI_OBS_DIM), dtype=np.float32)
+        self.dones = np.zeros((capacity, 1), dtype=np.float32)
+        self.gates = np.zeros((capacity, 1), dtype=np.float32)
+        self.next_gates = np.zeros((capacity, 1), dtype=np.float32)
+        self.pos = 0
+        self.size = 0
+
+    @property
+    def active_size(self) -> int:
+        return int(np.count_nonzero(self.gates[: self.size, 0] > 0.0))
+
+    def add(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: float,
+        next_obs: np.ndarray,
+        done: bool,
+        gate: float,
+        next_gate: float,
+    ) -> None:
+        index = self.pos
+        self.obs[index] = obs
+        self.actions[index] = action if gate > 0.0 else 0.0
+        self.rewards[index, 0] = reward
+        self.next_obs[index] = next_obs
+        self.dones[index, 0] = float(done)
+        self.gates[index, 0] = gate
+        self.next_gates[index, 0] = next_gate
+        self.pos = (self.pos + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def sample(
+        self,
+        batch_size: int,
+        gate_ratio: float,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, ...]:
+        valid = np.arange(self.size)
+        active = valid[self.gates[: self.size, 0] > 0.0]
+        inactive = valid[self.gates[: self.size, 0] <= 0.0]
+        requested_active = int(
+            round(batch_size * np.clip(gate_ratio, 0.0, 1.0))
+        )
+        active_count = requested_active if len(active) else 0
+        inactive_count = batch_size - active_count if len(inactive) else 0
+        sampled: list[np.ndarray] = []
+        if active_count:
+            sampled.append(
+                np.random.choice(
+                    active,
+                    active_count,
+                    replace=len(active) < active_count,
+                )
+            )
+        if inactive_count:
+            sampled.append(
+                np.random.choice(
+                    inactive,
+                    inactive_count,
+                    replace=len(inactive) < inactive_count,
+                )
+            )
+        indices = (
+            np.concatenate(sampled)
+            if sampled
+            else np.empty(0, dtype=np.int64)
+        )
+        if len(indices) < batch_size:
+            indices = np.concatenate(
+                (
+                    indices,
+                    np.random.choice(
+                        valid,
+                        batch_size - len(indices),
+                        replace=self.size < batch_size,
+                    ),
+                )
+            )
+        np.random.shuffle(indices)
+        arrays = (
+            self.obs[indices],
+            self.actions[indices],
+            self.rewards[indices],
+            self.next_obs[indices],
+            self.dones[indices],
+            self.gates[indices],
+            self.next_gates[indices],
+        )
+        return tuple(torch.from_numpy(value).to(device) for value in arrays)
+
+
+class TaskPolicyRunner:
+    def __init__(self, checkpoint_path: str, device: torch.device) -> None:
+        self.path = _resolve_project_path(checkpoint_path)
+        checkpoint = _torch_load(self.path, device)
+        self.device = device
+        self.obs_mean = _to_numpy(checkpoint["obs_mean"]).reshape(1, -1)
+        self.obs_std = np.maximum(
+            _to_numpy(checkpoint["obs_std"]).reshape(1, -1),
+            1e-6,
+        )
+        self.obs_dim = int(checkpoint.get("obs_dim", 84))
+        self.action_dim = int(checkpoint.get("action_dim", ACTION_DIM))
+        hidden = tuple(
+            int(value)
+            for value in checkpoint.get("hidden_dims", (256, 256))
+        )
+        self.policy_mode = str(checkpoint.get("policy_mode", "direct"))
+        self.residual_scale = float(checkpoint.get("residual_scale", 1.0))
+        self.model = MLPPolicy(
+            self.obs_dim,
+            self.action_dim,
+            hidden_dims=hidden,
+        ).to(device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.model.eval()
+        self.base_model = None
+        self.base_mean = None
+        self.base_std = None
+        self.base_dim = None
+        if self.policy_mode == "residual":
+            source = str(checkpoint.get("source_bc_checkpoint", ""))
+            if not source:
+                raise ValueError(
+                    "Residual task checkpoint is missing source_bc_checkpoint."
+                )
+            base = _torch_load(_resolve_project_path(source), device)
+            self.base_dim = int(base.get("obs_dim", 84))
+            self.base_mean = _to_numpy(base["obs_mean"]).reshape(1, -1)
+            self.base_std = np.maximum(
+                _to_numpy(base["obs_std"]).reshape(1, -1),
+                1e-6,
+            )
+            base_hidden = tuple(
+                int(value)
+                for value in base.get("hidden_dims", hidden)
+            )
+            self.base_model = MLPPolicy(
+                int(self.base_dim),
+                self.action_dim,
+                hidden_dims=base_hidden,
+            ).to(device)
+            self.base_model.load_state_dict(base["model_state_dict"])
+            self.base_model.eval()
+
+    def predict(self, obs: np.ndarray) -> np.ndarray:
+        masked = _mask_human_obs(obs)
+        action = self._predict(
+            self.model,
+            masked,
+            self.obs_mean,
+            self.obs_std,
+            self.obs_dim,
+        )
+        if self.policy_mode == "residual":
+            if (
+                self.base_model is None
+                or self.base_mean is None
+                or self.base_std is None
+                or self.base_dim is None
+            ):
+                raise RuntimeError("Residual task policy has no base policy.")
+            base_action = self._predict(
+                self.base_model,
+                masked,
+                self.base_mean,
+                self.base_std,
+                int(self.base_dim),
+            )
+            action = base_action + self.residual_scale * action
+        return clip_action(action)
+
+    def _predict(
+        self,
+        model: nn.Module,
+        obs: np.ndarray,
+        mean: np.ndarray,
+        std: np.ndarray,
+        dim: int,
+    ) -> np.ndarray:
+        obs_row = _align(np.asarray(obs, dtype=np.float32).reshape(1, -1), dim)
+        normalized = (obs_row - _align(mean, dim)) / np.maximum(
+            _align(std, dim, 1.0),
+            1e-6,
+        )
+        with torch.no_grad():
+            return (
+                model(
+                    torch.from_numpy(normalized.astype(np.float32)).to(self.device)
+                )
+                .cpu()
+                .numpy()[0]
+            )
+
+
+def _run() -> None:
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    device = _device(args.device)
+    hidden = _hidden_dims(args.hidden_dims)
+    controlled_dims = 3 if args.xyz_only_residual else ACTION_DIM
+    task_policy = TaskPolicyRunner(args.task_checkpoint, device)
+    actor = MLPPolicy(HRI_OBS_DIM, ACTION_DIM, hidden_dims=hidden).to(device)
+    target_actor = MLPPolicy(
+        HRI_OBS_DIM,
+        ACTION_DIM,
+        hidden_dims=hidden,
+    ).to(device)
+    _zero_last_layer(actor)
+    target_actor.load_state_dict(actor.state_dict())
+    q1 = _mlp(HRI_OBS_DIM + ACTION_DIM, 1, hidden).to(device)
+    q2 = _mlp(HRI_OBS_DIM + ACTION_DIM, 1, hidden).to(device)
+    target_q1 = _mlp(HRI_OBS_DIM + ACTION_DIM, 1, hidden).to(device)
+    target_q2 = _mlp(HRI_OBS_DIM + ACTION_DIM, 1, hidden).to(device)
+    target_q1.load_state_dict(q1.state_dict())
+    target_q2.load_state_dict(q2.state_dict())
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=args.actor_lr)
+    critic_optimizer = torch.optim.Adam(
+        list(q1.parameters()) + list(q2.parameters()),
+        lr=args.critic_lr,
+    )
+    replay = ReplayBuffer(args.replay_size)
+    human_replay = _load_human_replay()
+    release_dist = (
+        None if args.release_gate_dist < 0.0 else args.release_gate_dist
+    )
+    env = IsaacPickPlaceEnv(
+        PickPlaceEnvConfig(
+            max_episode_steps=args.max_episode_steps,
+            success_dist=args.success_dist,
+            action_scale=args.action_scale,
+            gripper_mode="event",
+            phase_gate_close_dist=args.phase_gate_close_dist,
+            phase_gate_max_hold=args.phase_gate_max_hold,
+            release_gate_dist=release_dist,
+            release_gate_max_hold=args.release_gate_max_hold,
+            observation_mode="flat",
+            seed=args.seed,
+            render=args.render,
+            pseudo_errp_enabled=args.pseudo_errp_enabled,
+            pseudo_errp_sources=parse_pseudo_errp_sources(
+                args.pseudo_errp_sources
+            ),
+        ),
+        human_state_fn=human_replay,
+    )
+    output = _resolve_project_path(args.output)
+    best_output = (
+        _resolve_project_path(args.best_output)
+        if args.best_output
+        else os.path.splitext(output)[0] + "_best.pt"
+    )
+    obs_mean = np.zeros(HRI_OBS_DIM, dtype=np.float32)
+    obs_std = np.ones(HRI_OBS_DIM, dtype=np.float32)
+    history: list[dict[str, Any]] = []
+    episodes: list[dict[str, Any]] = []
+    best = {"success_rate": -1.0, "return": -float("inf"), "step": 0}
+    metrics: dict[str, float] = {}
+    update_count = 0
+    started_at = time.time()
+    if human_replay is not None:
+        human_replay.reset(0, seed=args.seed)
+    obs, info = env.reset(seed=args.seed)
+    episode_return = 0.0
+    episode_length = 0
+    episode_gate_count = 0
+    episode_errp = 0.0
+    episode_progress = 0.0
+    print(
+        f"[TrainSafetyTD3] task={task_policy.path} "
+        f"human_replay={human_replay.path if human_replay else 'off'} "
+        f"alpha={args.residual_alpha} "
+        f"gate=({args.safety_gate_start_dist},{args.safety_gate_full_dist})",
+        flush=True,
+    )
+    try:
+        for step in range(1, args.total_steps + 1):
+            obs_dict = info.get("obs_dict", {})
+            hri_obs = flatten_hri_observation(obs_dict)
+            gate = _gate(obs_dict)
+            current_gap = _surface_gap(obs_dict)
+            if step <= args.learning_starts:
+                residual = np.random.uniform(
+                    -1.0,
+                    1.0,
+                    ACTION_DIM,
+                ).astype(np.float32)
+            else:
+                residual = _actor_action(actor, hri_obs, device)
+                residual += np.random.normal(
+                    0.0,
+                    args.exploration_noise,
+                    ACTION_DIM,
+                ).astype(np.float32)
+                residual = np.clip(residual, -1.0, 1.0)
+            if controlled_dims < ACTION_DIM:
+                residual[controlled_dims:] = 0.0
+            env_action = clip_action(
+                task_policy.predict(obs)
+                + gate * args.residual_alpha * residual
+            )
+            next_obs, reward, terminated, truncated, next_info = env.step(
+                env_action
+            )
+            done = bool(terminated or truncated)
+            next_obs_dict = next_info.get("obs_dict", {})
+            next_hri_obs = flatten_hri_observation(next_obs_dict)
+            next_gate = _gate(next_obs_dict)
+            next_gap = _surface_gap(next_obs_dict)
+            progress_reward = _distance_progress_reward(
+                current_gap,
+                next_gap,
+                max(gate, next_gate),
+            )
+            residual_cost = (
+                args.residual_reward_penalty
+                * gate
+                * float(np.square(residual[:controlled_dims]).sum())
+            )
+            training_reward = (
+                float(reward) + progress_reward - residual_cost
+            ) * args.reward_scale
+            replay.add(
+                hri_obs,
+                residual,
+                training_reward,
+                next_hri_obs,
+                done,
+                gate,
+                next_gate,
+            )
+            episode_return += float(reward) + progress_reward - residual_cost
+            episode_length += 1
+            episode_gate_count += int(gate > 0.0)
+            episode_errp += float(next_info.get("errp_feedback", 0.0))
+            episode_progress += progress_reward
+            obs = np.asarray(next_obs, dtype=np.float32)
+            info = next_info
+
+            if (
+                replay.size >= max(args.batch_size, args.learning_starts)
+                and replay.active_size >= min(32, args.batch_size)
+            ):
+                for _ in range(args.updates_per_step):
+                    update_count += 1
+                    metrics = _td3_update(
+                        actor,
+                        target_actor,
+                        q1,
+                        q2,
+                        target_q1,
+                        target_q2,
+                        actor_optimizer,
+                        critic_optimizer,
+                        replay,
+                        device,
+                        update_count,
+                        controlled_dims,
+                    )
+
+            if done:
+                encounter = (
+                    human_replay.current_scenario
+                    if isinstance(human_replay, HumanEncounterReplay)
+                    else {}
+                )
+                episodes.append(
+                    {
+                        "episode": len(episodes),
+                        "return": float(episode_return),
+                        "length": int(episode_length),
+                        "success": bool(terminated),
+                        "truncated": bool(truncated),
+                        "cube_target_dist": float(info["cube_target_dist"]),
+                        "grasped": bool(info["has_grasped_cube"]),
+                        "errp_feedback_sum": float(episode_errp),
+                        "gate_active_count": int(episode_gate_count),
+                        "distance_progress_reward_sum": float(
+                            episode_progress
+                        ),
+                        "encounter_id": str(encounter.get("id", "")),
+                        "encounter_target_severity": str(
+                            encounter.get("target_severity", "")
+                        ),
+                        "encounter_target_phase": str(
+                            encounter.get("task_phase", "")
+                        ),
+                        "encounter_source_session": str(
+                            encounter.get("session_id", "")
+                        ),
+                    }
+                )
+                episode_index = len(episodes)
+                episode_seed = args.seed + episode_index
+                if human_replay is not None:
+                    human_replay.reset(episode_index, seed=episode_seed)
+                obs, info = env.reset(seed=episode_seed)
+                episode_return = 0.0
+                episode_length = 0
+                episode_gate_count = 0
+                episode_errp = 0.0
+                episode_progress = 0.0
+
+            if step % args.log_every_steps == 0 or step == args.total_steps:
+                recent = episodes[-20:]
+                record = {
+                    "step": step,
+                    "updates": update_count,
+                    "episodes": len(episodes),
+                    "recent_success_rate": (
+                        float(np.mean([item["success"] for item in recent]))
+                        if recent
+                        else 0.0
+                    ),
+                    "recent_return": (
+                        float(np.mean([item["return"] for item in recent]))
+                        if recent
+                        else 0.0
+                    ),
+                    "recent_errp_feedback": (
+                        float(
+                            np.mean(
+                                [
+                                    item["errp_feedback_sum"]
+                                    for item in recent
+                                ]
+                            )
+                        )
+                        if recent
+                        else 0.0
+                    ),
+                    "replay_size": replay.size,
+                    "gate_fraction": (
+                        float(
+                            np.mean(replay.gates[: replay.size, 0] > 0.0)
+                        )
+                        if replay.size
+                        else 0.0
+                    ),
+                    **metrics,
+                }
+                history.append(record)
+                print(
+                    f"[TrainSafetyTD3] step={step:06d} "
+                    f"episodes={len(episodes)} "
+                    f"success={record['recent_success_rate']:.3f} "
+                    f"return={record['recent_return']:.2f} "
+                    f"actor={record.get('actor_loss', 0.0):.4f} "
+                    f"critic={record.get('critic_loss', 0.0):.4f}",
+                    flush=True,
+                )
+                if (
+                    len(episodes) >= args.best_min_episodes
+                    and (
+                        record["recent_success_rate"],
+                        record["recent_return"],
+                    )
+                    > (best["success_rate"], best["return"])
+                ):
+                    best = {
+                        "success_rate": record["recent_success_rate"],
+                        "return": record["recent_return"],
+                        "step": step,
+                    }
+                    _save(
+                        best_output,
+                        actor,
+                        target_actor,
+                        q1,
+                        q2,
+                        target_q1,
+                        target_q2,
+                        obs_mean,
+                        obs_std,
+                        hidden,
+                        history,
+                        episodes,
+                        best,
+                        controlled_dims,
+                    )
+                    print(
+                        f"[TrainSafetyTD3] saved best checkpoint: {best_output}",
+                        flush=True,
+                    )
+            if (
+                args.save_every_steps > 0
+                and step % args.save_every_steps == 0
+            ):
+                _save(
+                    output,
+                    actor,
+                    target_actor,
+                    q1,
+                    q2,
+                    target_q1,
+                    target_q2,
+                    obs_mean,
+                    obs_std,
+                    hidden,
+                    history,
+                    episodes,
+                    best,
+                    controlled_dims,
+                )
+    finally:
+        env.close()
+        if human_replay is not None:
+            human_replay.close()
+
+    _save(
+        output,
+        actor,
+        target_actor,
+        q1,
+        q2,
+        target_q1,
+        target_q2,
+        obs_mean,
+        obs_std,
+        hidden,
+        history,
+        episodes,
+        best,
+        controlled_dims,
+    )
+    history_path = os.path.splitext(output)[0] + "_history.json"
+    with open(history_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "created_unix": time.time(),
+                "duration_sec": time.time() - started_at,
+                "updates": history,
+                "episodes": episodes,
+            },
+            handle,
+            indent=2,
+        )
+    print(
+        f"[TrainSafetyTD3] saved history: {history_path}\n"
+        f"[TrainSafetyTD3] saved checkpoint: {output}",
+        flush=True,
+    )
+
+
+def _td3_update(
+    actor: MLPPolicy,
+    target_actor: MLPPolicy,
+    q1: nn.Module,
+    q2: nn.Module,
+    target_q1: nn.Module,
+    target_q2: nn.Module,
+    actor_optimizer: torch.optim.Optimizer,
+    critic_optimizer: torch.optim.Optimizer,
+    replay: ReplayBuffer,
+    device: torch.device,
+    update_count: int,
+    controlled_dims: int,
+) -> dict[str, float]:
+    obs, action, reward, next_obs, done, gate, next_gate = replay.sample(
+        args.batch_size,
+        args.gate_sample_ratio,
+        device,
+    )
+    with torch.no_grad():
+        noise = torch.randn_like(action) * args.target_policy_noise
+        noise = torch.clamp(
+            noise,
+            -args.target_noise_clip,
+            args.target_noise_clip,
+        )
+        next_action = torch.tanh(target_actor(next_obs)) + noise
+        next_action = torch.clamp(next_action, -1.0, 1.0)
+        if controlled_dims < ACTION_DIM:
+            next_action[:, controlled_dims:] = 0.0
+        next_action = next_action * (next_gate > 0.0)
+        target_q = torch.minimum(
+            target_q1(torch.cat((next_obs, next_action), dim=1)),
+            target_q2(torch.cat((next_obs, next_action), dim=1)),
+        )
+        target = reward + args.gamma * (1.0 - done) * target_q
+    q1_value = q1(torch.cat((obs, action), dim=1))
+    q2_value = q2(torch.cat((obs, action), dim=1))
+    critic_loss = F.mse_loss(q1_value, target) + F.mse_loss(q2_value, target)
+    critic_optimizer.zero_grad(set_to_none=True)
+    critic_loss.backward()
+    nn.utils.clip_grad_norm_(
+        list(q1.parameters()) + list(q2.parameters()),
+        args.max_grad_norm,
+    )
+    critic_optimizer.step()
+
+    actor_loss_value = 0.0
+    mean_residual_norm = 0.0
+    if update_count % max(1, args.policy_delay) == 0:
+        sampled_action = torch.tanh(actor(obs))
+        if controlled_dims < ACTION_DIM:
+            sampled_action = sampled_action.clone()
+            sampled_action[:, controlled_dims:] = 0.0
+        active_weight = (gate > 0.0).float()
+        weight_sum = torch.clamp(active_weight.sum(), min=1.0)
+        sampled_q = q1(torch.cat((obs, sampled_action), dim=1))
+        residual_penalty = sampled_action[:, :controlled_dims].square().sum(
+            dim=1,
+            keepdim=True,
+        )
+        actor_terms = (
+            -sampled_q + args.residual_actor_penalty * residual_penalty
+        )
+        actor_loss = (active_weight * actor_terms).sum() / weight_sum
+        actor_optimizer.zero_grad(set_to_none=True)
+        actor_loss.backward()
+        nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
+        actor_optimizer.step()
+        _soft_update(target_actor, actor, args.tau)
+        _soft_update(target_q1, q1, args.tau)
+        _soft_update(target_q2, q2, args.tau)
+        actor_loss_value = float(actor_loss.item())
+        mean_residual_norm = float(
+            sampled_action[:, :controlled_dims].norm(dim=1).mean().item()
+        )
+    return {
+        "actor_loss": actor_loss_value,
+        "critic_loss": float(critic_loss.item()),
+        "mean_q": float(torch.minimum(q1_value, q2_value).mean().item()),
+        "mean_residual_norm": mean_residual_norm,
+    }
+
+
+def _save(
+    path: str,
+    actor: MLPPolicy,
+    target_actor: MLPPolicy,
+    q1: nn.Module,
+    q2: nn.Module,
+    target_q1: nn.Module,
+    target_q2: nn.Module,
+    obs_mean: np.ndarray,
+    obs_std: np.ndarray,
+    hidden: tuple[int, ...],
+    history: list[dict[str, Any]],
+    episodes: list[dict[str, Any]],
+    best: dict[str, float],
+    controlled_dims: int,
+) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    torch.save(
+        {
+            "algo": "td3_safety_residual_v1",
+            "model_state_dict": {
+                key: value.detach().cpu()
+                for key, value in actor.state_dict().items()
+            },
+            "target_actor_state_dict": {
+                key: value.detach().cpu()
+                for key, value in target_actor.state_dict().items()
+            },
+            "q1_state_dict": q1.state_dict(),
+            "q2_state_dict": q2.state_dict(),
+            "target_q1_state_dict": target_q1.state_dict(),
+            "target_q2_state_dict": target_q2.state_dict(),
+            "obs_mean": torch.from_numpy(obs_mean),
+            "obs_std": torch.from_numpy(obs_std),
+            "obs_dim": HRI_OBS_DIM,
+            "observation_fields": list(HRI_OBS_FIELD_NAMES),
+            "action_dim": ACTION_DIM,
+            "hidden_dims": hidden,
+            "observation_version": "hri_obs_v4_distal_surface_safety_83d",
+            "policy_mode": "direct",
+            "output_activation": "tanh",
+            "residual_alpha": args.residual_alpha,
+            "xyz_only_residual": args.xyz_only_residual,
+            "controlled_action_dims": controlled_dims,
+            "safety_gate_start_dist": args.safety_gate_start_dist,
+            "safety_gate_full_dist": args.safety_gate_full_dist,
+            "task_checkpoint": _resolve_project_path(args.task_checkpoint),
+            "human_replay_data": (
+                _resolve_project_path(args.human_replay_data)
+                if args.human_replay_data
+                else ""
+            ),
+            "encounter_manifest": (
+                _resolve_project_path(args.encounter_manifest)
+                if args.encounter_manifest
+                else ""
+            ),
+            "pseudo_errp_enabled": args.pseudo_errp_enabled,
+            "pseudo_errp_sources": parse_pseudo_errp_sources(
+                args.pseudo_errp_sources
+            ),
+            "train_args": vars(args),
+            "history": history,
+            "episode_stats": episodes,
+            "best_metric": best,
+        },
+        path,
+    )
+
+
+def _load_human_replay(
+) -> HumanTrajectoryReplay | HumanEncounterReplay | None:
+    if args.encounter_manifest:
+        path = _resolve_project_path(args.encounter_manifest)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"--encounter-manifest not found: {path}"
+            )
+        return HumanEncounterReplay(
+            path,
+            episode_policy=args.encounter_policy,
+            severity_mix=args.encounter_severity_mix,
+            anchor_mode=args.encounter_anchor_mode,
+            phase_match=args.encounter_phase_match,
+            event_match=args.encounter_event_match,
+            seed=args.seed,
+        )
+    if not args.human_replay_data:
+        return None
+    path = _resolve_project_path(args.human_replay_data)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"--human-replay-data not found: {path}")
+    return HumanTrajectoryReplay(
+        path,
+        mode=args.human_replay_mode,
+        episode_policy=args.human_replay_episode_policy,
+        seed=args.seed,
+    )
+
+
+def _actor_action(
+    actor: MLPPolicy,
+    obs: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    with torch.no_grad():
+        tensor = torch.from_numpy(
+            np.asarray(obs, dtype=np.float32).reshape(1, -1)
+        ).to(device)
+        action = torch.tanh(actor(tensor))
+    return action.cpu().numpy()[0].astype(np.float32)
+
+
+def _gate(obs: dict[str, np.ndarray]) -> float:
+    distance = _surface_gap(obs)
+    denominator = args.safety_gate_start_dist - args.safety_gate_full_dist
+    if denominator <= 1e-6:
+        return 0.0
+    return float(
+        np.clip(
+            (args.safety_gate_start_dist - distance) / denominator,
+            0.0,
+            1.0,
+        )
+    )
+
+
+def _surface_gap(obs: dict[str, np.ndarray]) -> float:
+    value = np.asarray(
+        obs.get(
+            "min_hand_end_effector_surface_gap",
+            [MISSING_DISTANCE_M],
+        ),
+        dtype=float,
+    ).reshape(-1)
+    if not value.size or not np.isfinite(value[0]):
+        return float(MISSING_DISTANCE_M)
+    return float(value[0])
+
+
+def _distance_progress_reward(
+    current_gap: float,
+    next_gap: float,
+    gate: float,
+) -> float:
+    if args.distance_progress_weight == 0.0:
+        return 0.0
+    if (
+        current_gap >= MISSING_DISTANCE_M * 0.5
+        or next_gap >= MISSING_DISTANCE_M * 0.5
+    ):
+        return 0.0
+    delta = float(
+        np.clip(
+            next_gap - current_gap,
+            -args.distance_progress_clip_m,
+            args.distance_progress_clip_m,
+        )
+    )
+    return float(args.distance_progress_weight) * float(gate) * delta
+
+
+def _mask_human_obs(obs: np.ndarray) -> np.ndarray:
+    result = np.asarray(obs, dtype=np.float32).reshape(-1).copy()
+    slices = observation_slices()
+    for name in (
+        "human_head_pos",
+        "human_left_hand_pos",
+        "human_right_hand_pos",
+        "ee_to_left_hand",
+        "ee_to_right_hand",
+        "human_robot_collision",
+        "near_human",
+    ):
+        field_slice = slices.get(name)
+        if field_slice is not None and field_slice.stop <= result.size:
+            result[field_slice] = 0.0
+    distance_slice = slices.get("min_hand_gripper_dist")
+    if distance_slice is not None and distance_slice.stop <= result.size:
+        result[distance_slice] = MISSING_DISTANCE_M
+    return result
+
+
+def _soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:
+    with torch.no_grad():
+        for target_param, source_param in zip(
+            target.parameters(),
+            source.parameters(),
+        ):
+            target_param.mul_(1.0 - tau).add_(source_param, alpha=tau)
+
+
+def _zero_last_layer(module: nn.Module) -> None:
+    for layer in reversed(list(module.modules())):
+        if isinstance(layer, nn.Linear):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+            return
+
+
+def _align(
+    value: np.ndarray,
+    dim: int,
+    fill: float = 0.0,
+) -> np.ndarray:
+    value = np.asarray(value, dtype=np.float32)
+    if value.ndim == 1:
+        value = value.reshape(1, -1)
+    if value.shape[1] >= dim:
+        return value[:, :dim]
+    return np.concatenate(
+        (
+            value,
+            np.full(
+                (value.shape[0], dim - value.shape[1]),
+                fill,
+                dtype=np.float32,
+            ),
+        ),
+        axis=1,
+    )
+
+
+def _to_numpy(value: Any) -> np.ndarray:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value, dtype=np.float32)
+
+
+def _torch_load(path: str, device: torch.device) -> dict[str, Any]:
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
+def _resolve_project_path(path: str) -> str:
+    if os.path.isabs(path):
+        return path
+    return os.path.abspath(os.path.join(PROJECT_DIR, path))
+
+
+def _hidden_dims(text: str) -> tuple[int, ...]:
+    values = tuple(int(value.strip()) for value in text.split(",") if value.strip())
+    return values or (256, 256)
+
+
+def _device(requested: str) -> torch.device:
+    if requested == "auto":
+        requested = "cuda" if torch.cuda.is_available() else "cpu"
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("Requested CUDA but it is unavailable.")
+    return torch.device(requested)
+
+
+try:
+    _run()
+except BaseException as exc:
+    print(
+        f"[TrainSafetyTD3] terminated by {type(exc).__name__}: {exc}",
+        flush=True,
+    )
+    raise
+finally:
+    simulation_app.close()

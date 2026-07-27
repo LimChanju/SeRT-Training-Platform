@@ -19,6 +19,9 @@ from .actions import (
 )
 from .observations import (
     AUXILIARY_OBSERVATION_FIELDS,
+    HRI_OBS_DIM,
+    HRI_OBS_FIELD_NAMES,
+    HRI_OBSERVATION_VERSION,
     OBSERVATION_DIM,
     OBSERVATION_FIELDS,
     OBSERVATION_VERSION,
@@ -28,6 +31,7 @@ from .observations import (
     build_observation,
     controller_event_onehot,
     empty_observation,
+    flatten_hri_observation,
     flatten_observation,
     observation_slices,
     validate_auxiliary_observation,
@@ -42,7 +46,20 @@ from .pseudo_errp import (
     pseudo_errp_from_observation,
 )
 try:
-    from .human_replay import HumanReplayInfo, HumanTrajectoryReplay
+    from .encounter_manifest import (
+        MANIFEST_VERSION,
+        SEVERITY_ORDER,
+        EncounterBuildConfig,
+        build_encounter_manifest,
+        load_encounter_manifest,
+        parse_severity_mix,
+    )
+    from .human_replay import (
+        HumanEncounterReplay,
+        HumanEncounterReplayInfo,
+        HumanReplayInfo,
+        HumanTrajectoryReplay,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "h5py":
         raise
@@ -59,6 +76,13 @@ except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "h5py is required for HumanTrajectoryReplay. Install it in the active "
                 "Python environment before using --human-replay-data."
+            ) from exc
+
+    class HumanEncounterReplay:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs) -> None:
+            raise ModuleNotFoundError(
+                "h5py is required for HumanEncounterReplay. Install it in the active "
+                "Python environment before using --encounter-manifest."
             ) from exc
 from .rewards import (
     DEFAULT_REWARD_WEIGHTS,
@@ -127,6 +151,9 @@ __all__ = [
     "DEFAULT_REWARD_WEIGHTS",
     "DEFAULT_PSEUDO_ERRP_SOURCES",
     "EXPERT_JOINT_ACTION_DIM",
+    "HRI_OBS_DIM",
+    "HRI_OBS_FIELD_NAMES",
+    "HRI_OBSERVATION_VERSION",
     "HumanReplayInfo",
     "HumanTrajectoryReplay",
     "MAX_EE_DELTA_M",
@@ -157,6 +184,7 @@ __all__ = [
     "empty_observation",
     "expert_joint_action_vector",
     "extract_pseudo_errp_aux_flags",
+    "flatten_hri_observation",
     "flatten_observation",
     "is_success",
     "observation_slices",
