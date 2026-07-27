@@ -2,6 +2,8 @@
 # omni.isaac.core 네임스페이스 사용 (isaacsim.* 는 5.x 이상)
 # =============================================================================
 
+import os
+
 import numpy as np
 from omni.isaac.core import World
 from omni.isaac.core.utils.viewports import set_camera_view
@@ -27,7 +29,8 @@ def _sample_positions(
     xy_half = (table_size[:2] / 2.0) - 0.1
     # Keep cubes farther apart to reduce gripper interference with neighbors
     min_dist = cube_size * 2.6
-    x_min, x_max = 0.25, 0.65
+    x_min = float(os.environ.get("PICK_PLACE_CUBE_X_MIN", "0.30"))
+    x_max = float(os.environ.get("PICK_PLACE_CUBE_X_MAX", "0.65"))
     y_min, y_max = -0.25, 0.25
 
     positions = []

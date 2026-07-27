@@ -8,6 +8,7 @@ import sys; print("[main.py] Python started:", sys.version, flush=True); del sys
 
 # ── 반드시 가장 먼저 임포트 (표준 라이브러리 제외) ────────────────────────────
 import os
+import signal
 import time
 
 # SteamVR OpenXR 런타임 경로 자동 설정
@@ -123,11 +124,16 @@ from app_config import (
     HRI_TRAJECTORY_MAX_EPISODES,
     HRI_TRAJECTORY_OVERWRITE,
     HRI_TRAJECTORY_PATH,
+    PICK_PLACE_SUCCESS_MAX_SPEED_MPS,
+    PICK_PLACE_SUCCESS_MIN_LIFT_M,
+    PICK_PLACE_SUCCESS_XY_TOLERANCE_M,
+    PICK_PLACE_SUCCESS_Z_TOLERANCE_M,
     SAMPLE_LOG_INTERVAL_STEPS,
     SESSION_SAMPLES_PATH,
 )
 from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
+from dynamic_safety import DynamicSafetyEstimator, valid_world_position
 from end_effector_safety_runtime import PandaEndEffectorSafetyRuntime
 from gripper_camera import GripperCamera
 from hand_tracking import HandTrackingReceiver
@@ -135,6 +141,7 @@ from haptics_udp import HapticsUdpClient
 from hri_obs_recorder import HRIObsRecorder, build_observation
 from panda_robot import add_panda, print_robot_info
 from pick_controller import create_pick_controller, run_pick_place
+from pick_place_validation import evaluate_place_success
 from vr_grab import VRGrabManager
 from vr_avatar import (
     VRAvatar,
@@ -404,7 +411,13 @@ def _has_grasped_cube(robot, cube, gripper_center: "np.ndarray | None") -> bool:
         gripper_width = float(np.sum(robot.gripper.get_joint_positions()))
     except Exception:
         return False
-    return bool(np.linalg.norm(np.asarray(cube_pos, dtype=float) - gripper_center) < 0.075 and gripper_width < 0.045)
+    max_cube_distance_m = float(os.environ.get("PICK_PLACE_GRASP_MAX_DISTANCE_M", "0.075"))
+    max_gripper_width_m = float(os.environ.get("PICK_PLACE_GRASP_MAX_WIDTH_M", "0.065"))
+    return bool(
+        np.linalg.norm(np.asarray(cube_pos, dtype=float) - gripper_center)
+        < max_cube_distance_m
+        and gripper_width < max_gripper_width_m
+    )
 
 
 def _build_runtime_observation(
@@ -555,6 +568,7 @@ def main():
     # unavailable; falling back to the old hand-authored capsules would silently
     # change dataset semantics.
     safety_geometry = PandaEndEffectorSafetyRuntime(robot_prim_path="/World/Franka")
+    dynamic_safety = DynamicSafetyEstimator()
 
     place_target.set_world_pose(
         position=np.array([stack_base_xy[0], stack_base_xy[1], table_top_z + cube_half])
@@ -593,6 +607,11 @@ def main():
     task_done = False
     current_pick_idx = 0
     completed_picks = 0
+    attempt_index = 1
+    current_cube_attempt = 1
+    failed_attempts = 0
+    current_cube_max_lift_m = 0.0
+    current_cube_grasp_observed = False
     cycle_reset_requested = False
     logger = EventLogger(
         log_path=log_path,
@@ -617,7 +636,10 @@ def main():
                 HRI_TRAJECTORY_PATH,
                 overwrite=HRI_TRAJECTORY_OVERWRITE,
                 sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
-                file_metadata=safety_geometry.metadata(),
+                file_metadata={
+                    **safety_geometry.metadata(),
+                    **dynamic_safety.metadata(),
+                },
             )
             if (
                 HRI_TRAJECTORY_MAX_EPISODES > 0
@@ -635,7 +657,10 @@ def main():
                     continued_path,
                     overwrite=False,
                     sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
-                    file_metadata=safety_geometry.metadata(),
+                    file_metadata={
+                        **safety_geometry.metadata(),
+                        **dynamic_safety.metadata(),
+                    },
                 )
             if (
                 HRI_TRAJECTORY_MAX_EPISODES <= 0
@@ -644,6 +669,7 @@ def main():
                 hri_recorder.start_episode(
                     {"reason": "run_start", "mode": "vr_pick_place", "proxy": "sphere"}
                 )
+                dynamic_safety.reset()
             print(f"[HRI] recording obs dataset: {hri_recorder.path}")
         except Exception as exc:
             print(f"[HRI] recorder disabled: {exc}")
@@ -660,13 +686,34 @@ def main():
     waiting_for_vr_logged = False
     haptic_contact_steps = {"left": 0, "right": 0}
     last_robot_action = None
-    while simulation_app.is_running():
+    shutdown_requested = False
+    shutdown_reason = "simulation_stopped"
+
+    def _request_graceful_shutdown(signum, _frame):
+        nonlocal shutdown_requested, shutdown_reason
+        if not shutdown_requested:
+            shutdown_requested = True
+            shutdown_reason = "interrupted" if signum == signal.SIGINT else "terminated"
+            print(
+                "[Main] graceful shutdown requested; saving the current "
+                f"partial episode (reason={shutdown_reason}).",
+                flush=True,
+            )
+
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, _request_graceful_shutdown)
+    signal.signal(signal.SIGTERM, _request_graceful_shutdown)
+
+    while simulation_app.is_running() and not shutdown_requested:
         world.step(render=True)
 
         if world.is_playing():
             if world.current_time_step_index == 0:
                 grab_manager.release_all()
                 world.reset()
+                safety_geometry.reset_link_origin_pose_cache()
+                dynamic_safety.reset()
                 if controller is not None:
                     controller.reset(end_effector_initial_height=approach_height)
                 place_target.set_world_pose(
@@ -676,6 +723,11 @@ def main():
                 step = 0
                 last_robot_action = None
                 cycle_reset_requested = False
+                attempt_index = 1
+                current_cube_attempt = 1
+                failed_attempts = 0
+                current_cube_max_lift_m = 0.0
+                current_cube_grasp_observed = False
                 if (
                     hri_recorder is not None
                     and not hri_recorder.is_open
@@ -691,6 +743,7 @@ def main():
                             "proxy": "sphere",
                         }
                     )
+                    dynamic_safety.reset()
 
             step += 1
             sim_time = _sim_time(world, step)
@@ -751,6 +804,29 @@ def main():
                 mount_pos=_gripper_center_from_fingers(panda),
             )
             safety_result = safety_geometry.evaluate(left_pos, right_pos)
+            dynamic_sample = None
+            if hri_recorder is not None and hri_recorder.is_open:
+                left_robot_origin, _ = safety_geometry.closest_link_origin_world_position(
+                    safety_result.left
+                )
+                right_robot_origin, _ = safety_geometry.closest_link_origin_world_position(
+                    safety_result.right
+                )
+                dynamic_sample = dynamic_safety.update(
+                    sim_time_s=sim_time,
+                    left_hand_pos=left_pos,
+                    right_hand_pos=right_pos,
+                    left_tracking_valid=valid_world_position(left_pos),
+                    right_tracking_valid=valid_world_position(right_pos),
+                    left_surface_gap_m=safety_result.left.surface_gap_m,
+                    right_surface_gap_m=safety_result.right.surface_gap_m,
+                    left_geometry_valid=safety_result.left.geometry_valid,
+                    right_geometry_valid=safety_result.right.geometry_valid,
+                    left_closest_collider_id=safety_result.left.closest_collider_id,
+                    right_closest_collider_id=safety_result.right.closest_collider_id,
+                    left_closest_robot_origin_pos=left_robot_origin,
+                    right_closest_robot_origin_pos=right_robot_origin,
+                )
             human_robot_collision_active = safety_result.collision
             haptic_pulse_by_hand = {"left": False, "right": False}
             for hand, hand_result in (
@@ -804,6 +880,16 @@ def main():
             right_hand_gripper_dist = _distance_or_none(
                 right_pos, gripper_center_for_distance
             )
+            active_cube = pick_targets[current_pick_idx]
+            active_cube_pos, _ = active_cube.get_world_pose()
+            current_cube_max_lift_m = max(
+                current_cube_max_lift_m,
+                float(active_cube_pos[2]) - float(cube_center_z),
+            )
+            current_cube_grasp_observed = bool(
+                current_cube_grasp_observed
+                or _has_grasped_cube(panda, active_cube, gripper_center_for_distance)
+            )
             logger.log_sample(
                 left_hand_gripper_dist=left_hand_gripper_dist,
                 right_hand_gripper_dist=right_hand_gripper_dist,
@@ -839,6 +925,9 @@ def main():
                     obs=obs,
                     current_pick_idx=current_pick_idx,
                     completed_picks=completed_picks,
+                    attempt_index=attempt_index,
+                    current_cube_attempt=current_cube_attempt,
+                    failed_attempts=failed_attempts,
                     safety={
                         "left_hand_gripper_dist_m": (
                             left_hand_gripper_dist
@@ -920,6 +1009,10 @@ def main():
                         "query_count_left": safety_result.left.query_count,
                         "query_count_right": safety_result.right.query_count,
                     },
+                    dynamic={
+                        **dynamic_sample.human_payload(),
+                        **dynamic_sample.safety_payload(),
+                    },
                     action=last_robot_action,
                 )
 
@@ -972,22 +1065,66 @@ def main():
                 )
                 if task_done:
                     placed_cube = pick_targets[current_pick_idx]
-                    logger.record_stack_expected(placed_cube.name, stack_height)
-                    completed_picks += 1
-                    current_pick_idx = (current_pick_idx + 1) % len(pick_targets)
+                    placed_cube_pos, _ = placed_cube.get_world_pose()
+                    try:
+                        placed_cube_velocity = placed_cube.get_linear_velocity()
+                    except Exception:
+                        placed_cube_velocity = None
+                    validation = evaluate_place_success(
+                        placed_cube_pos,
+                        place_pos,
+                        cube_linear_velocity=placed_cube_velocity,
+                        cube_lift_m=current_cube_max_lift_m,
+                        grasp_observed=current_cube_grasp_observed,
+                        xy_tolerance_m=PICK_PLACE_SUCCESS_XY_TOLERANCE_M,
+                        z_tolerance_m=PICK_PLACE_SUCCESS_Z_TOLERANCE_M,
+                        max_linear_speed_mps=PICK_PLACE_SUCCESS_MAX_SPEED_MPS,
+                        min_cube_lift_m=PICK_PLACE_SUCCESS_MIN_LIFT_M,
+                    )
+                    result_details = (
+                        f"cube={placed_cube.name},attempt={current_cube_attempt},"
+                        f"xy_error_m={validation.xy_error_m:.4f},"
+                        f"z_error_m={validation.z_error_m:.4f},"
+                        f"speed_mps={validation.linear_speed_mps:.4f},"
+                        f"lift_m={validation.cube_lift_m:.4f},"
+                        f"grasp_observed={int(validation.grasp_observed)}"
+                    )
+                    attempt_index += 1
                     controller.reset(end_effector_initial_height=approach_height)
                     task_done = False
                     logger.reset_pick_miss()
+                    if not validation.success:
+                        failed_attempts += 1
+                        current_cube_attempt += 1
+                        current_cube_max_lift_m = 0.0
+                        current_cube_grasp_observed = False
+                        logger.log_event("pick_attempt_failed", result_details)
+                        print(
+                            f"[PickPlace] retrying {placed_cube.name}: {result_details}",
+                            flush=True,
+                        )
+                        continue
+
+                    logger.log_event("pick_attempt_success", result_details)
+                    logger.record_stack_expected(placed_cube.name, stack_height)
+                    completed_picks += 1
+                    current_pick_idx = (current_pick_idx + 1) % len(pick_targets)
+                    current_cube_attempt = 1
+                    current_cube_max_lift_m = 0.0
+                    current_cube_grasp_observed = False
                     if completed_picks % len(pick_targets) == 0:
                         logger.end_episode(
-                            f"reason=completed_pick_cycle,picks={len(pick_targets)}"
+                            "reason=verified_three_cube_stack,"
+                            f"picks={len(pick_targets)},failed_attempts={failed_attempts}"
                         )
                         if hri_recorder is not None and hri_recorder.is_open:
                             episode_path = hri_recorder.end_episode(
                                 success=True,
                                 metadata={
-                                    "reason": "completed_pick_cycle",
+                                    "reason": "verified_three_cube_stack",
                                     "picks": len(pick_targets),
+                                    "failed_attempts": failed_attempts,
+                                    "total_attempts": attempt_index - 1,
                                 },
                             )
                             if episode_path:
@@ -1016,12 +1153,18 @@ def main():
                                         "proxy": "sphere",
                                     }
                                 )
+                                dynamic_safety.reset()
                         randomize_cubes(
                             cubes, table_xy, table_size, cube_center_z,
                             cube_size, forbidden_xy=stack_base_xy,
                         )
                         completed_picks = 0
                         current_pick_idx = 0
+                        attempt_index = 1
+                        current_cube_attempt = 1
+                        failed_attempts = 0
+                        current_cube_max_lift_m = 0.0
+                        current_cube_grasp_observed = False
                         controller.reset(end_effector_initial_height=approach_height)
                         cycle_reset_requested = True
                         logger.reset_cycle()
@@ -1032,6 +1175,8 @@ def main():
                 if grab_manager is not None:
                     grab_manager.release_all()
                 world.reset()
+                safety_geometry.reset_link_origin_pose_cache()
+                dynamic_safety.reset()
                 if controller is not None:
                     controller.reset(end_effector_initial_height=approach_height)
                 place_target.set_world_pose(
@@ -1060,16 +1205,26 @@ def main():
         if hri_recorder.is_open:
             saved_path = hri_recorder.end_episode(
                 success=False,
-                metadata={"reason": "simulation_stopped"},
+                metadata={
+                    "reason": shutdown_reason,
+                    "aborted": True,
+                    "interrupted": shutdown_reason == "interrupted",
+                },
             )
         hri_recorder.close()
         if saved_path:
-            print(f"[HRI] saved final episode {saved_path}")
+            print(
+                f"[HRI] saved partial episode {saved_path} "
+                f"(reason={shutdown_reason})",
+                flush=True,
+            )
     print(
         "[SafetyGeometry] session mean PhysX query time="
         f"{safety_geometry.mean_query_time_ms:.4f} ms",
         flush=True,
     )
+    signal.signal(signal.SIGINT, previous_sigint_handler)
+    signal.signal(signal.SIGTERM, previous_sigterm_handler)
     simulation_app.close()
 
 

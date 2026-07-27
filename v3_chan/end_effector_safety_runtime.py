@@ -72,6 +72,10 @@ class PandaEndEffectorSafetyRuntime:
         self._query_count = 0
         self._query_time_ms = 0.0
         self._query_error_logged = False
+        # These wrappers only read the existing Panda link transforms.  They do
+        # not issue a second PhysX closest-point or overlap query.
+        self._link_pose_prims: dict[str, object] = {}
+        self._link_pose_error_logged: set[str] = set()
         self._debug_counts = {"left": 0, "right": 0}
         self._last_debug_state: dict[str, tuple | None] = {
             "left": None,
@@ -106,6 +110,52 @@ class PandaEndEffectorSafetyRuntime:
     @property
     def mean_query_time_ms(self) -> float:
         return self._query_time_ms / max(1, self._query_count)
+
+    def reset_link_origin_pose_cache(self) -> None:
+        """Discard cached single-prim pose wrappers after a world reset."""
+
+        self._link_pose_prims.clear()
+
+    def closest_link_origin_world_position(
+        self, hand_result: HandSafetyResult
+    ) -> tuple[np.ndarray | None, bool]:
+        """Return the current closest link origin without another PhysX query.
+
+        Sphere-overlap queries identify a collider path but do not expose the
+        exact closest surface point.  The caller therefore finite-differences
+        this link-origin pose using simulation time and records that reference
+        explicitly in HDF5 metadata.
+        """
+
+        link_name = str(hand_result.closest_link or "")
+        if not link_name:
+            return None, False
+        prim_path = f"{self.robot_prim_path}/{link_name}"
+        if not self._stage.GetPrimAtPath(prim_path).IsValid():
+            return None, False
+        wrapper = self._link_pose_prims.get(link_name)
+        if wrapper is None:
+            try:
+                # In this Isaac 4.5 installation, the legacy compatibility
+                # alias `XFormPrim` maps to `SingleXFormPrim`, which provides
+                # `get_world_pose()`. This only reads a known link transform;
+                # it does not issue another PhysX closest-point query.
+                from omni.isaac.core.prims import XFormPrim
+
+                wrapper = XFormPrim(prim_path=prim_path)
+                self._link_pose_prims[link_name] = wrapper
+            except Exception as exc:
+                self._log_link_pose_error(link_name, exc)
+                return None, False
+        try:
+            position, _ = wrapper.get_world_pose()
+            position = np.asarray(position, dtype=float).reshape(-1)
+            if position.size < 3 or not np.all(np.isfinite(position[:3])):
+                return None, False
+            return position[:3].copy(), True
+        except Exception as exc:
+            self._log_link_pose_error(link_name, exc)
+            return None, False
 
     def refresh(self) -> None:
         from pxr import PhysxSchema, Usd, UsdPhysics
@@ -329,7 +379,23 @@ class PandaEndEffectorSafetyRuntime:
                 "Tracked hands are non-physical query spheres; contact is exact "
                 "PhysX overlap against Panda colliders and force is unavailable."
             ),
+            "dynamic_robot_velocity_method": "link_origin",
+            "dynamic_robot_velocity_source": (
+                "cached_link_world_pose_sim_time_finite_difference"
+            ),
+            "dynamic_exact_closest_surface_point_velocity_available": False,
+            "dynamic_angular_velocity_correction_used": False,
         }
+
+    def _log_link_pose_error(self, link_name: str, exc: Exception) -> None:
+        if link_name in self._link_pose_error_logged:
+            return
+        self._link_pose_error_logged.add(link_name)
+        print(
+            "[SafetyGeometry] closest link origin pose unavailable; "
+            f"dynamic relative velocity will be invalid for link={link_name}: {exc}",
+            flush=True,
+        )
 
     def _maybe_log_debug(self, result: HandSafetyResult) -> None:
         if not self.debug:

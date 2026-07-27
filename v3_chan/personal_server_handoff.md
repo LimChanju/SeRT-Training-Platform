@@ -51,7 +51,7 @@ safety/haptic_pulse_right sum = 37
 
 `hri_obs_v2_verified_place_retry`부터는 실패한 pick-place attempt를 같은 episode 안에서 재시도하므로 `episode_length`와 observation shape의 첫 번째 차원은 가변적이다. Episode의 `success=True`는 세 cube가 실제 grasp, lift, place 검증을 모두 통과한 경우에만 기록된다.
 
-`hri_obs_v4_builtin_panda_collision_geometry`부터 `obs_policy`는 기존 checkpoint 호환을 위해 84차원을 유지하고, `hri_obs_policy`도 built-in Panda collider 기반 보조 변수를 포함한 84차원이다. 기존 v1/v2의 74차원 및 v3의 77차원 HRI vector와 v4를 같은 batch에 바로 섞지 말고 schema별로 변환하거나 분리한다.
+`hri_obs_v5_builtin_panda_collision_dynamic_safety`부터 `obs_policy`는 기존 checkpoint 호환을 위해 84차원을 유지하고, `hri_obs_policy`도 built-in Panda collider 기반 보조 변수를 포함한 84차원이다. v5는 HDF5에 hand/link velocity, gap rate, closing speed, TTC를 추가하지만 policy vector 차원은 바꾸지 않는다. 기존 v1/v2의 74차원 및 v3의 77차원 HRI vector와 v5를 같은 batch에 바로 섞지 말고 schema별로 변환하거나 분리한다.
 
 세부 요약은 아래 문서에 있다.
 

@@ -25,9 +25,11 @@ distance_gate: clip((0.13 - surface_gap) / (0.13 - 0.05), 0, 1)
 
 ## 수집 데이터
 
-- HDF5 schema: `hri_obs_v4_builtin_panda_collision_geometry`
+- HDF5 schema: `hri_obs_v5_builtin_panda_collision_dynamic_safety`
 - 기존 84차원 `obs_policy`는 robot-only checkpoint 호환을 위해 유지한다.
 - 양손 surface gap, closest link/collider ID, contact, penetration, near, near-miss, gate, haptic pulse, geometry validity를 매 step 저장한다.
+- 양손의 world-frame velocity, closest link origin velocity, relative velocity, surface-gap rate, closing speed, TTC도 매 step 저장한다.
+- 동적 값은 simulation time 기반 finite difference와 `0.1 s` dt 기반 EMA를 사용한다. TTC cap은 `10 s`이며, tracking/query invalid와 closest collider 변경 frame은 별도 valid flag로 표시한다.
 - 기존 HDF5는 덮어쓰지 않고 session별 새 파일을 생성한다.
 
 ## 이전 데이터 보관

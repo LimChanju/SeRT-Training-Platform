@@ -6,6 +6,11 @@ from typing import Mapping
 
 import numpy as np
 
+try:
+    from v3_chan.dynamic_safety import DynamicSafetyConfig
+except ImportError:
+    from dynamic_safety import DynamicSafetyConfig
+
 
 _OBS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rl", "observations.py")
 _OBS_SPEC = importlib.util.spec_from_file_location("_v3_chan_observations", _OBS_PATH)
@@ -80,7 +85,7 @@ class HRIObsRecorder:
     directly into the existing policy/training readers.
     """
 
-    SCHEMA_VERSION = "hri_obs_v4_builtin_panda_collision_geometry"
+    SCHEMA_VERSION = "hri_obs_v5_builtin_panda_collision_dynamic_safety"
 
     def __init__(
         self,
@@ -104,6 +109,10 @@ class HRIObsRecorder:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._npz_payload = {}
         self._npz_episode_count = 0
+        merged_file_metadata = {
+            **DynamicSafetyConfig.from_env().metadata(),
+            **dict(file_metadata or {}),
+        }
         if self._use_hdf5:
             mode = "w" if overwrite else "a"
             try:
@@ -149,7 +158,7 @@ class HRIObsRecorder:
             self._file.attrs["hri_observation_dim"] = int(HRI_OBS_DIM)
             self._file.attrs["hri_observation_fields"] = ",".join(HRI_OBS_FIELD_NAMES)
             self._file.attrs["sample_interval_steps"] = int(self.sample_interval_steps)
-            for key, value in dict(file_metadata or {}).items():
+            for key, value in merged_file_metadata.items():
                 self._file.attrs[str(key)] = value
         else:
             if overwrite and os.path.exists(self.path):
@@ -168,7 +177,7 @@ class HRIObsRecorder:
                     ),
                 }
             )
-            for key, value in dict(file_metadata or {}).items():
+            for key, value in merged_file_metadata.items():
                 self._npz_payload[f"attrs/{key}"] = np.asarray(value)
         self._open = False
         self._attrs = {}
@@ -196,6 +205,14 @@ class HRIObsRecorder:
             "obs_policy": [],
             "hri_obs_policy": [],
             "human_valid_mask": [],
+            "human": {
+                "left_hand_vel_raw_mps": [],
+                "right_hand_vel_raw_mps": [],
+                "left_hand_vel_filtered_mps": [],
+                "right_hand_vel_filtered_mps": [],
+                "left_hand_velocity_valid": [],
+                "right_hand_velocity_valid": [],
+            },
             "current_pick_idx": [],
             "completed_picks": [],
             "safety": {
@@ -251,6 +268,25 @@ class HRIObsRecorder:
                 "query_time_right_ms": [],
                 "query_count_left": [],
                 "query_count_right": [],
+                "left_closest_robot_velocity_world_mps": [],
+                "right_closest_robot_velocity_world_mps": [],
+                "left_relative_velocity_world_mps": [],
+                "right_relative_velocity_world_mps": [],
+                "left_surface_gap_rate_raw_mps": [],
+                "right_surface_gap_rate_raw_mps": [],
+                "left_surface_gap_rate_filtered_mps": [],
+                "right_surface_gap_rate_filtered_mps": [],
+                "left_closing_speed_mps": [],
+                "right_closing_speed_mps": [],
+                "left_ttc_s": [],
+                "right_ttc_s": [],
+                "left_dynamic_valid": [],
+                "right_dynamic_valid": [],
+                "min_ttc_s": [],
+                "max_closing_speed_mps": [],
+                "dynamic_valid": [],
+                "closest_collider_switched_left": [],
+                "closest_collider_switched_right": [],
             },
             "errp": {
                 "label": [],
@@ -293,6 +329,7 @@ class HRIObsRecorder:
         current_cube_attempt: int = 1,
         failed_attempts: int = 0,
         safety: Mapping | None = None,
+        dynamic: Mapping | None = None,
         errp: Mapping | None = None,
         action=None,
         reward: Mapping | None = None,
@@ -323,6 +360,7 @@ class HRIObsRecorder:
         self._buffers["current_pick_idx"].append(int(current_pick_idx))
         self._buffers["completed_picks"].append(int(completed_picks))
         self._append_safety(obs, safety)
+        self._append_dynamic(dynamic)
         self._append_errp(errp, step)
         self._append_action(action)
         self._append_reward(obs, reward)
@@ -382,6 +420,8 @@ class HRIObsRecorder:
         self._write_dataset(human_group, "head_pos", self._buffers["obs"]["human_head_pos"])
         self._write_dataset(human_group, "left_hand_pos", self._buffers["obs"]["human_left_hand_pos"])
         self._write_dataset(human_group, "right_hand_pos", self._buffers["obs"]["human_right_hand_pos"])
+        for name, values in self._buffers["human"].items():
+            self._write_dataset(human_group, name, values)
 
         for group_name in ("safety", "errp", "actions", "rewards", "task"):
             out_group = group.create_group(group_name)
@@ -441,6 +481,8 @@ class HRIObsRecorder:
         self._npz_payload[f"{base}/human/right_hand_pos"] = np.asarray(
             self._buffers["obs"]["human_right_hand_pos"]
         )
+        for name, values in self._buffers["human"].items():
+            self._npz_payload[f"{base}/human/{name}"] = np.asarray(values)
         for group_name in ("safety", "errp", "actions", "rewards", "task"):
             for name, values in self._buffers[group_name].items():
                 self._npz_payload[f"{base}/{group_name}/{name}"] = np.asarray(values)
@@ -579,6 +621,75 @@ class HRIObsRecorder:
             else:
                 self._buffers["safety"][name].append(float(value))
 
+    def _append_dynamic(self, dynamic: Mapping | None) -> None:
+        dynamic = dict(dynamic or {})
+        zero_vec = np.zeros(3, dtype=np.float32)
+        human_values = {
+            "left_hand_vel_raw_mps": dynamic.get("left_hand_vel_raw_mps", zero_vec),
+            "right_hand_vel_raw_mps": dynamic.get("right_hand_vel_raw_mps", zero_vec),
+            "left_hand_vel_filtered_mps": dynamic.get(
+                "left_hand_vel_filtered_mps", zero_vec
+            ),
+            "right_hand_vel_filtered_mps": dynamic.get(
+                "right_hand_vel_filtered_mps", zero_vec
+            ),
+            "left_hand_velocity_valid": dynamic.get("left_hand_velocity_valid", 0.0),
+            "right_hand_velocity_valid": dynamic.get("right_hand_velocity_valid", 0.0),
+        }
+        for name, value in human_values.items():
+            if name.endswith("_mps"):
+                self._buffers["human"][name].append(_finite_array(value, 3))
+            else:
+                self._buffers["human"][name].append(_finite_scalar(value, 0.0))
+
+        safety_values = {
+            "left_closest_robot_velocity_world_mps": dynamic.get(
+                "left_closest_robot_velocity_world_mps", zero_vec
+            ),
+            "right_closest_robot_velocity_world_mps": dynamic.get(
+                "right_closest_robot_velocity_world_mps", zero_vec
+            ),
+            "left_relative_velocity_world_mps": dynamic.get(
+                "left_relative_velocity_world_mps", zero_vec
+            ),
+            "right_relative_velocity_world_mps": dynamic.get(
+                "right_relative_velocity_world_mps", zero_vec
+            ),
+            "left_surface_gap_rate_raw_mps": dynamic.get(
+                "left_surface_gap_rate_raw_mps", 0.0
+            ),
+            "right_surface_gap_rate_raw_mps": dynamic.get(
+                "right_surface_gap_rate_raw_mps", 0.0
+            ),
+            "left_surface_gap_rate_filtered_mps": dynamic.get(
+                "left_surface_gap_rate_filtered_mps", 0.0
+            ),
+            "right_surface_gap_rate_filtered_mps": dynamic.get(
+                "right_surface_gap_rate_filtered_mps", 0.0
+            ),
+            "left_closing_speed_mps": dynamic.get("left_closing_speed_mps", 0.0),
+            "right_closing_speed_mps": dynamic.get("right_closing_speed_mps", 0.0),
+            "left_ttc_s": dynamic.get("left_ttc_s", 10.0),
+            "right_ttc_s": dynamic.get("right_ttc_s", 10.0),
+            "left_dynamic_valid": dynamic.get("left_dynamic_valid", 0.0),
+            "right_dynamic_valid": dynamic.get("right_dynamic_valid", 0.0),
+            "min_ttc_s": dynamic.get("min_ttc_s", 10.0),
+            "max_closing_speed_mps": dynamic.get("max_closing_speed_mps", 0.0),
+            "dynamic_valid": dynamic.get("dynamic_valid", 0.0),
+            "closest_collider_switched_left": dynamic.get(
+                "closest_collider_switched_left", 0.0
+            ),
+            "closest_collider_switched_right": dynamic.get(
+                "closest_collider_switched_right", 0.0
+            ),
+        }
+        for name, value in safety_values.items():
+            if name.endswith("_world_mps"):
+                self._buffers["safety"][name].append(_finite_array(value, 3))
+            else:
+                default = 10.0 if name.endswith("_ttc_s") or name == "min_ttc_s" else 0.0
+                self._buffers["safety"][name].append(_finite_scalar(value, default))
+
     def _append_errp(self, errp: Mapping | None, step: int) -> None:
         errp = dict(errp or {})
         self._buffers["errp"]["label"].append(int(errp.get("label", 0)))
@@ -619,3 +730,16 @@ def _fixed_array(value, size: int, fill: float = 0.0) -> np.ndarray:
     if n:
         out[:n] = arr[:n]
     return out
+
+
+def _finite_array(value, size: int) -> np.ndarray:
+    arr = _fixed_array(value, size)
+    return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _finite_scalar(value, default: float) -> float:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return value if np.isfinite(value) else float(default)

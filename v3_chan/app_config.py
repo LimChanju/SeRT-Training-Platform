@@ -29,6 +29,21 @@ HRI_TRAJECTORY_OVERWRITE = os.environ.get("HRI_TRAJECTORY_OVERWRITE", "0").lower
     "on",
 )
 HRI_TRAJECTORY_MAX_EPISODES = int(os.environ.get("HRI_TRAJECTORY_MAX_EPISODES", "0"))
+PICK_PLACE_SUCCESS_XY_TOLERANCE_M = float(
+    os.environ.get("PICK_PLACE_SUCCESS_XY_TOLERANCE_M", "0.04")
+)
+PICK_PLACE_SUCCESS_Z_TOLERANCE_M = float(
+    os.environ.get("PICK_PLACE_SUCCESS_Z_TOLERANCE_M", "0.03")
+)
+PICK_PLACE_SUCCESS_MAX_SPEED_MPS = float(
+    os.environ.get("PICK_PLACE_SUCCESS_MAX_SPEED_MPS", "0.05")
+)
+PICK_PLACE_SUCCESS_MIN_LIFT_M = float(
+    os.environ.get("PICK_PLACE_SUCCESS_MIN_LIFT_M", "0.05")
+)
+PICK_PLACE_MISS_RECENT_STEPS = int(
+    os.environ.get("PICK_PLACE_MISS_RECENT_STEPS", "30")
+)
 ENABLE_GRIPPER_CAMERA = os.environ.get("ENABLE_GRIPPER_CAMERA", "1").lower() in (
     "1",
     "true",
@@ -67,6 +82,33 @@ GRIPPER_CAMERA_RECORD_RESOLUTION = os.environ.get(
 GRIPPER_CAMERA_RECORD_INTERVAL_STEPS = int(
     os.environ.get("GRIPPER_CAMERA_RECORD_INTERVAL_STEPS", "5")
 )
+
+ENABLE_HRI_VIDEO_RECORDING = os.environ.get(
+    "ENABLE_HRI_VIDEO_RECORDING", "0"
+).lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+HRI_VIDEO_PRIM_PATH = os.environ.get("HRI_VIDEO_PRIM_PATH", "/World/HRIOverviewCamera")
+_hri_video_record_dir = os.environ.get(
+    "HRI_VIDEO_RECORD_DIR",
+    os.path.join(BASE_DIR, "videos", "latest"),
+)
+HRI_VIDEO_RECORD_DIR = (
+    _hri_video_record_dir
+    if os.path.isabs(_hri_video_record_dir)
+    else os.path.abspath(os.path.join(PROJECT_DIR, _hri_video_record_dir))
+)
+HRI_VIDEO_RECORD_RESOLUTION = os.environ.get("HRI_VIDEO_RECORD_RESOLUTION", "1280,720")
+HRI_VIDEO_RECORD_INTERVAL_STEPS = int(
+    os.environ.get("HRI_VIDEO_RECORD_INTERVAL_STEPS", "3")
+)
+HRI_VIDEO_FPS = int(os.environ.get("HRI_VIDEO_FPS", "20"))
+HRI_VIDEO_EYE = os.environ.get("HRI_VIDEO_EYE", "1.35,-1.15,1.75")
+HRI_VIDEO_TARGET = os.environ.get("HRI_VIDEO_TARGET", "0.45,0.0,1.05")
+HRI_VIDEO_MP4_PATH = os.environ.get("HRI_VIDEO_MP4_PATH", "").strip()
 
 BHAPTICS_NOTEBOOK_IP = os.environ.get("BHAPTICS_NOTEBOOK_IP", "").strip()
 BHAPTICS_UDP_PORT = int(os.environ.get("BHAPTICS_UDP_PORT", "5005"))
