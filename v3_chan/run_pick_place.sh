@@ -10,9 +10,9 @@ export HRI_COLLECTION_LABEL="${HRI_COLLECTION_LABEL:-surface_twist_v8_dualclock_
 export HRI_PARTICIPANT_ID="${HRI_PARTICIPANT_ID:-P01}"
 export HRI_PARTICIPANT_SESSION_INDEX="${HRI_PARTICIPANT_SESSION_INDEX:-unspecified}"
 export HRI_PARTICIPANT_HANDEDNESS="${HRI_PARTICIPANT_HANDEDNESS:-unspecified}"
-export HRI_IS_PRACTICE="${HRI_IS_PRACTICE:-0}"
+export HRI_IS_PRACTICE="${HRI_IS_PRACTICE:-unspecified}"
 export HRI_EXPERIMENT_CONDITION="${HRI_EXPERIMENT_CONDITION:-unspecified}"
-export HRI_EXPERIMENT_BLOCK_ID="${HRI_EXPERIMENT_BLOCK_ID:-all_sessions}"
+export HRI_EXPERIMENT_BLOCK_ID="${HRI_EXPERIMENT_BLOCK_ID:-unspecified}"
 export HRI_HAPTIC_CONDITION="${HRI_HAPTIC_CONDITION:-unspecified}"
 export HRI_PROTOCOL_VERSION="${HRI_PROTOCOL_VERSION:-surface_gap_dynamic_multispeed_dualclock_v4}"
 export HRI_ROOM_CALIBRATION_ID="${HRI_ROOM_CALIBRATION_ID:-vr_room_to_isaac_world_v1}"
@@ -139,17 +139,21 @@ export XR_STAGE_VISUAL_FALLBACK=1
 export XR_STAGE_VISUAL_SEARCH_INTERVAL_STEPS=30
 
 export HAPTICS_CONTACT_MIN_STEPS="${HAPTICS_CONTACT_MIN_STEPS:-1}"
+export HRI_VALIDATOR_MIN_HAND_POSE_VALID_FRACTION="${HRI_VALIDATOR_MIN_HAND_POSE_VALID_FRACTION:-0.90}"
+export HRI_VALIDATOR_MIN_RTF_VALID_FRACTION="${HRI_VALIDATOR_MIN_RTF_VALID_FRACTION:-0.95}"
 
 LOG_PATH="$PROJECT_ROOT/v3_chan/logs/pick_place_${HRI_COLLECTION_LABEL}_${HRI_SESSION_ID}.log"
 export HRI_LOG_DIR="$PROJECT_ROOT/v3_chan/logs"
 export ERRP_MARKERS_PATH="$HRI_LOG_DIR/errp_markers_${HRI_SESSION_ID}.csv"
 export SESSION_SAMPLES_PATH="$HRI_LOG_DIR/session_samples_${HRI_SESSION_ID}.csv"
 
-if [[ "$HRI_PRODUCTION_MODE" == "1" && "${HRI_ENFORCE_EXPERIMENT_METADATA:-1}" != "0" ]]; then
+if [[ "$HRI_PRODUCTION_MODE" == "1" ]]; then
     for metadata_key in \
         HRI_PARTICIPANT_ID \
         HRI_PARTICIPANT_HANDEDNESS \
+        HRI_IS_PRACTICE \
         HRI_EXPERIMENT_CONDITION \
+        HRI_EXPERIMENT_BLOCK_ID \
         HRI_HAPTIC_CONDITION \
         HRI_PROTOCOL_VERSION \
         HRI_ROOM_CALIBRATION_ID; do
@@ -162,6 +166,39 @@ if [[ "$HRI_PRODUCTION_MODE" == "1" && "${HRI_ENFORCE_EXPERIMENT_METADATA:-1}" !
     done
     if [[ ! "$HRI_PARTICIPANT_SESSION_INDEX" =~ ^[1-9][0-9]*$ ]]; then
         printf '[Collect] HRI_PARTICIPANT_SESSION_INDEX must be a positive integer for production.\n' >&2
+        exit 2
+    fi
+    case "${HRI_IS_PRACTICE,,}" in
+        0|false|no|off) export HRI_IS_PRACTICE=0 ;;
+        1|true|yes|on) export HRI_IS_PRACTICE=1 ;;
+        *)
+            printf '[Collect] HRI_IS_PRACTICE must be explicitly 0 or 1 for production.\n' >&2
+            exit 2
+            ;;
+    esac
+    case "${HRI_HAPTIC_CONDITION,,}" in
+        on) _expected_haptics_enabled=1 ;;
+        off) _expected_haptics_enabled=0 ;;
+        *)
+            printf "[Collect] HRI_HAPTIC_CONDITION must be 'on' or 'off'.\n" >&2
+            exit 2
+            ;;
+    esac
+    case "${BHAPTICS_ENABLED,,}" in
+        1|true|yes|on) _actual_haptics_enabled=1 ;;
+        0|false|no|off) _actual_haptics_enabled=0 ;;
+        *)
+            printf '[Collect] BHAPTICS_ENABLED must be explicitly 0 or 1.\n' >&2
+            exit 2
+            ;;
+    esac
+    if [[ "$_expected_haptics_enabled" != "$_actual_haptics_enabled" ]]; then
+        printf '[Collect] HRI_HAPTIC_CONDITION=%s conflicts with BHAPTICS_ENABLED=%s.\n' \
+            "$HRI_HAPTIC_CONDITION" "$BHAPTICS_ENABLED" >&2
+        exit 2
+    fi
+    if [[ "$_actual_haptics_enabled" == "1" && -z "$BHAPTICS_NOTEBOOK_IP" ]]; then
+        printf '[Collect] BHAPTICS_ENABLED=1 requires BHAPTICS_NOTEBOOK_IP.\n' >&2
         exit 2
     fi
 fi
@@ -181,6 +218,9 @@ printf '[Collect] condition=%s block=%s haptic_condition=%s\n' \
 printf '[Collect] haptics enabled=%s intensity=%s min_interval_s=%s contact_steps=%s\n' \
     "$BHAPTICS_ENABLED" "$BHAPTICS_INTENSITY" "$BHAPTICS_MIN_INTERVAL" \
     "$HAPTICS_CONTACT_MIN_STEPS"
+printf '[Collect] quality_thresholds hand_pose_valid=%s rtf_valid=%s\n' \
+    "$HRI_VALIDATOR_MIN_HAND_POSE_VALID_FRACTION" \
+    "$HRI_VALIDATOR_MIN_RTF_VALID_FRACTION"
 printf '[Collect] production=%s session_seed=%s code_version=%s\n' \
     "$HRI_PRODUCTION_MODE" \
     "${HRI_SESSION_SEED:-auto}" \
@@ -210,7 +250,11 @@ if grep -Fq '[HRI] collection complete:' "$LOG_PATH"; then
     if [[ "$HRI_PRODUCTION_MODE" == "1" ]]; then
         _validator_python="${HRI_VALIDATOR_PYTHON:-${ISAACSIM_ROOT:-$HOME/isaac-sim-4.5.0}/python.sh}"
         if "$_validator_python" "$PROJECT_ROOT/v3_chan/validate_hri_collection.py" \
-            "$HRI_TRAJECTORY_PATH" 2>&1 | tee -a "$LOG_PATH"; then
+            "$HRI_TRAJECTORY_PATH" \
+            --min-hand-pose-valid-fraction \
+            "$HRI_VALIDATOR_MIN_HAND_POSE_VALID_FRACTION" \
+            --min-rtf-valid-fraction "$HRI_VALIDATOR_MIN_RTF_VALID_FRACTION" \
+            2>&1 | tee -a "$LOG_PATH"; then
             _collection_valid=1
             printf '[Collect] validator passed; session is eligible for training review.\n'
         else
@@ -233,6 +277,12 @@ if [[ "$_speed_order_auto" == "1" ]]; then
     exec 9>&-
 fi
 
-if [[ "$HRI_PRODUCTION_MODE" == "1" && "$_collection_complete" == "1" && "$_collection_valid" != "1" ]]; then
-    exit 3
+if [[ "$HRI_PRODUCTION_MODE" == "1" ]]; then
+    if [[ "$_collection_complete" != "1" ]]; then
+        printf '[Collect] production session ended before collection completed.\n' >&2
+        exit 4
+    fi
+    if [[ "$_collection_valid" != "1" ]]; then
+        exit 3
+    fi
 fi

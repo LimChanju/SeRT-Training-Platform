@@ -6,6 +6,8 @@ from collections.abc import Mapping
 
 
 _INVALID_TEXT = {"", "unknown", "unspecified", "none", "null"}
+EXPERIMENT_METADATA_SCHEMA_VERSION = "hri_experiment_metadata_v3"
+_VALID_HANDEDNESS = {"left", "right", "ambidextrous", "other"}
 
 
 def _text(environment: Mapping[str, str], name: str, default: str) -> str:
@@ -38,7 +40,7 @@ def build_experiment_metadata(
     participant_id: str,
     participant_session_index: int,
     participant_handedness: str,
-    is_practice: bool,
+    is_practice: bool | int,
     experiment_condition: str,
     experiment_block_id: str,
     haptic_condition: str,
@@ -50,6 +52,7 @@ def build_experiment_metadata(
     haptics_min_interval_s: float,
     haptics_contact_min_steps: int,
     haptics_udp_port: int,
+    haptics_enabled: bool | int,
     haptics_udp_configured: bool,
     collection_max_episodes: int,
     sample_interval_steps: int,
@@ -61,16 +64,17 @@ def build_experiment_metadata(
     """Return reproducibility metadata without importing Isaac Sim."""
 
     return {
-        "experiment_metadata_schema_version": "hri_experiment_metadata_v2",
+        "experiment_metadata_schema_version": EXPERIMENT_METADATA_SCHEMA_VERSION,
         "participant_id": str(participant_id).strip() or "unspecified",
         "participant_id_kind": "pseudonym",
         "participant_session_index": int(participant_session_index),
-        "participant_handedness": str(participant_handedness).strip()
+        "participant_handedness": str(participant_handedness).strip().lower()
         or "unspecified",
-        "is_practice": int(bool(is_practice)),
+        "is_practice": int(is_practice),
         "experiment_condition": str(experiment_condition).strip() or "unspecified",
         "experiment_block_id": str(experiment_block_id).strip() or "unspecified",
-        "haptic_experiment_condition": str(haptic_condition).strip() or "unspecified",
+        "haptic_experiment_condition": str(haptic_condition).strip().lower()
+        or "unspecified",
         "protocol_version": str(protocol_version).strip() or "unspecified",
         "collection_protocol_version": str(protocol_version).strip() or "unspecified",
         "room_calibration_id": str(room_calibration_id).strip() or "unspecified",
@@ -117,6 +121,7 @@ def build_experiment_metadata(
             environment, "XR_RIGHT_HAND_VISUAL_OFFSET", "0,0,0"
         ),
         "haptics_transport": "udp",
+        "haptics_enabled": int(haptics_enabled),
         "haptics_udp_configured": int(bool(haptics_udp_configured)),
         "haptics_udp_port": int(haptics_udp_port),
         "haptics_event": "panda_distal_surface_contact",
@@ -138,8 +143,12 @@ def validate_experiment_metadata(
     participant_id: str,
     participant_session_index: int,
     participant_handedness: str,
+    is_practice: bool | int,
     experiment_condition: str,
+    experiment_block_id: str,
     haptic_condition: str,
+    haptics_enabled: bool | int,
+    haptics_udp_configured: bool | int,
     protocol_version: str,
     room_calibration_id: str,
 ) -> None:
@@ -151,6 +160,7 @@ def validate_experiment_metadata(
         "HRI_PARTICIPANT_ID": participant_id,
         "HRI_PARTICIPANT_HANDEDNESS": participant_handedness,
         "HRI_EXPERIMENT_CONDITION": experiment_condition,
+        "HRI_EXPERIMENT_BLOCK_ID": experiment_block_id,
         "HRI_HAPTIC_CONDITION": haptic_condition,
         "HRI_PROTOCOL_VERSION": protocol_version,
         "HRI_ROOM_CALIBRATION_ID": room_calibration_id,
@@ -168,4 +178,40 @@ def validate_experiment_metadata(
     if int(participant_session_index) < 1:
         raise RuntimeError(
             "Production collection requires HRI_PARTICIPANT_SESSION_INDEX >= 1"
+        )
+    normalized_handedness = str(participant_handedness).strip().lower()
+    if normalized_handedness not in _VALID_HANDEDNESS:
+        raise RuntimeError(
+            "HRI_PARTICIPANT_HANDEDNESS must be one of "
+            + ", ".join(sorted(_VALID_HANDEDNESS))
+        )
+    if int(is_practice) not in (0, 1):
+        raise RuntimeError(
+            "Production collection requires HRI_IS_PRACTICE to be explicitly 0 or 1"
+        )
+
+    normalized_haptic_condition = str(haptic_condition).strip().lower()
+    if normalized_haptic_condition not in {"on", "off"}:
+        raise RuntimeError(
+            "Production collection requires HRI_HAPTIC_CONDITION to be 'on' or 'off'"
+        )
+    enabled = int(haptics_enabled)
+    if enabled not in (0, 1):
+        raise RuntimeError(
+            "Production collection requires BHAPTICS_ENABLED to be explicitly 0 or 1"
+        )
+    expected_enabled = int(normalized_haptic_condition == "on")
+    if enabled != expected_enabled:
+        raise RuntimeError(
+            "HRI_HAPTIC_CONDITION does not match BHAPTICS_ENABLED "
+            f"({normalized_haptic_condition!r} versus {enabled})"
+        )
+    udp_configured = int(haptics_udp_configured)
+    if udp_configured not in (0, 1):
+        raise RuntimeError(
+            "Production collection requires haptics_udp_configured to be 0 or 1"
+        )
+    if enabled != udp_configured:
+        raise RuntimeError(
+            "BHAPTICS_ENABLED does not match BHAPTICS_NOTEBOOK_IP configuration"
         )

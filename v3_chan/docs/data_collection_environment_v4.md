@@ -48,13 +48,15 @@ distance_gate: clip((0.13 - surface_gap) / (0.13 - 0.05), 0, 1)
 HRI_PARTICIPANT_ID
 HRI_PARTICIPANT_SESSION_INDEX
 HRI_PARTICIPANT_HANDEDNESS
+HRI_IS_PRACTICE
 HRI_EXPERIMENT_CONDITION
+HRI_EXPERIMENT_BLOCK_ID
 HRI_HAPTIC_CONDITION
 HRI_PROTOCOL_VERSION
 HRI_ROOM_CALIBRATION_ID
 ```
 
-빠른 개발 테스트만 `HRI_COLLECTION_TEST_MODE=1`로 이 검증을 건너뛸 수 있다. 본수집에서는 HDF5의 `haptics_intensity`, `haptics_min_interval_s`, `haptics_contact_min_steps`, `haptics_pulse_flag_semantics`를 함께 확인한다.
+`HRI_IS_PRACTICE`는 반드시 `0/1`, `HRI_HAPTIC_CONDITION`은 반드시 `on/off`로 지정한다. 햅틱 조건 `on/off`는 실제 `BHAPTICS_ENABLED=1/0` 및 UDP endpoint 설정과 일치해야 한다. 빠른 개발 테스트만 `HRI_COLLECTION_TEST_MODE=1`로 이 검증을 건너뛸 수 있다. 본수집에서는 HDF5의 `haptics_intensity`, `haptics_min_interval_s`, `haptics_contact_min_steps`, `haptics_pulse_flag_semantics`를 함께 확인한다.
 
 ## 이전 데이터 보관
 
@@ -74,11 +76,14 @@ cd /home/railab/Desktop/Isaac_HRC
 HRI_PARTICIPANT_ID=P01 \
 HRI_PARTICIPANT_SESSION_INDEX=1 \
 HRI_PARTICIPANT_HANDEDNESS=right \
+HRI_IS_PRACTICE=0 \
 HRI_EXPERIMENT_CONDITION=haptic_on_contact_multispeed_v1 \
+HRI_EXPERIMENT_BLOCK_ID=block_01 \
 HRI_HAPTIC_CONDITION=on \
+BHAPTICS_ENABLED=1 \
 HRI_PROTOCOL_VERSION=errp_hri_collection_multispeed_v1 \
 HRI_ROOM_CALIBRATION_ID=vr_room_to_isaac_world_v1 \
 bash v3_chan/run_pick_place.sh
 ```
 
-한 번 실행하면 최대 3 episode를 수집하고 session별 HDF5와 로그를 새로 저장한다. 정상 완료 뒤 `validate_hri_collection.py`가 schema, metadata, timestamp, layout, speed-condition을 검사하며, 이 validator가 통과한 경우에만 speed order counter가 다음 순서로 진행한다. 테스트 모드는 counter를 바꾸지 않으며, 특정 순서를 재현할 때는 `HRI_SPEED_ORDER_INDEX=0`, `1`, `2`를 지정한다.
+한 번 실행하면 최대 3 episode를 수집하고 session별 HDF5와 로그를 새로 저장한다. 정상 완료 뒤 `validate_hri_collection.py`가 schema, metadata, timestamp, layout, speed-condition, 양손별 pose valid fraction, RTF valid fraction, XR anchor 상태를 검사한다. 기본 production 하한은 각 손 pose valid `0.90`, RTF valid `0.95`이며 각각 `HRI_VALIDATOR_MIN_HAND_POSE_VALID_FRACTION`, `HRI_VALIDATOR_MIN_RTF_VALID_FRACTION`으로 조정할 수 있다. validator가 통과한 경우에만 speed order counter가 다음 순서로 진행하며, 불완전 session은 nonzero exit code로 종료한다. 테스트 모드는 counter를 바꾸지 않으며, 특정 순서를 재현할 때는 `HRI_SPEED_ORDER_INDEX=0`, `1`, `2`를 지정한다.

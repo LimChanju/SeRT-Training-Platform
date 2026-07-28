@@ -33,6 +33,8 @@ ROW_DATASETS = (
     "dynamic_sim/right_ttc_s",
     "safety/left_ttc_s",
     "safety/right_ttc_s",
+    "safety/haptic_pulse_left",
+    "safety/haptic_pulse_right",
 )
 
 
@@ -44,13 +46,16 @@ def _create_valid_file(path):
         data.attrs["participant_session_index"] = 1
         data.attrs["participant_handedness"] = "right"
         data.attrs["is_practice"] = 0
-        data.attrs["experiment_metadata_schema_version"] = "hri_experiment_metadata_v2"
+        data.attrs["experiment_metadata_schema_version"] = "hri_experiment_metadata_v3"
         data.attrs["experiment_condition"] = "pilot"
-        data.attrs["haptic_experiment_condition"] = "contact_haptic_on"
+        data.attrs["experiment_block_id"] = "block_01"
+        data.attrs["haptic_experiment_condition"] = "on"
         data.attrs["collection_protocol_version"] = "surface_gap_dynamic_multispeed_dualclock_v4"
         data.attrs["room_calibration_id"] = "vr_room_to_isaac_world_v1"
         data.attrs["collection_label"] = "surface_twist_v8_dualclock_tracked_v1"
         data.attrs["haptics_transport"] = "udp"
+        data.attrs["haptics_enabled"] = 1
+        data.attrs["haptics_udp_configured"] = 1
         data.attrs["haptics_intensity"] = 100
         data.attrs["haptics_min_interval_s"] = 0.08
         data.attrs["haptics_contact_min_steps"] = 1
@@ -85,6 +90,8 @@ def _create_valid_file(path):
                     payload = np.ones(2, dtype=np.float32)
                 elif name.endswith(("hand_pos", "filtered_mps")):
                     payload = np.zeros((2, 3), dtype=np.float32)
+                elif name in ("real_time_factor", "real_time_factor_valid"):
+                    payload = np.ones(2, dtype=np.float32)
                 else:
                     payload = (
                         np.zeros((2, 9))
@@ -104,6 +111,9 @@ def test_collection_validator_accepts_three_speed_shared_layout(tmp_path):
     assert report.episode_count == 3
     assert report.layout_id == "layout-one"
     assert set(report.speed_profiles) == {"slow", "medium", "fast"}
+    assert report.left_hand_pose_valid_fraction == 1.0
+    assert report.right_hand_pose_valid_fraction == 1.0
+    assert report.real_time_factor_valid_fraction == 1.0
 
 
 def test_collection_validator_rejects_layout_confound(tmp_path):
@@ -142,4 +152,43 @@ def test_collection_validator_rejects_timestamp_inversion(tmp_path):
     with h5py.File(path, "a") as data:
         data["episodes/episode_000000/monotonic_time_ns"][:] = [2, 1]
     with pytest.raises(ValueError, match="monotonic_time_ns is not monotonic"):
+        validate_hri_collection(str(path))
+
+
+def test_collection_validator_rejects_invalid_hand_tracking_quality(tmp_path):
+    path = tmp_path / "invalid_tracking.hdf5"
+    _create_valid_file(path)
+    with h5py.File(path, "a") as data:
+        for episode in data["episodes"].values():
+            episode["human/left_hand_pose_valid"][:] = 0
+            episode["human/right_hand_pose_valid"][:] = 0
+    with pytest.raises(ValueError, match="pose_valid valid fraction"):
+        validate_hri_collection(str(path))
+
+
+def test_collection_validator_rejects_invalid_rtf_quality(tmp_path):
+    path = tmp_path / "invalid_rtf.hdf5"
+    _create_valid_file(path)
+    with h5py.File(path, "a") as data:
+        for episode in data["episodes"].values():
+            episode["real_time_factor_valid"][:] = 0
+    with pytest.raises(ValueError, match="real_time_factor_valid fraction"):
+        validate_hri_collection(str(path))
+
+
+def test_collection_validator_rejects_unapplied_xr_anchor(tmp_path):
+    path = tmp_path / "failed_anchor.hdf5"
+    _create_valid_file(path)
+    with h5py.File(path, "a") as data:
+        data.attrs["xr_anchor_status"] = "failed"
+    with pytest.raises(ValueError, match="applied XR anchor"):
+        validate_hri_collection(str(path))
+
+
+def test_collection_validator_rejects_haptic_condition_mismatch(tmp_path):
+    path = tmp_path / "haptic_mismatch.hdf5"
+    _create_valid_file(path)
+    with h5py.File(path, "a") as data:
+        data.attrs["haptic_experiment_condition"] = "off"
+    with pytest.raises(ValueError, match="does not match"):
         validate_hri_collection(str(path))

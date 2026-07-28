@@ -10,8 +10,8 @@
 | `episode_index` | 해당 session 안의 episode index |
 | `sim_time` | 이벤트가 발생한 시뮬레이션 시간 |
 | `step` | simulation step index |
-| `monotonic_time_ns` | 프로세스 monotonic clock. EEG/외부 marker 정렬용 |
-| `wall_time_unix_ns` | Unix epoch 기준 wall-clock time |
+| `monotonic_time_ns` | 프로세스 monotonic clock. 내부 event 순서와 시간 간격 계산용 |
+| `wall_time_unix_ns` | Unix epoch 기준 wall-clock time. EEG/외부 marker 정렬용 |
 | `event` | 이벤트 이름 |
 | `details` | 이벤트 상세 정보. 사람-로봇 event에는 hand, collider path와 `surface_gap_m` 포함 |
 
@@ -38,8 +38,8 @@
 | `step` | simulation step index |
 | `session_id` | 수집 실행 단위의 고유 ID |
 | `episode_index` | 해당 session 안의 episode index |
-| `monotonic_time_ns` | 프로세스 monotonic clock. EEG/외부 marker 정렬용 |
-| `wall_time_unix_ns` | Unix epoch 기준 wall-clock time |
+| `monotonic_time_ns` | 프로세스 monotonic clock. 내부 sample 순서와 시간 간격 계산용 |
+| `wall_time_unix_ns` | Unix epoch 기준 wall-clock time. EEG/외부 stream 정렬용 |
 | `left_hand_gripper_dist_m` | 왼손 sphere proxy와 gripper 사이 거리 |
 | `right_hand_gripper_dist_m` | 오른손 sphere proxy와 gripper 사이 거리 |
 | `min_hand_gripper_dist_m` | 양손 중 gripper와 더 가까운 거리 |
@@ -54,6 +54,7 @@
 | 변수명 | 의미 |
 |---|---|
 | `schema_version` | HDF5 schema 이름 |
+| `experiment_metadata_schema_version` | 실험 metadata schema. 현재 `hri_experiment_metadata_v3` |
 | `observation_version` | 원본 observation schema 이름 |
 | `observation_dim` | `obs_policy` 차원 |
 | `hri_observation_version` | 83D safety observation schema 이름 |
@@ -69,12 +70,17 @@
 | `participant_handedness` | self-reported handedness |
 | `is_practice` | practice session 여부 (`0/1`) |
 | `experiment_condition` | 실험 조건 이름 |
+| `experiment_block_id` | 참가자 내 실험 block 식별자 |
 | `haptic_experiment_condition` | 햅틱 조건 이름 |
+| `haptics_enabled` | 실제 햅틱 UDP 전송 활성화 여부 (`0/1`) |
+| `haptics_udp_configured` | UDP endpoint 설정 여부 (`0/1`) |
 | `haptics_intensity` | UDP bridge로 전송한 햅틱 강도 (`0..100`) |
 | `haptics_min_interval_s` | 같은 장갑에 허용하는 최소 pulse 간격 |
 | `haptics_contact_min_steps` | pulse 전 필요한 연속 contact step 수 |
 | `xr_anchor_status` | XR camera/anchor 적용 결과 또는 실패 상태 |
 | `source_tree_sha256` | Git checkout 유무와 독립적인 실행 source tree hash |
+
+production validator는 각 episode에서 왼손과 오른손의 `pose_valid` 비율이 각각 기본 `0.90` 이상이고, `real_time_factor_valid` 비율이 `0.95` 이상인지 확인한다. `xr_anchor_status`는 `xr_anchor` 또는 `xr_camera_teleport`처럼 실제 적용을 나타내야 한다. tracking이나 RTF가 전 구간 무효인 파일, 햅틱 condition과 실제 활성화 상태가 다른 파일은 학습 후보로 승인하지 않는다.
 
 ### Episode-Level Datasets
 

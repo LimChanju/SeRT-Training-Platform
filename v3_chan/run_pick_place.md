@@ -8,9 +8,10 @@ HRI_IS_PRACTICE=0 \
 HRI_EXPERIMENT_CONDITION=haptic_on_contact_multispeed_v1 \
 HRI_EXPERIMENT_BLOCK_ID=block_01 \
 HRI_HAPTIC_CONDITION=on \
+BHAPTICS_ENABLED=1 \
 HRI_PROTOCOL_VERSION=errp_hri_collection_multispeed_v1 \
 HRI_ROOM_CALIBRATION_ID=vr_room_to_isaac_world_v1 \
 bash v3_chan/run_pick_place.sh
 ```
 
-`HRI_PARTICIPANT_SESSION_INDEX`는 P01의 누적 수집 번호로 매 session마다 증가시키고, `HRI_PARTICIPANT_HANDEDNESS`는 실제 self-reported 값으로 바꾼다. 한 실행은 `slow`, `medium`, `fast` 조건을 각각 한 episode씩 수집한다. HDF5 validator가 schema, metadata, timestamp, layout을 통과한 session만 다음 counterbalanced speed 순서로 자동 진행한다.
+`HRI_PARTICIPANT_SESSION_INDEX`는 P01의 누적 수집 번호로 매 session마다 증가시키고, `HRI_PARTICIPANT_HANDEDNESS`는 실제 self-reported 값으로 바꾼다. `HRI_IS_PRACTICE`, block, 햅틱 조건은 생략할 수 없으며 `HRI_HAPTIC_CONDITION=on/off`와 `BHAPTICS_ENABLED=1/0`은 서로 일치해야 한다. 한 실행은 `slow`, `medium`, `fast` 조건을 각각 한 episode씩 수집한다. HDF5 validator가 schema, metadata, timestamp, layout, 양손 pose 유효율 90%, RTF 유효율 95%, XR anchor 적용을 통과한 session만 다음 counterbalanced speed 순서로 자동 진행한다.

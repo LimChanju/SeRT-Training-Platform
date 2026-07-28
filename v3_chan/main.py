@@ -111,6 +111,7 @@ if _xr_enabled:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app_config import (
+    BHAPTICS_ENABLED,
     BHAPTICS_INTENSITY,
     BHAPTICS_MIN_INTERVAL_S,
     BHAPTICS_NOTEBOOK_IP,
@@ -291,6 +292,7 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
             haptics_min_interval_s=BHAPTICS_MIN_INTERVAL_S,
             haptics_contact_min_steps=HAPTICS_CONTACT_MIN_STEPS,
             haptics_udp_port=BHAPTICS_UDP_PORT,
+            haptics_enabled=BHAPTICS_ENABLED,
             haptics_udp_configured=bool(BHAPTICS_NOTEBOOK_IP),
             collection_max_episodes=HRI_TRAJECTORY_MAX_EPISODES,
             sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
@@ -733,8 +735,12 @@ def main():
         participant_id=HRI_PARTICIPANT_ID,
         participant_session_index=HRI_PARTICIPANT_SESSION_INDEX,
         participant_handedness=HRI_PARTICIPANT_HANDEDNESS,
+        is_practice=HRI_IS_PRACTICE,
         experiment_condition=HRI_EXPERIMENT_CONDITION,
+        experiment_block_id=HRI_EXPERIMENT_BLOCK_ID,
         haptic_condition=HRI_HAPTIC_CONDITION,
+        haptics_enabled=BHAPTICS_ENABLED,
+        haptics_udp_configured=bool(BHAPTICS_NOTEBOOK_IP),
         protocol_version=HRI_PROTOCOL_VERSION,
         room_calibration_id=HRI_ROOM_CALIBRATION_ID,
     )

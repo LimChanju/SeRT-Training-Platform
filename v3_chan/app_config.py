@@ -30,6 +30,15 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value in ("1", "true", "yes", "on")
 
 
+def _env_tristate_bool(name: str) -> int:
+    value = os.environ.get(name, "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return 1
+    if value in ("0", "false", "no", "off"):
+        return 0
+    return -1
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(BASE_DIR)
 HRI_PRODUCTION_MODE = os.environ.get("HRI_PRODUCTION_MODE", "0").lower() in (
@@ -52,12 +61,12 @@ HRI_PARTICIPANT_SESSION_INDEX = _env_int("HRI_PARTICIPANT_SESSION_INDEX", -1)
 HRI_PARTICIPANT_HANDEDNESS = os.environ.get(
     "HRI_PARTICIPANT_HANDEDNESS", "unspecified"
 ).strip()
-HRI_IS_PRACTICE = _env_bool("HRI_IS_PRACTICE", False)
+HRI_IS_PRACTICE = _env_tristate_bool("HRI_IS_PRACTICE")
 HRI_EXPERIMENT_CONDITION = os.environ.get(
     "HRI_EXPERIMENT_CONDITION", "unspecified"
 ).strip()
 HRI_EXPERIMENT_BLOCK_ID = os.environ.get(
-    "HRI_EXPERIMENT_BLOCK_ID", "all_sessions"
+    "HRI_EXPERIMENT_BLOCK_ID", "unspecified"
 ).strip()
 HRI_HAPTIC_CONDITION = os.environ.get(
     "HRI_HAPTIC_CONDITION", "unspecified"
@@ -196,6 +205,9 @@ HRI_VIDEO_TARGET = os.environ.get("HRI_VIDEO_TARGET", "0.45,0.0,1.05")
 HRI_VIDEO_MP4_PATH = os.environ.get("HRI_VIDEO_MP4_PATH", "").strip()
 
 BHAPTICS_NOTEBOOK_IP = os.environ.get("BHAPTICS_NOTEBOOK_IP", "").strip()
+BHAPTICS_ENABLED = _env_tristate_bool("BHAPTICS_ENABLED")
+if BHAPTICS_ENABLED == 0:
+    BHAPTICS_NOTEBOOK_IP = ""
 BHAPTICS_UDP_PORT = _env_int("BHAPTICS_UDP_PORT", 5005)
 BHAPTICS_INTENSITY = max(0, min(100, _env_int("BHAPTICS_INTENSITY", 100)))
 BHAPTICS_MIN_INTERVAL_S = max(0.0, _env_float("BHAPTICS_MIN_INTERVAL", 0.08))

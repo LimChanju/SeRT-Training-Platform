@@ -12,12 +12,23 @@ import numpy as np
 
 try:
     from v3_chan.collection_provenance import validate_production_metadata
-    from v3_chan.experiment_metadata import validate_experiment_metadata
+    from v3_chan.experiment_metadata import (
+        EXPERIMENT_METADATA_SCHEMA_VERSION,
+        validate_experiment_metadata,
+    )
     from v3_chan.hri_obs_recorder import HRIObsRecorder
 except ImportError:
     from collection_provenance import validate_production_metadata
-    from experiment_metadata import validate_experiment_metadata
+    from experiment_metadata import (
+        EXPERIMENT_METADATA_SCHEMA_VERSION,
+        validate_experiment_metadata,
+    )
     from hri_obs_recorder import HRIObsRecorder
+
+
+DEFAULT_MIN_HAND_POSE_VALID_FRACTION = 0.90
+DEFAULT_MIN_RTF_VALID_FRACTION = 0.95
+APPLIED_XR_ANCHOR_STATUSES = {"xr_anchor", "xr_camera_teleport"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +38,9 @@ class ValidationReport:
     layout_id: str
     speed_profiles: tuple[str, ...]
     hand_pose_valid_fraction: float
+    left_hand_pose_valid_fraction: float
+    right_hand_pose_valid_fraction: float
+    real_time_factor_valid_fraction: float
     median_real_time_factor: float
 
 
@@ -72,10 +86,22 @@ def validate_hri_collection(
     expected_episodes: int | None = 3,
     require_success: bool = True,
     production: bool = True,
+    min_hand_pose_valid_fraction: float = DEFAULT_MIN_HAND_POSE_VALID_FRACTION,
+    min_rtf_valid_fraction: float = DEFAULT_MIN_RTF_VALID_FRACTION,
 ) -> ValidationReport:
+    for name, value in (
+        ("min_hand_pose_valid_fraction", min_hand_pose_valid_fraction),
+        ("min_rtf_valid_fraction", min_rtf_valid_fraction),
+    ):
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{name} must be in [0, 1]")
     path = os.path.abspath(path)
     errors: list[str] = []
-    hand_pose_valid_values: list[np.ndarray] = []
+    hand_pose_valid_values: dict[str, list[np.ndarray]] = {
+        "left_hand": [],
+        "right_hand": [],
+    }
+    rtf_valid_values: list[np.ndarray] = []
     valid_real_time_factors: list[np.ndarray] = []
     with h5py.File(path, "r") as data:
         schema = _text(data.attrs.get("schema_version", ""))
@@ -101,11 +127,19 @@ def validate_hri_collection(
                 participant_handedness=_text(
                     data.attrs.get("participant_handedness", "")
                 ),
+                is_practice=_int(data.attrs.get("is_practice", -1)),
                 experiment_condition=_text(
                     data.attrs.get("experiment_condition", "")
                 ),
+                experiment_block_id=_text(
+                    data.attrs.get("experiment_block_id", "")
+                ),
                 haptic_condition=_text(
                     data.attrs.get("haptic_experiment_condition", "")
+                ),
+                haptics_enabled=_int(data.attrs.get("haptics_enabled", -1)),
+                haptics_udp_configured=_int(
+                    data.attrs.get("haptics_udp_configured", -1)
                 ),
                 protocol_version=_text(
                     data.attrs.get("collection_protocol_version", "")
@@ -128,8 +162,11 @@ def validate_hri_collection(
             "participant_session_index",
             "participant_handedness",
             "is_practice",
+            "experiment_block_id",
             "collection_label",
             "haptics_transport",
+            "haptics_enabled",
+            "haptics_udp_configured",
             "haptics_intensity",
             "haptics_min_interval_s",
             "haptics_contact_min_steps",
@@ -141,6 +178,15 @@ def validate_hri_collection(
         for attr_name in required_file_attrs:
             if attr_name not in data.attrs:
                 errors.append(f"missing root metadata attribute {attr_name}")
+        metadata_schema = _text(
+            data.attrs.get("experiment_metadata_schema_version", "")
+        )
+        if metadata_schema != EXPERIMENT_METADATA_SCHEMA_VERSION:
+            errors.append(
+                "experiment_metadata_schema_version="
+                f"{metadata_schema!r}, expected {EXPERIMENT_METADATA_SCHEMA_VERSION!r}"
+            )
+        haptics_enabled_value = _int(data.attrs.get("haptics_enabled", -1))
         if "haptics_intensity" in data.attrs:
             intensity = _int(data.attrs["haptics_intensity"], -1)
             if not 0 <= intensity <= 100:
@@ -149,6 +195,19 @@ def validate_hri_collection(
             data.attrs["haptics_contact_min_steps"], 0
         ) < 1:
             errors.append("haptics_contact_min_steps must be >= 1")
+        if "haptics_min_interval_s" in data.attrs:
+            try:
+                haptics_min_interval_s = float(data.attrs["haptics_min_interval_s"])
+            except (TypeError, ValueError):
+                haptics_min_interval_s = float("nan")
+            if not np.isfinite(haptics_min_interval_s) or haptics_min_interval_s < 0.0:
+                errors.append("haptics_min_interval_s must be finite and >= 0")
+        xr_anchor_status = _text(data.attrs.get("xr_anchor_status", ""))
+        if production and xr_anchor_status not in APPLIED_XR_ANCHOR_STATUSES:
+            errors.append(
+                "xr_anchor_status must indicate an applied XR anchor; "
+                f"found={xr_anchor_status!r}"
+            )
 
         episodes_group = data.get("episodes")
         episode_names = tuple(sorted(episodes_group.keys())) if episodes_group else ()
@@ -189,6 +248,8 @@ def validate_hri_collection(
             "safety/right_ttc_s",
             "human/left_hand_vel_filtered_mps",
             "human/right_hand_vel_filtered_mps",
+            "safety/haptic_pulse_left",
+            "safety/haptic_pulse_right",
         )
         for episode_name in episode_names:
             episode = episodes_group[episode_name]
@@ -287,6 +348,21 @@ def validate_hri_collection(
                 rtf_valid = np.asarray(
                     episode["real_time_factor_valid"][()], dtype=bool
                 )
+                raw_rtf_valid = np.asarray(
+                    episode["real_time_factor_valid"][()]
+                ).reshape(-1)
+                if not np.all(np.isin(raw_rtf_valid, (0, 1, False, True))):
+                    errors.append(
+                        f"{episode_name}: real_time_factor_valid must contain only 0 or 1"
+                    )
+                rtf_valid_fraction = float(rtf_valid.mean()) if rtf_valid.size else 0.0
+                rtf_valid_values.append(rtf_valid.reshape(-1))
+                if production and rtf_valid_fraction < float(min_rtf_valid_fraction):
+                    errors.append(
+                        f"{episode_name}: real_time_factor_valid fraction="
+                        f"{rtf_valid_fraction:.4f}, required >= "
+                        f"{float(min_rtf_valid_fraction):.4f}"
+                    )
                 if np.any(rtf_valid & (rtf <= 0.0)):
                     errors.append(
                         f"{episode_name}: valid real_time_factor must be positive"
@@ -305,12 +381,46 @@ def validate_hri_collection(
                         errors.append(
                             f"{episode_name}: {tracked_name} contains invalid values {values}"
                         )
+            for pulse_name in (
+                "safety/haptic_pulse_left",
+                "safety/haptic_pulse_right",
+            ):
+                if pulse_name not in episode:
+                    continue
+                pulses = np.asarray(episode[pulse_name][()]).reshape(-1)
+                if not np.all(np.isin(pulses, (0, 1, False, True))):
+                    errors.append(
+                        f"{episode_name}: {pulse_name} must contain only 0 or 1"
+                    )
+                if haptics_enabled_value == 0 and np.any(pulses != 0):
+                    errors.append(
+                        f"{episode_name}: {pulse_name} is nonzero while haptics are disabled"
+                    )
             for hand_name in ("left_hand", "right_hand"):
                 pose_name = f"human/{hand_name}_pose_valid"
                 if pose_name in episode:
-                    hand_pose_valid_values.append(
-                        np.asarray(episode[pose_name][()], dtype=float).reshape(-1)
+                    pose_valid = np.asarray(
+                        episode[pose_name][()], dtype=float
+                    ).reshape(-1)
+                    if not np.all(np.isfinite(pose_valid)) or not np.all(
+                        np.isin(pose_valid, (0.0, 1.0))
+                    ):
+                        errors.append(
+                            f"{episode_name}: {pose_name} must contain finite 0/1 values"
+                        )
+                        continue
+                    pose_valid_fraction = (
+                        float(pose_valid.mean()) if pose_valid.size else 0.0
                     )
+                    hand_pose_valid_values[hand_name].append(pose_valid)
+                    if production and pose_valid_fraction < float(
+                        min_hand_pose_valid_fraction
+                    ):
+                        errors.append(
+                            f"{episode_name}: {pose_name} valid fraction="
+                            f"{pose_valid_fraction:.4f}, required >= "
+                            f"{float(min_hand_pose_valid_fraction):.4f}"
+                        )
 
         unique_layouts = tuple(sorted(set(layout_ids)))
         if episode_names and len(unique_layouts) != 1:
@@ -338,9 +448,28 @@ def validate_hri_collection(
 
     if errors:
         raise ValueError("HRI collection validation failed:\n- " + "\n- ".join(errors))
-    valid_pose_values = [values for values in hand_pose_valid_values if values.size]
+    valid_pose_values = [
+        values
+        for hand_values in hand_pose_valid_values.values()
+        for values in hand_values
+        if values.size
+    ]
     hand_pose_valid_fraction = (
         float(np.concatenate(valid_pose_values).mean()) if valid_pose_values else 0.0
+    )
+    per_hand_pose_valid_fraction = {
+        hand_name: (
+            float(np.concatenate(values).mean())
+            if any(value.size for value in values)
+            else 0.0
+        )
+        for hand_name, values in hand_pose_valid_values.items()
+    }
+    nonempty_rtf_valid_values = [values for values in rtf_valid_values if values.size]
+    real_time_factor_valid_fraction = (
+        float(np.concatenate(nonempty_rtf_valid_values).mean())
+        if nonempty_rtf_valid_values
+        else 0.0
     )
     valid_rtf_values = [values for values in valid_real_time_factors if values.size]
     median_real_time_factor = (
@@ -354,6 +483,9 @@ def validate_hri_collection(
         layout_id=layout_ids[0] if layout_ids else "",
         speed_profiles=tuple(speed_profiles),
         hand_pose_valid_fraction=hand_pose_valid_fraction,
+        left_hand_pose_valid_fraction=per_hand_pose_valid_fraction["left_hand"],
+        right_hand_pose_valid_fraction=per_hand_pose_valid_fraction["right_hand"],
+        real_time_factor_valid_fraction=real_time_factor_valid_fraction,
         median_real_time_factor=median_real_time_factor,
     )
 
@@ -364,18 +496,33 @@ def main() -> None:
     parser.add_argument("--expected-episodes", type=int, default=3)
     parser.add_argument("--allow-failed-episode", action="store_true")
     parser.add_argument("--non-production", action="store_true")
+    parser.add_argument(
+        "--min-hand-pose-valid-fraction",
+        type=float,
+        default=DEFAULT_MIN_HAND_POSE_VALID_FRACTION,
+    )
+    parser.add_argument(
+        "--min-rtf-valid-fraction",
+        type=float,
+        default=DEFAULT_MIN_RTF_VALID_FRACTION,
+    )
     args = parser.parse_args()
     report = validate_hri_collection(
         args.path,
         expected_episodes=args.expected_episodes,
         require_success=not args.allow_failed_episode,
         production=not args.non_production,
+        min_hand_pose_valid_fraction=args.min_hand_pose_valid_fraction,
+        min_rtf_valid_fraction=args.min_rtf_valid_fraction,
     )
     print(
         "[ValidateHRI] valid "
         f"path={report.path} episodes={report.episode_count} "
         f"layout_id={report.layout_id} speeds={','.join(report.speed_profiles)} "
         f"hand_pose_valid_fraction={report.hand_pose_valid_fraction:.4f} "
+        f"left={report.left_hand_pose_valid_fraction:.4f} "
+        f"right={report.right_hand_pose_valid_fraction:.4f} "
+        f"rtf_valid_fraction={report.real_time_factor_valid_fraction:.4f} "
         f"median_rtf={report.median_real_time_factor:.4f}"
     )
 
