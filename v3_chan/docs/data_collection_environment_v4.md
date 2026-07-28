@@ -30,13 +30,31 @@ distance_gate: clip((0.13 - surface_gap) / (0.13 - 0.05), 0, 1)
 - safety residual용 `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원으로 고정한다.
 - 양손 surface gap, closest link/collider ID, contact, penetration, near, near-miss, gate, haptic pulse, geometry validity를 매 step 저장한다.
 - 양손의 world-frame velocity, exact closest surface point, link linear/angular velocity, 회전 보정 속도, 최종 surface-point velocity, relative velocity, surface-gap rate, closing speed, TTC도 매 step 저장한다.
-- canonical 손/로봇 표면/상대 속도는 `time.monotonic_ns()`를 기준으로 계산한다. simulation-time 버전은 `dynamic_sim/*`에 진단용으로 병렬 저장한다. Unix epoch time은 EEG 및 외부 stream 정렬에만 사용한다. 손 속도와 gap rate에는 `0.1 s` dt 기반 EMA를 적용하고 validity를 단계별로 분리한다.
+- 손·gap·TTC 동적 값은 실제 XR pose 획득 monotonic time을 기준으로 하는 wall-time canonical 값과 simulation-time 진단값(`dynamic_sim/*`)을 분리해 저장한다. link origin 선속도는 두 timebase 각각의 pose finite difference를 사용하고, closest point 회전 성분은 world-frame angular velocity로 보정한다. 손 속도와 gap rate에는 `0.1 s` dt 기반 EMA를 적용한다. TTC cap은 `10 s`이며, tracking/query invalid와 closest collider 변경 frame은 별도 valid flag로 표시한다.
 - 기존 HDF5는 덮어쓰지 않고 session별 새 파일을 생성한다.
-- HDF5 root에는 session/participant/protocol/code version/source-tree hash/Isaac/physics dt/room calibration metadata를 저장한다. production mode에서 participant 또는 code provenance가 placeholder면 실행이 중단된다.
+- HDF5 root에는 session/participant/protocol/git/Isaac/physics dt/room calibration metadata를 저장한다.
 - 각 step에는 simulation time, monotonic time, Unix epoch time을 함께 저장해 이후 EEG marker와 정렬할 수 있게 한다.
 - marker와 sample CSV도 session별 파일로 저장하고 `session_id`, `episode_index`를 포함한다.
-- 한 session의 세 episode 속도 순서는 session마다 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환한다. 세 속도는 동일한 초기 cube layout을 공유하고 session 간에만 layout을 바꾼다. 이동 phase의 controller progress만 각각 `1.0x`, `1.5x`, `2.0x`로 조절하고, grasp/release 및 안정화 phase timing은 동일하게 유지한다.
-- HDF5 root에는 해당 session의 speed schedule과 counterbalance order index를, 각 episode attribute에는 `controller_speed_profile`, 실제 `events_dt`, motion scale, nominal cycle step/time을 저장한다.
+- 한 session의 세 episode는 각각 `slow`, `medium`, `fast` profile을 하나씩 사용한다. session마다 순서를 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환해 order effect를 counterbalance한다.
+- 이동 phase의 controller progress만 `1.0x`, `1.5x`, `2.0x`로 조절하고, grasp/release 및 안정화 phase timing은 동일하게 유지한다. HDF5 root에는 schedule/order index를, 각 episode attribute에는 실제 `events_dt`, motion scale, nominal cycle step/time을 저장한다.
+
+## 본수집 Experiment Metadata
+
+본수집 HDF5 root attribute에는 참가자 가명, 실험 조건, block, protocol/calibration 버전, XR hand/proxy 설정, task 성공 threshold, 햅틱 설정을 저장한다. `haptic_pulse_left/right`는 UDP `sendto()` 성공만 의미하며 Windows bridge 수신이나 장갑의 실제 진동을 확인하지는 않는다.
+
+본수집에서는 다음 값이 비어 있거나 `unspecified`이면 실행을 중단한다.
+
+```text
+HRI_PARTICIPANT_ID
+HRI_PARTICIPANT_SESSION_INDEX
+HRI_PARTICIPANT_HANDEDNESS
+HRI_EXPERIMENT_CONDITION
+HRI_HAPTIC_CONDITION
+HRI_PROTOCOL_VERSION
+HRI_ROOM_CALIBRATION_ID
+```
+
+빠른 개발 테스트만 `HRI_COLLECTION_TEST_MODE=1`로 이 검증을 건너뛸 수 있다. 본수집에서는 HDF5의 `haptics_intensity`, `haptics_min_interval_s`, `haptics_contact_min_steps`, `haptics_pulse_flag_semantics`를 함께 확인한다.
 
 ## 이전 데이터 보관
 
@@ -53,13 +71,14 @@ v3_chan/archive/pre_builtin_physx_20260721/logs/
 
 ```bash
 cd /home/railab/Desktop/Isaac_HRC
+HRI_PARTICIPANT_ID=P01 \
+HRI_PARTICIPANT_SESSION_INDEX=1 \
+HRI_PARTICIPANT_HANDEDNESS=right \
+HRI_EXPERIMENT_CONDITION=haptic_on_contact_multispeed_v1 \
+HRI_HAPTIC_CONDITION=on \
+HRI_PROTOCOL_VERSION=errp_hri_collection_multispeed_v1 \
+HRI_ROOM_CALIBRATION_ID=vr_room_to_isaac_world_v1 \
 bash v3_chan/run_pick_place.sh
 ```
 
-한 번 실행하면 최대 3 episode를 수집하고 session별 HDF5와 로그를 새로 저장한다. 정상 수집 실행마다 speed order counter가 자동으로 진행하며 테스트 모드는 counter를 변경하지 않는다. 특정 순서를 재현할 때는 `HRI_SPEED_ORDER_INDEX=0`, `1`, `2`를 지정한다.
-
-수집 후 학습 데이터로 이동하기 전에 다음 validator로 v8 schema, provenance, 세 speed, 공통 layout, row alignment를 확인한다.
-
-```bash
-python v3_chan/validate_hri_collection.py v3_chan/trajectories/<session>.hdf5
-```
+한 번 실행하면 최대 3 episode를 수집하고 session별 HDF5와 로그를 새로 저장한다. 정상 완료 뒤 `validate_hri_collection.py`가 schema, metadata, timestamp, layout, speed-condition을 검사하며, 이 validator가 통과한 경우에만 speed order counter가 다음 순서로 진행한다. 테스트 모드는 counter를 바꾸지 않으며, 특정 순서를 재현할 때는 `HRI_SPEED_ORDER_INDEX=0`, `1`, `2`를 지정한다.

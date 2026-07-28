@@ -111,6 +111,8 @@ if _xr_enabled:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app_config import (
+    BHAPTICS_INTENSITY,
+    BHAPTICS_MIN_INTERVAL_S,
     BHAPTICS_NOTEBOOK_IP,
     BHAPTICS_UDP_PORT,
     ENABLE_GRIPPER_CAMERA,
@@ -124,7 +126,15 @@ from app_config import (
     GRIPPER_CAMERA_RECORD_RESOLUTION,
     HAND_TRACKING_UDP_HOST,
     HAND_TRACKING_UDP_PORT,
+    HAPTICS_CONTACT_MIN_STEPS,
+    HRI_COLLECTION_LABEL,
+    HRI_EXPERIMENT_BLOCK_ID,
+    HRI_EXPERIMENT_CONDITION,
+    HRI_HAPTIC_CONDITION,
     HRI_PARTICIPANT_ID,
+    HRI_PARTICIPANT_HANDEDNESS,
+    HRI_PARTICIPANT_SESSION_INDEX,
+    HRI_IS_PRACTICE,
     HRI_PRODUCTION_MODE,
     HRI_PROTOCOL_VERSION,
     HRI_ROOM_CALIBRATION_ID,
@@ -144,6 +154,10 @@ from app_config import (
     PICK_PLACE_SUCCESS_Z_TOLERANCE_M,
     SAMPLE_LOG_INTERVAL_STEPS,
     SESSION_SAMPLES_PATH,
+)
+from experiment_metadata import (
+    build_experiment_metadata,
+    validate_experiment_metadata,
 )
 from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
@@ -173,6 +187,53 @@ from vr_avatar import (
 )
 from collection_provenance import validate_production_metadata
 from scene_randomization import episode_rng, episode_seed, scene_layout_id
+
+
+_ACTIVE_RUNTIME_RESOURCES: dict[str, object] = {}
+
+
+def _register_runtime_resource(name: str, resource) -> None:
+    if resource is not None:
+        _ACTIVE_RUNTIME_RESOURCES[name] = resource
+
+
+def _cleanup_runtime_resources(reason: str) -> None:
+    """Close live I/O resources even when the Isaac loop raises unexpectedly."""
+
+    resources = dict(_ACTIVE_RUNTIME_RESOURCES)
+    _ACTIVE_RUNTIME_RESOURCES.clear()
+    recorder = resources.pop("hri_recorder", None)
+    if recorder is not None:
+        saved_path = None
+        try:
+            if recorder.is_open:
+                saved_path = recorder.end_episode(
+                    success=False,
+                    metadata={
+                        "reason": reason,
+                        "aborted": True,
+                        "interrupted": reason == "interrupted",
+                    },
+                )
+        except Exception as exc:
+            print(f"[HRI] failed to flush partial episode: {exc}", flush=True)
+        try:
+            recorder.close()
+        except Exception as exc:
+            print(f"[HRI] failed to close recorder: {exc}", flush=True)
+        if saved_path:
+            print(
+                f"[HRI] saved partial episode {saved_path} (reason={reason})",
+                flush=True,
+            )
+    for name in ("hand_tracking", "haptics", "gripper_camera"):
+        resource = resources.get(name)
+        if resource is None:
+            continue
+        try:
+            resource.close()
+        except Exception as exc:
+            print(f"[Main] failed to close {name}: {exc}", flush=True)
 
 
 def _git_collection_metadata() -> dict[str, str | int]:
@@ -213,7 +274,33 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
     except Exception:
         rendering_dt = float("nan")
     return {
+        **build_experiment_metadata(
+            environment=os.environ,
+            participant_id=HRI_PARTICIPANT_ID,
+            participant_session_index=HRI_PARTICIPANT_SESSION_INDEX,
+            participant_handedness=HRI_PARTICIPANT_HANDEDNESS,
+            is_practice=HRI_IS_PRACTICE,
+            experiment_condition=HRI_EXPERIMENT_CONDITION,
+            experiment_block_id=HRI_EXPERIMENT_BLOCK_ID,
+            haptic_condition=HRI_HAPTIC_CONDITION,
+            protocol_version=HRI_PROTOCOL_VERSION,
+            room_calibration_id=HRI_ROOM_CALIBRATION_ID,
+            xr_mode=_xr_mode,
+            xr_backend=_xr_backend,
+            haptics_intensity=BHAPTICS_INTENSITY,
+            haptics_min_interval_s=BHAPTICS_MIN_INTERVAL_S,
+            haptics_contact_min_steps=HAPTICS_CONTACT_MIN_STEPS,
+            haptics_udp_port=BHAPTICS_UDP_PORT,
+            haptics_udp_configured=bool(BHAPTICS_NOTEBOOK_IP),
+            collection_max_episodes=HRI_TRAJECTORY_MAX_EPISODES,
+            sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
+            task_success_xy_tolerance_m=PICK_PLACE_SUCCESS_XY_TOLERANCE_M,
+            task_success_z_tolerance_m=PICK_PLACE_SUCCESS_Z_TOLERANCE_M,
+            task_success_max_speed_mps=PICK_PLACE_SUCCESS_MAX_SPEED_MPS,
+            task_success_min_lift_m=PICK_PLACE_SUCCESS_MIN_LIFT_M,
+        ),
         "session_id": HRI_SESSION_ID,
+        "collection_label": HRI_COLLECTION_LABEL,
         "session_seed": int(HRI_SESSION_SEED),
         "participant_id": HRI_PARTICIPANT_ID,
         "production_mode": int(HRI_PRODUCTION_MODE),
@@ -239,6 +326,7 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
         "external_hand_tracking": int(
             _env_bool("XR_EXTERNAL_HAND_TRACKING", False)
         ),
+        "xr_anchor_status": "pending" if _xr_enabled else "xr_disabled",
         **_git_collection_metadata(),
     }
 
@@ -478,9 +566,6 @@ DEBUG_HAPTICS_COLLISION = os.environ.get("DEBUG_HAPTICS_COLLISION", "0").lower()
     "yes",
     "on",
 )
-HAPTICS_CONTACT_MIN_STEPS = max(1, int(os.environ.get("HAPTICS_CONTACT_MIN_STEPS", "1")))
-
-
 def _gripper_center_from_fingers(robot) -> "np.ndarray | None":
     try:
         left_pos, _ = robot.gripper._left_finger.get_world_pose()
@@ -643,9 +728,20 @@ def main():
         participant_id=HRI_PARTICIPANT_ID,
         code_version=HRI_CODE_VERSION,
     )
+    validate_experiment_metadata(
+        production_mode=HRI_PRODUCTION_MODE,
+        participant_id=HRI_PARTICIPANT_ID,
+        participant_session_index=HRI_PARTICIPANT_SESSION_INDEX,
+        participant_handedness=HRI_PARTICIPANT_HANDEDNESS,
+        experiment_condition=HRI_EXPERIMENT_CONDITION,
+        haptic_condition=HRI_HAPTIC_CONDITION,
+        protocol_version=HRI_PROTOCOL_VERSION,
+        room_calibration_id=HRI_ROOM_CALIBRATION_ID,
+    )
     print(
         "[HRI] provenance "
-        f"participant={HRI_PARTICIPANT_ID} production={int(HRI_PRODUCTION_MODE)} "
+        f"participant={HRI_PARTICIPANT_ID} session={HRI_PARTICIPANT_SESSION_INDEX} "
+        f"production={int(HRI_PRODUCTION_MODE)} "
         f"session_seed={HRI_SESSION_SEED} code_version={HRI_CODE_VERSION}",
         flush=True,
     )
@@ -793,12 +889,15 @@ def main():
         record_interval_steps=GRIPPER_CAMERA_RECORD_INTERVAL_STEPS,
     )
     gripper_camera.setup()
+    _register_runtime_resource("gripper_camera", gripper_camera)
 
     # 9. VR 그랩 매니저 (avatar 전달 → XRCore 재사용)
     grab_manager = VRGrabManager(cubes, avatar=avatar) if _xr_enabled else None
 
     # 10. 시뮬레이션 루프
     xr_anchor_done = False   # xrAnchor 1회 이동 완료 플래그
+    xr_anchor_applied = False
+    xr_anchor_method = "pending" if _xr_enabled else "xr_disabled"
     step = 0
     task_done = False
     current_pick_idx = 0
@@ -823,9 +922,11 @@ def main():
     haptics = HapticsUdpClient(
         BHAPTICS_NOTEBOOK_IP,
         BHAPTICS_UDP_PORT,
-        min_interval=float(os.environ.get("BHAPTICS_MIN_INTERVAL", "0.08")),
+        min_interval=BHAPTICS_MIN_INTERVAL_S,
     )
+    _register_runtime_resource("haptics", haptics)
     hand_tracking = HandTrackingReceiver(HAND_TRACKING_UDP_HOST, HAND_TRACKING_UDP_PORT)
+    _register_runtime_resource("hand_tracking", hand_tracking)
 
     def _episode_metadata(reason: str) -> dict[str, object]:
         return {
@@ -840,6 +941,7 @@ def main():
             "layout_id": session_layout_id,
             "layout_seed": int(session_layout_seed),
             "layout_shared_across_speed_conditions": True,
+            "xr_anchor_status_at_episode_start": xr_anchor_method,
             **speed_profile_metadata(
                 current_speed_profile, physics_dt_s=physics_dt_s
             ),
@@ -863,6 +965,7 @@ def main():
                 sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
                 file_metadata=collection_file_metadata,
             )
+            _register_runtime_resource("hri_recorder", hri_recorder)
             if (
                 HRI_TRAJECTORY_MAX_EPISODES > 0
                 and hri_recorder.num_episodes >= HRI_TRAJECTORY_MAX_EPISODES
@@ -881,6 +984,7 @@ def main():
                     sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
                     file_metadata=collection_file_metadata,
                 )
+                _register_runtime_resource("hri_recorder", hri_recorder)
             collection_episode_index = int(hri_recorder.num_episodes)
             current_speed_profile = speed_profile_for_episode(
                 collection_episode_index, session_speed_profile_order
@@ -1003,9 +1107,24 @@ def main():
                     camera_ok = False
                     if XR_CAMERA_TELEPORT:
                         camera_ok = _schedule_xr_camera_view(AVATAR_EYE_POS, viewport_target)
-                    if camera_ok or _set_xr_anchor_once(p_hmd0):
+                    if camera_ok:
+                        xr_anchor_applied = True
+                        xr_anchor_method = "xr_camera_teleport"
+                    elif _set_xr_anchor_once(p_hmd0):
+                        xr_anchor_applied = True
+                        xr_anchor_method = "xr_anchor"
+                    else:
+                        xr_anchor_method = "failed"
+                    if xr_anchor_applied:
                         avatar.notify_anchor_applied()
                     xr_anchor_done = True  # 성공 여부와 무관하게 재시도 금지
+                    if hri_recorder is not None:
+                        hri_recorder.update_file_metadata(
+                            {
+                                "xr_anchor_applied": int(xr_anchor_applied),
+                                "xr_anchor_status": xr_anchor_method,
+                            }
+                        )
 
             # ── VR 아바타 갱신 (머리·손 프림 위치 + 팔 DebugDraw) ──────────
             if avatar is not None:
@@ -1160,7 +1279,7 @@ def main():
                     )
                 if haptic_active:
                     haptic_pulse_by_hand[hand] = haptics.pulse(
-                        100,
+                        BHAPTICS_INTENSITY,
                         hand=hand,
                         event="panda_distal_surface_contact",
                     )
@@ -1453,6 +1572,8 @@ def main():
                                     "picks": len(pick_targets),
                                     "failed_attempts": failed_attempts,
                                     "total_attempts": attempt_index - 1,
+                                    "xr_anchor_applied": int(xr_anchor_applied),
+                                    "xr_anchor_status": xr_anchor_method,
                                     **speed_profile_metadata(
                                         current_speed_profile,
                                         physics_dt_s=physics_dt_s,
@@ -1562,27 +1683,7 @@ def main():
             logger.check_collision_green(pick_targets, green_cubes)
             logger.check_stack_failure(pick_targets)
 
-    hand_tracking.close()
-    haptics.close()
-    gripper_camera.close()
-    if hri_recorder is not None:
-        saved_path = None
-        if hri_recorder.is_open:
-            saved_path = hri_recorder.end_episode(
-                success=False,
-                metadata={
-                    "reason": shutdown_reason,
-                    "aborted": True,
-                    "interrupted": shutdown_reason == "interrupted",
-                },
-            )
-        hri_recorder.close()
-        if saved_path:
-            print(
-                f"[HRI] saved partial episode {saved_path} "
-                f"(reason={shutdown_reason})",
-                flush=True,
-            )
+    _cleanup_runtime_resources(shutdown_reason)
     print(
         "[SafetyGeometry] session mean PhysX query time="
         f"{safety_geometry.mean_query_time_ms:.4f} ms",
@@ -1590,8 +1691,14 @@ def main():
     )
     signal.signal(signal.SIGINT, previous_sigint_handler)
     signal.signal(signal.SIGTERM, previous_sigterm_handler)
-    simulation_app.close()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        _cleanup_runtime_resources("unhandled_exception")
+        try:
+            simulation_app.close()
+        except Exception:
+            pass

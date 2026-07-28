@@ -10,6 +10,26 @@ try:
 except ImportError:
     from collection_provenance import resolve_code_version
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, str(int(default))).strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(BASE_DIR)
 HRI_PRODUCTION_MODE = os.environ.get("HRI_PRODUCTION_MODE", "0").lower() in (
@@ -28,10 +48,27 @@ HRI_SESSION_SEED = resolve_session_seed(os.environ.get("HRI_SESSION_SEED"))
     HRI_SOURCE_TREE_SHA256,
 ) = resolve_code_version(PROJECT_DIR, os.environ.get("HRI_CODE_VERSION"))
 HRI_PARTICIPANT_ID = os.environ.get("HRI_PARTICIPANT_ID", "unspecified").strip()
+HRI_PARTICIPANT_SESSION_INDEX = _env_int("HRI_PARTICIPANT_SESSION_INDEX", -1)
+HRI_PARTICIPANT_HANDEDNESS = os.environ.get(
+    "HRI_PARTICIPANT_HANDEDNESS", "unspecified"
+).strip()
+HRI_IS_PRACTICE = _env_bool("HRI_IS_PRACTICE", False)
+HRI_EXPERIMENT_CONDITION = os.environ.get(
+    "HRI_EXPERIMENT_CONDITION", "unspecified"
+).strip()
+HRI_EXPERIMENT_BLOCK_ID = os.environ.get(
+    "HRI_EXPERIMENT_BLOCK_ID", "all_sessions"
+).strip()
+HRI_HAPTIC_CONDITION = os.environ.get(
+    "HRI_HAPTIC_CONDITION", "unspecified"
+).strip()
+HRI_COLLECTION_LABEL = os.environ.get(
+    "HRI_COLLECTION_LABEL", "surface_twist_v8_dualclock_tracked_v1"
+).strip()
 HRI_PROTOCOL_VERSION = os.environ.get(
     "HRI_PROTOCOL_VERSION", "surface_gap_dynamic_multispeed_dualclock_v4"
 ).strip()
-HRI_SPEED_ORDER_INDEX = int(os.environ.get("HRI_SPEED_ORDER_INDEX", "0"))
+HRI_SPEED_ORDER_INDEX = max(0, _env_int("HRI_SPEED_ORDER_INDEX", 0))
 HRI_SPEED_PROFILE_ORDER = os.environ.get(
     "HRI_SPEED_PROFILE_ORDER", "slow,medium,fast"
 ).strip()
@@ -159,7 +196,10 @@ HRI_VIDEO_TARGET = os.environ.get("HRI_VIDEO_TARGET", "0.45,0.0,1.05")
 HRI_VIDEO_MP4_PATH = os.environ.get("HRI_VIDEO_MP4_PATH", "").strip()
 
 BHAPTICS_NOTEBOOK_IP = os.environ.get("BHAPTICS_NOTEBOOK_IP", "").strip()
-BHAPTICS_UDP_PORT = int(os.environ.get("BHAPTICS_UDP_PORT", "5005"))
+BHAPTICS_UDP_PORT = _env_int("BHAPTICS_UDP_PORT", 5005)
+BHAPTICS_INTENSITY = max(0, min(100, _env_int("BHAPTICS_INTENSITY", 100)))
+BHAPTICS_MIN_INTERVAL_S = max(0.0, _env_float("BHAPTICS_MIN_INTERVAL", 0.08))
+HAPTICS_CONTACT_MIN_STEPS = max(1, _env_int("HAPTICS_CONTACT_MIN_STEPS", 1))
 
 HAND_TRACKING_UDP_HOST = os.environ.get("HAND_TRACKING_UDP_HOST", "0.0.0.0")
-HAND_TRACKING_UDP_PORT = int(os.environ.get("HAND_TRACKING_UDP_PORT", "5555"))
+HAND_TRACKING_UDP_PORT = _env_int("HAND_TRACKING_UDP_PORT", 5555)

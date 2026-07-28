@@ -45,7 +45,7 @@
 | `min_hand_gripper_dist_m` | 양손 중 gripper와 더 가까운 거리 |
 | `human_robot_collision` | 손 sphere와 distal Panda built-in collider의 overlap 기준 충돌 flag |
 
-## 3. `v3_chan/trajectories/hri_vr_sphere_obs.hdf5`
+## 3. `v3_chan/trajectories/hri_vr_sphere_surface_twist_v8_dualclock_tracked_v1_<session_id>.hdf5`
 
 이 파일은 학습에 사용할 수 있는 HDF5 episode dataset이다. 기존 전체 observation인 `obs_policy`와, HRI cognitive safety 연구용 핵심 observation인 `hri_obs_policy`를 함께 저장한다.
 
@@ -64,6 +64,17 @@
 | `controller_speed_counterbalance_order_index` | counterbalance 순서 번호. `0`, `1`, `2` |
 | `controller_speed_counterbalance_orders_json` | 전체 counterbalance 순서 정의 |
 | `controller_speed_profiles_json` | profile별 motion scale, 실제 `events_dt`, nominal cycle 길이 |
+| `participant_id` | 참가자 가명. 현재 본수집은 `P01` |
+| `participant_session_index` | 해당 참가자의 수집 세션 번호 |
+| `participant_handedness` | self-reported handedness |
+| `is_practice` | practice session 여부 (`0/1`) |
+| `experiment_condition` | 실험 조건 이름 |
+| `haptic_experiment_condition` | 햅틱 조건 이름 |
+| `haptics_intensity` | UDP bridge로 전송한 햅틱 강도 (`0..100`) |
+| `haptics_min_interval_s` | 같은 장갑에 허용하는 최소 pulse 간격 |
+| `haptics_contact_min_steps` | pulse 전 필요한 연속 contact step 수 |
+| `xr_anchor_status` | XR camera/anchor 적용 결과 또는 실패 상태 |
+| `source_tree_sha256` | Git checkout 유무와 독립적인 실행 source tree hash |
 
 ### Episode-Level Datasets
 

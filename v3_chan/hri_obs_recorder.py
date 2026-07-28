@@ -640,6 +640,22 @@ class HRIObsRecorder:
         else:
             self._flush_npz()
 
+    def update_file_metadata(self, metadata: Mapping) -> None:
+        """Persist metadata discovered after recorder construction.
+
+        XR anchor success is known only after the first valid HMD pose, so it
+        cannot be part of the constructor metadata. This method deliberately
+        updates root-level provenance without changing any episode buffers.
+        """
+
+        for key, value in dict(metadata or {}).items():
+            if self._use_hdf5:
+                self._file.attrs[str(key)] = value
+            else:
+                self._npz_payload[f"attrs/{key}"] = np.asarray(value)
+        if self._use_hdf5:
+            self._file.flush()
+
     def _write_dataset(self, group, name: str, values) -> None:
         arr = np.asarray(values)
         if arr.dtype.kind in ("U", "O"):

@@ -21,10 +21,18 @@ ROW_DATASETS = (
     "human/right_hand_pose_source_id",
     "human/left_hand_position_tracked",
     "human/right_hand_position_tracked",
+    "human/left_hand_pose_valid",
+    "human/right_hand_pose_valid",
+    "human/left_hand_pos",
+    "human/right_hand_pos",
+    "human/left_hand_vel_filtered_mps",
+    "human/right_hand_vel_filtered_mps",
     "actions/previous_applied_joint_positions",
     "actions/next_commanded_joint_positions",
     "dynamic_sim/left_ttc_s",
     "dynamic_sim/right_ttc_s",
+    "safety/left_ttc_s",
+    "safety/right_ttc_s",
 )
 
 
@@ -32,6 +40,24 @@ def _create_valid_file(path):
     with h5py.File(path, "w") as data:
         data.attrs["schema_version"] = HRIObsRecorder.SCHEMA_VERSION
         data.attrs["participant_id"] = "P01"
+        data.attrs["participant_id_kind"] = "pseudonym"
+        data.attrs["participant_session_index"] = 1
+        data.attrs["participant_handedness"] = "right"
+        data.attrs["is_practice"] = 0
+        data.attrs["experiment_metadata_schema_version"] = "hri_experiment_metadata_v2"
+        data.attrs["experiment_condition"] = "pilot"
+        data.attrs["haptic_experiment_condition"] = "contact_haptic_on"
+        data.attrs["collection_protocol_version"] = "surface_gap_dynamic_multispeed_dualclock_v4"
+        data.attrs["room_calibration_id"] = "vr_room_to_isaac_world_v1"
+        data.attrs["collection_label"] = "surface_twist_v8_dualclock_tracked_v1"
+        data.attrs["haptics_transport"] = "udp"
+        data.attrs["haptics_intensity"] = 100
+        data.attrs["haptics_min_interval_s"] = 0.08
+        data.attrs["haptics_contact_min_steps"] = 1
+        data.attrs["haptics_pulse_flag_semantics"] = "udp_sendto_success_only"
+        data.attrs["xr_hand_sphere_enabled"] = 1
+        data.attrs["xr_anchor_status"] = "xr_anchor"
+        data.attrs["session_seed"] = 42
         data.attrs["code_version"] = "source-sha256:test"
         data.attrs["source_tree_sha256"] = "a" * 64
         episodes = data.create_group("episodes")
@@ -55,9 +81,16 @@ def _create_valid_file(path):
                     parent = parent.require_group(part)
                 if name.endswith("position_tracked"):
                     payload = np.full(2, -1, dtype=np.int8)
+                elif name.endswith("pose_valid"):
+                    payload = np.ones(2, dtype=np.float32)
+                elif name.endswith(("hand_pos", "filtered_mps")):
+                    payload = np.zeros((2, 3), dtype=np.float32)
                 else:
-                    width = 9 if "joint_positions" in name else 1
-                    payload = np.zeros((2, width))
+                    payload = (
+                        np.zeros((2, 9))
+                        if "joint_positions" in name
+                        else np.zeros(2)
+                    )
                 parent.create_dataset(parts[-1], data=payload)
             episode["human"].create_dataset(
                 "head_position_tracked", data=np.full(2, -1, dtype=np.int8)
@@ -100,4 +133,13 @@ def test_collection_validator_rejects_unknown_code_version(tmp_path):
     with h5py.File(path, "a") as data:
         data.attrs["code_version"] = "unknown"
     with pytest.raises(ValueError, match="CODE_VERSION"):
+        validate_hri_collection(str(path))
+
+
+def test_collection_validator_rejects_timestamp_inversion(tmp_path):
+    path = tmp_path / "time_inversion.hdf5"
+    _create_valid_file(path)
+    with h5py.File(path, "a") as data:
+        data["episodes/episode_000000/monotonic_time_ns"][:] = [2, 1]
+    with pytest.raises(ValueError, match="monotonic_time_ns is not monotonic"):
         validate_hri_collection(str(path))
