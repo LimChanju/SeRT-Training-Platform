@@ -136,8 +136,8 @@ class DynamicSafetyConfig:
 
     def metadata(self) -> dict[str, object]:
         return {
-            "dynamic_safety_schema_version": "dynamic_safety_v2_surface_point_twist",
-            "dynamic_time_source": "simulation_time",
+            "dynamic_safety_schema_version": "dynamic_safety_v3_dual_clock_validity_split",
+            "dynamic_time_source": "wall_monotonic_time_canonical_with_simulation_time_secondary",
             "dynamic_hand_velocity_filter": "dt_based_ema",
             "dynamic_gap_rate_filter": "dt_based_ema",
             "dynamic_ema_time_constant_s": float(self.ema_time_constant_s),
@@ -156,6 +156,11 @@ class DynamicSafetyConfig:
             "dynamic_surface_point_inside_collider_behavior": "invalid",
             "dynamic_collider_switch_reset_scope": "gap_rate_and_robot_link_pose_only",
             "dynamic_hand_velocity_preserved_across_collider_switch": True,
+            "dynamic_valid_semantics": "deprecated_alias_of_ttc_valid",
+            "dynamic_validity_fields": (
+                "tracking,gap_measurement,gap_rate,robot_surface_velocity,"
+                "relative_velocity,closing_speed,ttc,dynamic_measurement"
+            ),
         }
 
 
@@ -175,8 +180,16 @@ class HandDynamicSample:
     surface_gap_rate_filtered_mps: float
     closing_speed_mps: float
     ttc_s: float
+    tracking_valid: bool
+    gap_measurement_valid: bool
+    gap_rate_valid: bool
+    relative_velocity_valid: bool
+    closing_speed_valid: bool
+    ttc_valid: bool
+    dynamic_measurement_valid: bool
     dynamic_valid: bool
     closest_collider_switched: bool
+    pose_source_switched: bool
 
 
 @dataclass(frozen=True)
@@ -185,6 +198,8 @@ class DynamicSafetySample:
     right: HandDynamicSample
     min_ttc_s: float
     max_closing_speed_mps: float
+    dynamic_measurement_valid: bool
+    ttc_valid: bool
     dynamic_valid: bool
 
     def human_payload(self) -> dict[str, object]:
@@ -227,8 +242,28 @@ class DynamicSafetySample:
             "right_ttc_s": self.right.ttc_s,
             "left_dynamic_valid": float(self.left.dynamic_valid),
             "right_dynamic_valid": float(self.right.dynamic_valid),
+            "left_tracking_valid": float(self.left.tracking_valid),
+            "right_tracking_valid": float(self.right.tracking_valid),
+            "left_gap_measurement_valid": float(self.left.gap_measurement_valid),
+            "right_gap_measurement_valid": float(self.right.gap_measurement_valid),
+            "left_gap_rate_valid": float(self.left.gap_rate_valid),
+            "right_gap_rate_valid": float(self.right.gap_rate_valid),
+            "left_relative_velocity_valid": float(self.left.relative_velocity_valid),
+            "right_relative_velocity_valid": float(self.right.relative_velocity_valid),
+            "left_closing_speed_valid": float(self.left.closing_speed_valid),
+            "right_closing_speed_valid": float(self.right.closing_speed_valid),
+            "left_ttc_valid": float(self.left.ttc_valid),
+            "right_ttc_valid": float(self.right.ttc_valid),
+            "left_dynamic_measurement_valid": float(
+                self.left.dynamic_measurement_valid
+            ),
+            "right_dynamic_measurement_valid": float(
+                self.right.dynamic_measurement_valid
+            ),
             "min_ttc_s": self.min_ttc_s,
             "max_closing_speed_mps": self.max_closing_speed_mps,
+            "dynamic_measurement_valid": float(self.dynamic_measurement_valid),
+            "ttc_valid": float(self.ttc_valid),
             "dynamic_valid": float(self.dynamic_valid),
             "closest_collider_switched_left": float(
                 self.left.closest_collider_switched
@@ -236,6 +271,8 @@ class DynamicSafetySample:
             "closest_collider_switched_right": float(
                 self.right.closest_collider_switched
             ),
+            "pose_source_switched_left": float(self.left.pose_source_switched),
+            "pose_source_switched_right": float(self.right.pose_source_switched),
         }
 
 
@@ -267,12 +304,15 @@ class _HandDynamicEstimator:
         closest_robot_orientation_wxyz,
         closest_surface_point_world_pos,
         closest_robot_angular_velocity_world_radps,
+        pose_source_switched: bool = False,
     ) -> HandDynamicSample:
         pos = _vec3_or_none(hand_pos)
         sim_time_s = float(sim_time_s)
+        if pose_source_switched:
+            self.reset()
         if not bool(tracking_valid) or pos is None or not math.isfinite(sim_time_s):
             self.reset()
-            return self._empty_sample()
+            return self._empty_sample(pose_source_switched=pose_source_switched)
 
         gap_valid = self._gap_is_valid(
             surface_gap_m, geometry_valid, closest_collider_id
@@ -296,6 +336,9 @@ class _HandDynamicEstimator:
             return self._empty_sample(
                 gap_m=surface_gap_m if gap_valid else None,
                 closest_surface_point=surface_point,
+                tracking_valid=True,
+                gap_measurement_valid=gap_valid,
+                pose_source_switched=pose_source_switched,
             )
 
         dt_s = sim_time_s - self._previous_time_s
@@ -313,6 +356,9 @@ class _HandDynamicEstimator:
             return self._empty_sample(
                 gap_m=surface_gap_m if gap_valid else None,
                 closest_surface_point=surface_point,
+                tracking_valid=True,
+                gap_measurement_valid=gap_valid,
+                pose_source_switched=pose_source_switched,
             )
 
         raw_hand_velocity = (pos - self._previous_hand_pos) / dt_s
@@ -329,6 +375,7 @@ class _HandDynamicEstimator:
                 raw_hand_velocity=raw_hand_velocity,
                 filtered_hand_velocity=filtered_hand_velocity,
                 hand_velocity_valid=True,
+                tracking_valid=True,
             )
 
         gap_m = float(surface_gap_m)
@@ -346,6 +393,8 @@ class _HandDynamicEstimator:
                 hand_velocity_valid=True,
                 gap_m=gap_m,
                 closest_surface_point=surface_point,
+                tracking_valid=True,
+                gap_measurement_valid=True,
                 closest_collider_switched=True,
             )
 
@@ -359,6 +408,8 @@ class _HandDynamicEstimator:
                 hand_velocity_valid=True,
                 gap_m=gap_m,
                 closest_surface_point=surface_point,
+                tracking_valid=True,
+                gap_measurement_valid=True,
             )
 
         raw_gap_rate = (gap_m - self._previous_gap_m) / dt_s
@@ -416,13 +467,22 @@ class _HandDynamicEstimator:
                 np.float32
             )
 
-        dynamic_valid = bool(
-            robot_velocity_valid
-            and closing_speed >= self.config.min_valid_closing_speed_mps
+        gap_rate_valid = True
+        relative_velocity_valid = bool(robot_velocity_valid)
+        closing_speed_valid = gap_rate_valid
+        dynamic_measurement_valid = bool(
+            gap_rate_valid and robot_velocity_valid and relative_velocity_valid
+        )
+        ttc_valid = bool(
+            gap_m <= 0.0
+            or (
+                closing_speed_valid
+                and closing_speed >= self.config.min_valid_closing_speed_mps
+            )
         )
         if gap_m <= 0.0:
             ttc_s = 0.0
-        elif dynamic_valid:
+        elif ttc_valid:
             ttc_s = min(self.config.ttc_cap_s, gap_m / closing_speed)
         else:
             ttc_s = self.config.ttc_cap_s
@@ -446,8 +506,16 @@ class _HandDynamicEstimator:
             surface_gap_rate_filtered_mps=float(filtered_gap_rate),
             closing_speed_mps=float(closing_speed),
             ttc_s=float(ttc_s),
-            dynamic_valid=dynamic_valid,
+            tracking_valid=True,
+            gap_measurement_valid=True,
+            gap_rate_valid=gap_rate_valid,
+            relative_velocity_valid=relative_velocity_valid,
+            closing_speed_valid=closing_speed_valid,
+            ttc_valid=ttc_valid,
+            dynamic_measurement_valid=dynamic_measurement_valid,
+            dynamic_valid=ttc_valid,
             closest_collider_switched=False,
+            pose_source_switched=bool(pose_source_switched),
         )
 
     def _seed(
@@ -527,7 +595,10 @@ class _HandDynamicEstimator:
         hand_velocity_valid: bool = False,
         gap_m: float | None = None,
         closest_surface_point: np.ndarray | None = None,
+        tracking_valid: bool = False,
+        gap_measurement_valid: bool = False,
         closest_collider_switched: bool = False,
+        pose_source_switched: bool = False,
     ) -> HandDynamicSample:
         zeros = np.zeros(3, dtype=np.float32)
         raw = (
@@ -542,6 +613,9 @@ class _HandDynamicEstimator:
         )
         ttc_s = (
             0.0 if gap_m is not None and float(gap_m) <= 0.0 else self.config.ttc_cap_s
+        )
+        ttc_valid = bool(
+            gap_measurement_valid and gap_m is not None and float(gap_m) <= 0.0
         )
         return HandDynamicSample(
             hand_velocity_raw_mps=raw,
@@ -562,8 +636,16 @@ class _HandDynamicEstimator:
             surface_gap_rate_filtered_mps=0.0,
             closing_speed_mps=0.0,
             ttc_s=float(ttc_s),
-            dynamic_valid=False,
+            tracking_valid=bool(tracking_valid),
+            gap_measurement_valid=bool(gap_measurement_valid),
+            gap_rate_valid=False,
+            relative_velocity_valid=False,
+            closing_speed_valid=False,
+            ttc_valid=ttc_valid,
+            dynamic_measurement_valid=False,
+            dynamic_valid=ttc_valid,
             closest_collider_switched=bool(closest_collider_switched),
+            pose_source_switched=bool(pose_source_switched),
         )
 
 
@@ -578,6 +660,14 @@ class DynamicSafetyEstimator:
     def reset(self) -> None:
         self._left.reset()
         self._right.reset()
+
+    def reset_hand(self, hand: str) -> None:
+        if hand == "left":
+            self._left.reset()
+        elif hand == "right":
+            self._right.reset()
+        else:
+            raise ValueError(f"Unknown hand: {hand}")
 
     def metadata(self) -> dict[str, object]:
         return self.config.metadata()
@@ -604,6 +694,8 @@ class DynamicSafetyEstimator:
         right_closest_surface_point_world_pos=None,
         left_closest_robot_angular_velocity_world_radps=None,
         right_closest_robot_angular_velocity_world_radps=None,
+        left_pose_source_switched: bool = False,
+        right_pose_source_switched: bool = False,
     ) -> DynamicSafetySample:
         left = self._left.update(
             sim_time_s=sim_time_s,
@@ -618,6 +710,7 @@ class DynamicSafetyEstimator:
             closest_robot_angular_velocity_world_radps=(
                 left_closest_robot_angular_velocity_world_radps
             ),
+            pose_source_switched=left_pose_source_switched,
         )
         right = self._right.update(
             sim_time_s=sim_time_s,
@@ -632,13 +725,97 @@ class DynamicSafetyEstimator:
             closest_robot_angular_velocity_world_radps=(
                 right_closest_robot_angular_velocity_world_radps
             ),
+            pose_source_switched=right_pose_source_switched,
         )
+        ttc_values = [sample.ttc_s for sample in (left, right) if sample.ttc_valid]
         return DynamicSafetySample(
             left=left,
             right=right,
-            min_ttc_s=float(min(left.ttc_s, right.ttc_s)),
+            min_ttc_s=float(min(ttc_values) if ttc_values else self.config.ttc_cap_s),
             max_closing_speed_mps=float(
                 max(left.closing_speed_mps, right.closing_speed_mps)
             ),
-            dynamic_valid=bool(left.dynamic_valid or right.dynamic_valid),
+            dynamic_measurement_valid=bool(
+                left.dynamic_measurement_valid or right.dynamic_measurement_valid
+            ),
+            ttc_valid=bool(left.ttc_valid or right.ttc_valid),
+            dynamic_valid=bool(left.ttc_valid or right.ttc_valid),
+        )
+
+
+@dataclass(frozen=True)
+class DualClockDynamicSafetySample:
+    wall: DynamicSafetySample
+    simulation: DynamicSafetySample
+    real_time_factor: float
+    real_time_factor_valid: bool
+
+    def human_payload(self) -> dict[str, object]:
+        return self.wall.human_payload()
+
+    def safety_payload(self) -> dict[str, object]:
+        return self.wall.safety_payload()
+
+    def simulation_payload(self) -> dict[str, object]:
+        return {
+            **self.simulation.human_payload(),
+            **self.simulation.safety_payload(),
+        }
+
+
+class DualClockDynamicSafetyEstimator:
+    """Compute canonical wall-time and diagnostic simulation-time dynamics."""
+
+    def __init__(self, config: DynamicSafetyConfig | None = None) -> None:
+        self.config = (config or DynamicSafetyConfig.from_env()).validated()
+        self._wall = DynamicSafetyEstimator(self.config)
+        self._simulation = DynamicSafetyEstimator(self.config)
+        self._previous_wall_time_s: float | None = None
+        self._previous_sim_time_s: float | None = None
+
+    def reset(self) -> None:
+        self._wall.reset()
+        self._simulation.reset()
+        self._previous_wall_time_s = None
+        self._previous_sim_time_s = None
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            **self.config.metadata(),
+            "dynamic_canonical_clock": "wall_monotonic_time",
+            "dynamic_secondary_clock": "simulation_time",
+            "real_time_factor_definition": "delta_sim_time/delta_wall_monotonic_time",
+            "wall_robot_angular_velocity_source": "orientation_finite_difference",
+            "simulation_robot_angular_velocity_source": "isaacsim_direct_with_pose_fallback",
+        }
+
+    def update(self, *, sim_time_s: float, wall_time_s: float, **kwargs) -> DualClockDynamicSafetySample:
+        sim_time_s = float(sim_time_s)
+        wall_time_s = float(wall_time_s)
+        real_time_factor = 0.0
+        real_time_factor_valid = False
+        if self._previous_wall_time_s is not None and self._previous_sim_time_s is not None:
+            wall_dt = wall_time_s - self._previous_wall_time_s
+            sim_dt = sim_time_s - self._previous_sim_time_s
+            real_time_factor_valid = bool(
+                math.isfinite(wall_dt)
+                and math.isfinite(sim_dt)
+                and wall_dt > self.config.min_valid_dt_s
+                and sim_dt > 0.0
+            )
+            if real_time_factor_valid:
+                real_time_factor = sim_dt / wall_dt
+        self._previous_wall_time_s = wall_time_s
+        self._previous_sim_time_s = sim_time_s
+
+        simulation = self._simulation.update(sim_time_s=sim_time_s, **kwargs)
+        wall_kwargs = dict(kwargs)
+        wall_kwargs["left_closest_robot_angular_velocity_world_radps"] = None
+        wall_kwargs["right_closest_robot_angular_velocity_world_radps"] = None
+        wall = self._wall.update(sim_time_s=wall_time_s, **wall_kwargs)
+        return DualClockDynamicSafetySample(
+            wall=wall,
+            simulation=simulation,
+            real_time_factor=float(real_time_factor),
+            real_time_factor_valid=real_time_factor_valid,
         )

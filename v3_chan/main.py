@@ -125,9 +125,14 @@ from app_config import (
     HAND_TRACKING_UDP_HOST,
     HAND_TRACKING_UDP_PORT,
     HRI_PARTICIPANT_ID,
+    HRI_PRODUCTION_MODE,
     HRI_PROTOCOL_VERSION,
     HRI_ROOM_CALIBRATION_ID,
     HRI_SESSION_ID,
+    HRI_SESSION_SEED,
+    HRI_CODE_VERSION,
+    HRI_CODE_VERSION_SOURCE,
+    HRI_SOURCE_TREE_SHA256,
     HRI_SPEED_ORDER_INDEX,
     HRI_SPEED_PROFILE_ORDER,
     HRI_TRAJECTORY_MAX_EPISODES,
@@ -142,7 +147,7 @@ from app_config import (
 )
 from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
-from dynamic_safety import DynamicSafetyEstimator, valid_world_position
+from dynamic_safety import DualClockDynamicSafetyEstimator
 from end_effector_safety_runtime import PandaEndEffectorSafetyRuntime
 from gripper_camera import GripperCamera
 from hand_tracking import HandTrackingReceiver
@@ -166,6 +171,8 @@ from vr_avatar import (
     ROOM_TO_WORLD_MATRIX_ROWS,
     room_to_world_point,
 )
+from collection_provenance import validate_production_metadata
+from scene_randomization import episode_rng, episode_seed, scene_layout_id
 
 
 def _git_collection_metadata() -> dict[str, str | int]:
@@ -207,7 +214,12 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
         rendering_dt = float("nan")
     return {
         "session_id": HRI_SESSION_ID,
+        "session_seed": int(HRI_SESSION_SEED),
         "participant_id": HRI_PARTICIPANT_ID,
+        "production_mode": int(HRI_PRODUCTION_MODE),
+        "code_version": HRI_CODE_VERSION,
+        "code_version_source": HRI_CODE_VERSION_SOURCE,
+        "source_tree_sha256": HRI_SOURCE_TREE_SHA256,
         "collection_protocol_version": HRI_PROTOCOL_VERSION,
         "room_calibration_id": HRI_ROOM_CALIBRATION_ID,
         "room_to_world_matrix_rows": json.dumps(ROOM_TO_WORLD_MATRIX_ROWS),
@@ -215,7 +227,7 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
         "session_start_wall_time_unix_ns": wall_ns,
         "session_start_monotonic_ns": monotonic_ns,
         "wall_minus_monotonic_ns_at_start": wall_ns - monotonic_ns,
-        "time_sync_schema": "sim_monotonic_unix_v1",
+        "time_sync_schema": "sim_monotonic_unix_dual_clock_v2",
         "isaac_sim_version": isaac_version,
         "physics_dt_s": physics_dt,
         "rendering_dt_s": rendering_dt,
@@ -228,6 +240,47 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
             _env_bool("XR_EXTERNAL_HAND_TRACKING", False)
         ),
         **_git_collection_metadata(),
+    }
+
+
+def _capture_initial_scene(
+    cubes,
+    place_target,
+    *,
+    session_seed: int,
+    layout_seed: int,
+    fixed_layout_id: str | None = None,
+) -> dict[str, object]:
+    cube_positions = []
+    cube_orientations = []
+    cube_names = []
+    for cube in cubes:
+        position, orientation = cube.get_world_pose()
+        cube_positions.append(np.asarray(position, dtype=np.float64))
+        cube_orientations.append(np.asarray(orientation, dtype=np.float64))
+        cube_names.append(str(getattr(cube, "name", "cube")))
+    target_position, target_orientation = place_target.get_world_pose()
+    measured_layout_id = scene_layout_id(
+        cube_positions,
+        cube_orientations,
+        target_position,
+        target_orientation,
+    )
+    return {
+        "session_seed": np.asarray(int(session_seed), dtype=np.int64),
+        "layout_seed": np.asarray(int(layout_seed), dtype=np.int64),
+        "layout_id": str(fixed_layout_id or measured_layout_id),
+        "measured_layout_id": measured_layout_id,
+        "cube_names": np.asarray(cube_names),
+        "cube_roles": np.asarray(
+            ["pick_target" if index < 3 else "distractor" for index in range(len(cubes))]
+        ),
+        "cube_positions_world": np.asarray(cube_positions, dtype=np.float64),
+        "cube_orientations_wxyz": np.asarray(cube_orientations, dtype=np.float64),
+        "place_target_position_world": np.asarray(target_position, dtype=np.float64),
+        "place_target_orientation_wxyz": np.asarray(
+            target_orientation, dtype=np.float64
+        ),
     }
 
 
@@ -585,6 +638,17 @@ XR_CAMERA_TELEPORT = os.environ.get("XR_CAMERA_TELEPORT", "1").lower() in (
 # =============================================================================
 def main():
     print("[Main] Entered main().", flush=True)
+    validate_production_metadata(
+        production_mode=HRI_PRODUCTION_MODE,
+        participant_id=HRI_PARTICIPANT_ID,
+        code_version=HRI_CODE_VERSION,
+    )
+    print(
+        "[HRI] provenance "
+        f"participant={HRI_PARTICIPANT_ID} production={int(HRI_PRODUCTION_MODE)} "
+        f"session_seed={HRI_SESSION_SEED} code_version={HRI_CODE_VERSION}",
+        flush=True,
+    )
     if _use_xr_experience:
         print(f"[VR] Using XR experience ({_xr_mode}): {_xr_experience}")
     else:
@@ -613,7 +677,11 @@ def main():
         table_xy,
         table_size,
         stack_base_xy,
-    ) = setup_scene(world, cube_count=6)
+    ) = setup_scene(
+        world,
+        cube_count=6,
+        rng=episode_rng(HRI_SESSION_SEED, 0),
+    )
     print("[Main] Scene ready.", flush=True)
     pick_targets = cubes[:3]
     green_indices = list(range(3, 6))
@@ -647,7 +715,7 @@ def main():
     # unavailable; falling back to the old hand-authored capsules would silently
     # change dataset semantics.
     safety_geometry = PandaEndEffectorSafetyRuntime(robot_prim_path="/World/Franka")
-    dynamic_safety = DynamicSafetyEstimator()
+    dynamic_safety = DualClockDynamicSafetyEstimator()
     session_speed_profile_order = normalize_speed_profile_order(
         HRI_SPEED_PROFILE_ORDER
     )
@@ -655,6 +723,7 @@ def main():
     current_speed_profile = speed_profile_for_episode(
         collection_episode_index, session_speed_profile_order
     )
+    session_layout_seed = episode_seed(HRI_SESSION_SEED, 0)
     physics_dt_s = float(world.get_physics_dt())
     collection_file_metadata = {
         **_collection_file_metadata(world),
@@ -669,6 +738,25 @@ def main():
 
     place_target.set_world_pose(
         position=np.array([stack_base_xy[0], stack_base_xy[1], table_top_z + cube_half])
+    )
+    session_initial_scene = _capture_initial_scene(
+        cubes,
+        place_target,
+        session_seed=HRI_SESSION_SEED,
+        layout_seed=session_layout_seed,
+    )
+    session_layout_id = str(session_initial_scene["layout_id"])
+    collection_file_metadata.update(
+        {
+            "session_layout_seed": int(session_layout_seed),
+            "session_layout_id": session_layout_id,
+            "speed_layout_assignment": "same_layout_for_all_session_speed_conditions",
+        }
+    )
+    print(
+        f"[HRI] session layout id={session_layout_id} seed={session_layout_seed} "
+        "shared_by=slow,medium,fast",
+        flush=True,
     )
 
     # 6. 기본 정보 출력
@@ -749,10 +837,22 @@ def main():
                 HRI_SPEED_ORDER_INDEX
             ),
             "controller_speed_schedule": ",".join(session_speed_profile_order),
+            "layout_id": session_layout_id,
+            "layout_seed": int(session_layout_seed),
+            "layout_shared_across_speed_conditions": True,
             **speed_profile_metadata(
                 current_speed_profile, physics_dt_s=physics_dt_s
             ),
         }
+
+    def _current_initial_scene() -> dict[str, object]:
+        return _capture_initial_scene(
+            cubes,
+            place_target,
+            session_seed=HRI_SESSION_SEED,
+            layout_seed=session_layout_seed,
+            fixed_layout_id=session_layout_id,
+        )
 
     hri_recorder = None
     if ENABLE_HRI_TRAJECTORY_RECORDING:
@@ -796,10 +896,17 @@ def main():
                 HRI_TRAJECTORY_MAX_EPISODES <= 0
                 or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
             ):
-                hri_recorder.start_episode(_episode_metadata("run_start"))
+                hri_recorder.start_episode(
+                    _episode_metadata("run_start"),
+                    initial_scene=_current_initial_scene(),
+                )
                 dynamic_safety.reset()
             print(f"[HRI] recording obs dataset: {hri_recorder.path}")
         except Exception as exc:
+            if HRI_PRODUCTION_MODE:
+                raise RuntimeError(
+                    f"Production HRI recorder initialization failed: {exc}"
+                ) from exc
             print(f"[HRI] recorder disabled: {exc}")
             hri_recorder = None
 
@@ -864,7 +971,10 @@ def main():
                         or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
                     )
                 ):
-                    hri_recorder.start_episode(_episode_metadata("world_time_reset"))
+                    hri_recorder.start_episode(
+                        _episode_metadata("world_time_reset"),
+                        initial_scene=_current_initial_scene(),
+                    )
                     dynamic_safety.reset()
 
             step += 1
@@ -900,12 +1010,25 @@ def main():
             # ── VR 아바타 갱신 (머리·손 프림 위치 + 팔 DebugDraw) ──────────
             if avatar is not None:
                 avatar.set_external_hand_joints(hand_joint_positions)
-                head_pos, left_pos, right_pos = avatar.update()
+                head_pose, left_pose, right_pose = avatar.update_with_status()
+                head_pos = head_pose.position_world
+                left_pos = left_pose.position_world
+                right_pos = right_pose.position_world
             else:
+                head_pose, left_pose, right_pose = None, None, None
                 head_pos, left_pos, right_pos = None, None, None
+            hmd_forward = avatar.get_hmd_forward() if avatar is not None else None
+            pose_monotonic_time_ns = max(
+                (
+                    int(getattr(sample, "acquisition_monotonic_ns", 0))
+                    for sample in (head_pose, left_pose, right_pose)
+                    if sample is not None
+                ),
+                default=time.monotonic_ns(),
+            )
+            sample_wall_time_unix_ns = time.time_ns()
             if MIRROR_VIEW_TO_HMD and head_pos is not None and step % 2 == 0:
                 try:
-                    hmd_forward = avatar.get_hmd_forward()
                     view_target = (
                         head_pos + hmd_forward
                         if hmd_forward is not None
@@ -915,7 +1038,14 @@ def main():
                 except Exception:
                     pass
 
-            vr_tracking_ready = head_pos is not None and (left_pos is not None or right_pos is not None)
+            vr_tracking_ready = bool(
+                head_pose is not None
+                and head_pose.pose_valid
+                and (
+                    (left_pose is not None and left_pose.pose_valid)
+                    or (right_pose is not None and right_pose.pose_valid)
+                )
+            )
             if WAIT_FOR_VR_TRACKING and not vr_tracking_ready:
                 if not waiting_for_vr_logged or step % 300 == 0:
                     print(
@@ -957,10 +1087,15 @@ def main():
                 )
                 dynamic_sample = dynamic_safety.update(
                     sim_time_s=sim_time,
+                    wall_time_s=pose_monotonic_time_ns * 1e-9,
                     left_hand_pos=left_pos,
                     right_hand_pos=right_pos,
-                    left_tracking_valid=valid_world_position(left_pos),
-                    right_tracking_valid=valid_world_position(right_pos),
+                    left_tracking_valid=bool(
+                        left_pose is not None and left_pose.pose_valid
+                    ),
+                    right_tracking_valid=bool(
+                        right_pose is not None and right_pose.pose_valid
+                    ),
                     left_surface_gap_m=safety_result.left.surface_gap_m,
                     right_surface_gap_m=safety_result.right.surface_gap_m,
                     left_geometry_valid=safety_result.left.geometry_valid,
@@ -978,6 +1113,12 @@ def main():
                     ),
                     right_closest_robot_angular_velocity_world_radps=(
                         right_robot_angular_velocity
+                    ),
+                    left_pose_source_switched=bool(
+                        left_pose is not None and left_pose.source_switched
+                    ),
+                    right_pose_source_switched=bool(
+                        right_pose is not None and right_pose.source_switched
                     ),
                 )
             human_robot_collision_active = safety_result.collision
@@ -1052,6 +1193,10 @@ def main():
                 ),
                 human_robot_collision=human_robot_collision_active,
             )
+            previous_robot_action = last_robot_action
+            next_robot_action = None
+            controller_advanced_this_step = False
+            action_command_monotonic_ns = time.monotonic_ns()
             if hri_recorder is not None and hri_recorder.is_open:
                 stack_height = (
                     table_top_z + cube_half
@@ -1072,11 +1217,26 @@ def main():
                     safety_result=safety_result,
                     controller=controller,
                 )
+                if ENABLE_PICK_PLACE and controller is not None and not task_done:
+                    current_pick_pos, _ = pick_targets[current_pick_idx].get_world_pose()
+                    action_command_monotonic_ns = time.monotonic_ns()
+                    task_done, next_robot_action = run_pick_place(
+                        controller=controller,
+                        robot=panda,
+                        pick_position=current_pick_pos,
+                        place_position=current_place_pos,
+                        return_action=True,
+                    )
+                    controller_advanced_this_step = True
                 hri_recorder.add_sample(
                     step=step,
                     sim_time=sim_time,
                     monotonic_time_ns=sample_monotonic_time_ns,
+                    pose_monotonic_time_ns=pose_monotonic_time_ns,
                     wall_time_unix_ns=sample_wall_time_unix_ns,
+                    real_time_factor=dynamic_sample.real_time_factor,
+                    real_time_factor_valid=dynamic_sample.real_time_factor_valid,
+                    action_command_monotonic_ns=action_command_monotonic_ns,
                     obs=obs,
                     current_pick_idx=current_pick_idx,
                     completed_picks=completed_picks,
@@ -1168,7 +1328,15 @@ def main():
                         **dynamic_sample.human_payload(),
                         **dynamic_sample.safety_payload(),
                     },
-                    action=last_robot_action,
+                    dynamic_sim=dynamic_sample.simulation_payload(),
+                    tracking={
+                        "head": head_pose,
+                        "left_hand": left_pose,
+                        "right_hand": right_pose,
+                        "head_forward_world": hmd_forward,
+                    },
+                    previous_action=previous_robot_action,
+                    next_action=next_robot_action,
                 )
 
             # VR 그랩 (hand tracking pinch 우선, 없으면 컨트롤러 grip 폴백)
@@ -1204,20 +1372,24 @@ def main():
                 )
 
             # ── Phase 2: 로봇 Pick-and-Place ─────────────────────────────────
-            if ENABLE_PICK_PLACE and controller is not None and not task_done:
+            if ENABLE_PICK_PLACE and controller is not None:
                 current_pick_pos, _ = pick_targets[current_pick_idx].get_world_pose()
                 stack_height = (
                     table_top_z + cube_half
                     + (completed_picks % len(pick_targets)) * (cube_size + 0.002)
                 )
                 place_pos = np.array([stack_base_xy[0], stack_base_xy[1], stack_height])
-                task_done, last_robot_action = run_pick_place(
-                    controller=controller,
-                    robot=panda,
-                    pick_position=current_pick_pos,
-                    place_position=place_pos,
-                    return_action=True,
-                )
+                if not task_done and not controller_advanced_this_step:
+                    action_command_monotonic_ns = time.monotonic_ns()
+                    task_done, next_robot_action = run_pick_place(
+                        controller=controller,
+                        robot=panda,
+                        pick_position=current_pick_pos,
+                        place_position=place_pos,
+                        return_action=True,
+                    )
+                if next_robot_action is not None:
+                    last_robot_action = next_robot_action
                 if task_done:
                     placed_cube = pick_targets[current_pick_idx]
                     placed_cube_pos, _ = placed_cube.get_world_pose()
@@ -1325,18 +1497,10 @@ def main():
                             f"{next_profile_info['controller_nominal_cycle_duration_s']:.2f}s",
                             flush=True,
                         )
-                        if hri_recorder is not None:
-                            if (
-                                HRI_TRAJECTORY_MAX_EPISODES <= 0
-                                or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
-                            ):
-                                hri_recorder.start_episode(
-                                    _episode_metadata("cubes_randomized")
-                                )
-                                dynamic_safety.reset()
                         randomize_cubes(
                             cubes, table_xy, table_size, cube_center_z,
                             cube_size, forbidden_xy=stack_base_xy,
+                            rng=episode_rng(HRI_SESSION_SEED, 0),
                         )
                         completed_picks = 0
                         current_pick_idx = 0
@@ -1370,7 +1534,20 @@ def main():
                 place_target.set_world_pose(
                     position=np.array([stack_base_xy[0], stack_base_xy[1], table_top_z + cube_half])
                 )
+                if (
+                    hri_recorder is not None
+                    and not hri_recorder.is_open
+                    and (
+                        HRI_TRAJECTORY_MAX_EPISODES <= 0
+                        or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
+                    )
+                ):
+                    hri_recorder.start_episode(
+                        _episode_metadata("same_session_layout_reset"),
+                        initial_scene=_current_initial_scene(),
+                    )
                 task_done = False
+                last_robot_action = None
                 step = 0
                 cycle_reset_requested = False
 

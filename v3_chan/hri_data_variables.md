@@ -72,8 +72,11 @@
 | 변수명 | 의미 |
 |---|---|
 | `sim_time` | 각 sample의 시뮬레이션 시간 |
-| `monotonic_time_ns` | 각 sample의 monotonic clock timestamp |
-| `wall_time_unix_ns` | 각 sample의 Unix epoch timestamp |
+| `monotonic_time_ns` | frame sample의 monotonic clock timestamp |
+| `pose_monotonic_time_ns` | XR pose 획득 직후의 monotonic timestamp; 실제 시간 속도와 RTF의 기준 |
+| `wall_time_unix_ns` | EEG 및 외부 stream 정렬용 Unix epoch timestamp |
+| `real_time_factor` | `delta_sim_time / delta_monotonic_time` |
+| `action_command_monotonic_ns` | `next_commanded_action_t`를 controller에 전달한 시각 |
 | `step` | 각 sample의 simulation step index |
 | `obs_policy` | 기존 전체 observation을 flatten한 vector |
 | `hri_obs_policy` | HRI cognitive safety 연구용 핵심 observation을 flatten한 vector |
@@ -83,11 +86,11 @@
 
 새 수집 데이터에서 episode 길이는 고정값이 아니다. 실제 place 검증에 실패하면 같은 cube를 재시도하므로, 3회보다 많은 pick-and-place controller attempt가 포함될 수 있다.
 
-session별 episode 속도 순서는 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환한다. 각 episode attribute에는 해당 session schedule과 `controller_speed_profile`, `controller_motion_phase_scale`, `controller_events_dt_json`, `controller_nominal_cycle_steps`, `controller_nominal_cycle_duration_s`를 기록한다. 속도 변화는 이동 phase에만 적용하며 grasp/release와 안정화 phase timing은 바꾸지 않는다.
+session별 episode 속도 순서는 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환한다. 한 session의 세 속도 조건은 동일한 초기 cube pose와 `layout_id`를 공유하며, session이 바뀔 때만 layout이 바뀐다. 각 episode attribute에는 해당 session schedule과 `controller_speed_profile`, `controller_motion_phase_scale`, `controller_events_dt_json`, `controller_nominal_cycle_steps`, `controller_nominal_cycle_duration_s`를 기록한다. 속도 변화는 이동 phase에만 적용하며 grasp/release와 안정화 phase timing은 바꾸지 않는다.
 
-새 recorder schema는 `hri_obs_v7_83d_surface_point_dynamic_safety_sync`이며, safety observation schema는 `hri_policy_obs_v1_83d_surface_gap`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원을 저장한다. 기존 v1/v2의 74차원, v3의 77차원, v5/v6 파일은 과거 데이터로 그대로 유지된다.
+새 recorder schema는 `hri_obs_v8_dual_clock_tracked_action_aligned`이며, safety observation schema는 `hri_policy_obs_v1_83d_surface_gap`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원을 저장한다. v8은 policy 차원을 바꾸지 않고 pose provenance, dual-clock dynamics, action alignment, initial scene snapshot을 추가한다. 기존 v1-v7 파일은 과거 데이터로 그대로 유지된다.
 
-`human/*`에는 `left_hand_vel_raw_mps`, `right_hand_vel_raw_mps`, `left_hand_vel_filtered_mps`, `right_hand_vel_filtered_mps`, `left_hand_velocity_valid`, `right_hand_velocity_valid`가 추가된다. `safety/*`에는 closest surface point, link origin linear velocity, link angular velocity, 회전 보정 속도, 최종 surface-point velocity, hand-relative velocity, per-hand surface-gap rate, closing speed, TTC, dynamic valid flag, collider-switch flag와 양손 aggregate(`min_ttc_s`, `max_closing_speed_mps`, `dynamic_valid`)가 추가된다. 이 값들은 policy observation에 포함되지 않는다.
+`human/*`에는 wall-time 기준 손 속도와 함께 pose valid, `position_tracked`(-1/0/1), tracking-status-known, source ID/name/path, source-switch, 획득 monotonic time을 저장한다. `safety/*`의 동적 값은 wall-time canonical이며, `dynamic_sim/*`에 simulation-time 진단값을 별도로 저장한다. validity는 tracking, gap measurement/rate, robot surface velocity, relative velocity, closing speed, TTC로 분리한다. 이 값들은 policy observation에 포함되지 않는다.
 
 surface 기반 flag의 기본 기준은 다음과 같다.
 
@@ -228,13 +231,18 @@ ErrP reward shaping을 위한 group이다. 현재는 실시간 EEG 장비가 없
 
 ### `actions/*`
 
-로봇 controller가 낸 action을 저장하는 group이다.
+각 행의 `state_t`와 시간적으로 정렬된 controller action을 저장하는 group이다.
 
 | 변수명 | 의미 |
 |---|---|
-| `robot_joint_positions` | controller action의 joint position target |
-| `robot_joint_velocities` | controller action의 joint velocity target |
-| `robot_joint_efforts` | controller action의 joint effort target |
+| `previous_applied_joint_*` | 현재 `state_t`를 만들기 직전에 적용되어 있던 `action_(t-1)` |
+| `previous_applied_valid` | 이전 action 저장 유효 여부 |
+| `next_commanded_joint_*` | `state_t`에서 controller가 계산해 다음 physics step에 적용한 `action_t` |
+| `next_commanded_valid` | 다음 action 저장 유효 여부 |
+
+### `initial_scene/*`
+
+각 episode 시작 직후의 여섯 cube pose, role, place target pose, session/layout seed, 고정 `layout_id`, 실제 pose hash를 저장한다. 같은 session의 slow/medium/fast episode는 이 값이 같아야 하며 `validate_hri_collection.py`가 이를 검사한다.
 
 ### `rewards/*`
 

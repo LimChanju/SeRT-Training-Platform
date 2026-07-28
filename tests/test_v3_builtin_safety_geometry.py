@@ -1,6 +1,4 @@
 import math
-import sys
-import types
 
 import numpy as np
 
@@ -12,6 +10,7 @@ from v3_chan.end_effector_safety_geometry import (
     SafetyThresholds,
     classify_surface_gap,
     distance_gate,
+    select_nearest_collider_path,
 )
 from v3_chan.end_effector_safety_runtime import PandaEndEffectorSafetyRuntime
 
@@ -58,6 +57,30 @@ def test_surface_gap_classification_boundaries():
     assert invalid.distance_gate == 0.0
 
 
+def test_nearest_collider_uses_distance_not_path_order():
+    selected = select_nearest_collider_path(
+        ("/robot/a", "/robot/z"),
+        {"/robot/a": 0.08, "/robot/z": 0.03},
+    )
+    assert selected == "/robot/z"
+
+
+def test_nearest_collider_retains_previous_only_within_tolerance():
+    tied = select_nearest_collider_path(
+        ("/robot/a", "/robot/z"),
+        {"/robot/a": 0.0300, "/robot/z": 0.0301},
+        previous_path="/robot/z",
+        tie_tolerance_m=0.00025,
+    )
+    separated = select_nearest_collider_path(
+        ("/robot/a", "/robot/z"),
+        {"/robot/a": 0.0300, "/robot/z": 0.0310},
+        previous_path="/robot/z",
+        tie_tolerance_m=0.00025,
+    )
+    assert tied == "/robot/z"
+    assert separated == "/robot/a"
+
 def test_distance_gate_is_clipped_linear_surface_gap_gate():
     thresholds = SafetyThresholds().validated()
     assert distance_gate(0.14, thresholds) == 0.0
@@ -93,25 +116,14 @@ def test_two_hand_aggregation_uses_minimum_gap_and_maximum_gate():
     assert result.distance_gate == 1.0
 
 
-def test_runtime_reads_exact_closest_surface_point(monkeypatch):
-    class _AttachmentQuery:
-        def get_closest_points(self, points, path):
-            assert points == [(0.2, 0.3, 0.4)]
-            assert path == "/World/Franka/panda_hand/collider"
-            return {"dists": [0.01], "closest_points": [(0.1, 0.2, 0.3)]}
-
-    monkeypatch.setitem(
-        sys.modules,
-        "carb",
-        types.SimpleNamespace(Float3=lambda x, y, z: (x, y, z)),
-    )
+def test_runtime_reads_cached_exact_closest_surface_point():
     runtime = PandaEndEffectorSafetyRuntime.__new__(PandaEndEffectorSafetyRuntime)
-    runtime._attachment_query = _AttachmentQuery()
-    runtime._closest_point_error_logged = set()
     result = HandSafetyResult(
         hand="left",
         geometry_valid=True,
         closest_collider_path="/World/Franka/panda_hand/collider",
+        closest_surface_point_world_pos=(0.1, 0.2, 0.3),
+        closest_surface_point_valid=True,
     )
 
     point, valid = runtime.closest_surface_point_world_position(result, [0.2, 0.3, 0.4])

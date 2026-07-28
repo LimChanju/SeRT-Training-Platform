@@ -6,10 +6,19 @@ cd "$PROJECT_ROOT"
 
 HRI_SESSION_ID="$(date +%Y%m%d_%H%M%S_%N)_$$"
 export HRI_SESSION_ID
-export HRI_PARTICIPANT_ID="${HRI_PARTICIPANT_ID:-unspecified}"
-export HRI_PROTOCOL_VERSION="${HRI_PROTOCOL_VERSION:-surface_gap_dynamic_multispeed_counterbalanced_v3}"
+export HRI_PARTICIPANT_ID="${HRI_PARTICIPANT_ID:-P01}"
+export HRI_PROTOCOL_VERSION="${HRI_PROTOCOL_VERSION:-surface_gap_dynamic_multispeed_dualclock_v4}"
 export HRI_ROOM_CALIBRATION_ID="${HRI_ROOM_CALIBRATION_ID:-room_to_world_default_v1}"
 HRI_COLLECTION_TEST_MODE="${HRI_COLLECTION_TEST_MODE:-0}"
+if [[ "$HRI_COLLECTION_TEST_MODE" == "1" ]]; then
+    export HRI_PRODUCTION_MODE=0
+else
+    export HRI_PRODUCTION_MODE=1
+fi
+if [[ "$HRI_PRODUCTION_MODE" == "1" ]] && [[ -z "$HRI_PARTICIPANT_ID" || "$HRI_PARTICIPANT_ID" == "unspecified" || "$HRI_PARTICIPANT_ID" == "unknown" ]]; then
+    printf '[Collect] production collection requires a valid HRI_PARTICIPANT_ID\n' >&2
+    exit 2
+fi
 
 mkdir -p "$PROJECT_ROOT/v3_chan/logs" "$PROJECT_ROOT/v3_chan/trajectories"
 
@@ -131,6 +140,10 @@ printf '[Collect] markers=%s\n' "$ERRP_MARKERS_PATH"
 printf '[Collect] samples=%s\n' "$SESSION_SAMPLES_PATH"
 printf '[Collect] participant=%s protocol=%s calibration=%s\n' \
     "$HRI_PARTICIPANT_ID" "$HRI_PROTOCOL_VERSION" "$HRI_ROOM_CALIBRATION_ID"
+printf '[Collect] production=%s session_seed=%s code_version=%s\n' \
+    "$HRI_PRODUCTION_MODE" \
+    "${HRI_SESSION_SEED:-auto}" \
+    "${HRI_CODE_VERSION:-auto-source-tree-sha256}"
 printf '[Collect] speed_order_index=%s episode_speed_schedule=%s motion_scale=slow:1.0,medium:1.5,fast:2.0\n' \
     "$HRI_SPEED_ORDER_INDEX" "$HRI_SPEED_PROFILE_ORDER"
 printf '[Collect] test_mode=%s episodes=%s recording=%s debug_visualization=%s\n' \

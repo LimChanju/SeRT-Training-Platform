@@ -264,7 +264,7 @@ def test_recorder_dynamic_dataset_lengths_match_episode_frames(tmp_path):
     with h5py.File(path, "r") as data:
         episode = data["episodes/episode_000000"]
         assert data.attrs["schema_version"] == (
-            "hri_obs_v7_83d_surface_point_dynamic_safety_sync"
+            "hri_obs_v8_dual_clock_tracked_action_aligned"
         )
         assert np.isclose(data.attrs["dynamic_ema_time_constant_s"], 0.1)
         assert np.isclose(data.attrs["dynamic_ttc_cap_s"], 10.0)

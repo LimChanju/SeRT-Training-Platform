@@ -45,3 +45,62 @@ def test_recorded_safety_labels_are_metadata_not_current_rollout_labels(tmp_path
 
     assert "human_left_hand_pos" in state
     assert "human_right_hand_pos" in state
+
+
+def test_v8_replay_prefers_recorded_wall_time_velocity(tmp_path):
+    path = tmp_path / "v8_replay.hdf5"
+    with h5py.File(path, "w") as data:
+        episode = data.create_group("episodes/episode_000000")
+        episode.create_dataset("sim_time", data=np.array([0.0, 0.1]))
+        episode.create_dataset(
+            "pose_monotonic_time_ns", data=np.array([1_000_000_000, 1_200_000_000])
+        )
+        human = episode.create_group("human")
+        human.create_dataset("head_pos", data=np.array([[1.0, 0.0, 1.5]] * 2))
+        human.create_dataset(
+            "left_hand_pos", data=np.array([[0.4, 0.1, 1.0], [0.6, 0.1, 1.0]])
+        )
+        human.create_dataset(
+            "right_hand_pos", data=np.array([[0.5, -0.1, 1.0]] * 2)
+        )
+        human.create_dataset(
+            "left_hand_vel_filtered_mps", data=np.array([[0.0, 0.0, 0.0], [0.25, 0.0, 0.0]])
+        )
+
+    replay = HumanTrajectoryReplay(str(path))
+    try:
+        replay()
+        state = replay()
+    finally:
+        replay.close()
+
+    np.testing.assert_allclose(state["human_left_hand_vel"], [0.25, 0.0, 0.0])
+
+
+def test_v8_replay_finite_difference_uses_monotonic_pose_time(tmp_path):
+    path = tmp_path / "v8_fallback_replay.hdf5"
+    with h5py.File(path, "w") as data:
+        episode = data.create_group("episodes/episode_000000")
+        episode.create_dataset("sim_time", data=np.array([0.0, 0.1]))
+        episode.create_dataset(
+            "pose_monotonic_time_ns", data=np.array([1_000_000_000, 1_200_000_000])
+        )
+        human = episode.create_group("human")
+        human.create_dataset("head_pos", data=np.array([[1.0, 0.0, 1.5]] * 2))
+        human.create_dataset(
+            "left_hand_pos", data=np.array([[0.4, 0.1, 1.0], [0.6, 0.1, 1.0]])
+        )
+        human.create_dataset(
+            "right_hand_pos", data=np.array([[0.5, -0.1, 1.0]] * 2)
+        )
+
+    replay = HumanTrajectoryReplay(str(path))
+    try:
+        replay()
+        state = replay()
+    finally:
+        replay.close()
+
+    np.testing.assert_allclose(
+        state["human_left_hand_vel"], [1.0, 0.0, 0.0], atol=1e-6
+    )

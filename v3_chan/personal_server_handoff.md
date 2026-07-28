@@ -51,7 +51,7 @@ safety/haptic_pulse_right sum = 37
 
 `hri_obs_v2_verified_place_retry`부터는 실패한 pick-place attempt를 같은 episode 안에서 재시도하므로 `episode_length`와 observation shape의 첫 번째 차원은 가변적이다. Episode의 `success=True`는 세 cube가 실제 grasp, lift, place 검증을 모두 통과한 경우에만 기록된다.
 
-`hri_obs_v7_83d_surface_point_dynamic_safety_sync`에서 `obs_policy`는 기존 checkpoint 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원이다. v7은 closest surface point와 link linear/angular velocity를 이용해 회전 성분이 포함된 robot surface velocity를 기록하고 EEG 정렬용 monotonic/Unix 시간을 함께 저장한다. 기존 v1/v2의 74차원, v3의 77차원 및 v5/v6 HRI vector와 v7을 같은 batch에 바로 섞지 말고 schema별로 변환하거나 분리한다.
+`hri_obs_v8_dual_clock_tracked_action_aligned`에서 `obs_policy`는 기존 checkpoint 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원이다. v8은 monotonic wall-time dynamics를 canonical로 사용하고 simulation-time 값을 별도 저장하며, XR pose source/validity, `state_t` 기준 이전/다음 action, 초기 scene/layout을 기록한다. 기존 v1-v7 HRI vector와 v8을 같은 batch에 바로 섞지 말고 schema별로 변환하거나 분리한다.
 
 세부 요약은 아래 문서에 있다.
 

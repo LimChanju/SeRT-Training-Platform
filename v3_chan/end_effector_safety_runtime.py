@@ -23,6 +23,7 @@ try:
         HandSafetyResult,
         SafetyThresholds,
         classify_surface_gap,
+        select_nearest_collider_path,
     )
 except ImportError:
     from end_effector_safety_geometry import (
@@ -33,6 +34,7 @@ except ImportError:
         HandSafetyResult,
         SafetyThresholds,
         classify_surface_gap,
+        select_nearest_collider_path,
     )
 
 
@@ -83,6 +85,7 @@ class PandaEndEffectorSafetyRuntime:
             "left": None,
             "right": None,
         }
+        self._previous_closest_collider = {"left": "", "right": ""}
         self._debug_draw = None
         self._debug_bbox_cache = None
         self.refresh()
@@ -118,6 +121,7 @@ class PandaEndEffectorSafetyRuntime:
 
         self._link_pose_prims.clear()
         self._link_rigid_prims.clear()
+        self._previous_closest_collider = {"left": "", "right": ""}
 
     def closest_link_origin_world_position(
         self, hand_result: HandSafetyResult
@@ -177,40 +181,16 @@ class PandaEndEffectorSafetyRuntime:
     def closest_surface_point_world_position(
         self, hand_result: HandSafetyResult, hand_pos
     ) -> tuple[np.ndarray | None, bool]:
-        """Return the exact closest point on the selected PhysX collider.
+        """Return the closest point cached while selecting the collider."""
 
-        PhysX only defines this point while the tracked hand center is outside
-        the collider. A hand sphere may overlap while its center remains
-        outside, so ordinary virtual contacts still retain a valid point.
-        """
-
-        import carb
-
-        pos = _valid_position(hand_pos)
-        collider_path = str(hand_result.closest_collider_path or "")
-        if pos is None or not collider_path:
+        if not hand_result.closest_surface_point_valid:
             return None, False
-        try:
-            output = self._attachment_query.get_closest_points(
-                [carb.Float3(*[float(value) for value in pos])], collider_path
-            )
-            distances = np.asarray(output.get("dists", []), dtype=float).reshape(-1)
-            points = output.get("closest_points", [])
-            if distances.size < 1 or distances[0] <= 0.0 or len(points) < 1:
-                return None, False
-            point = np.asarray(points[0], dtype=float).reshape(-1)
-            if point.size < 3 or not np.all(np.isfinite(point[:3])):
-                return None, False
-            return point[:3].copy(), True
-        except Exception as exc:
-            if collider_path not in self._closest_point_error_logged:
-                self._closest_point_error_logged.add(collider_path)
-                print(
-                    "[SafetyGeometry] closest surface point unavailable; "
-                    f"surface velocity will be invalid for collider={collider_path}: {exc}",
-                    flush=True,
-                )
+        point = np.asarray(
+            hand_result.closest_surface_point_world_pos, dtype=float
+        ).reshape(-1)
+        if point.size < 3 or not np.all(np.isfinite(point[:3])):
             return None, False
+        return point[:3].copy(), True
 
     def closest_link_world_velocity(
         self, hand_result: HandSafetyResult
@@ -359,6 +339,7 @@ class PandaEndEffectorSafetyRuntime:
     def _evaluate_hand(self, hand: str, hand_pos) -> HandSafetyResult:
         pos = _valid_position(hand_pos)
         if pos is None or not self.geometry_valid:
+            self._previous_closest_collider[hand] = ""
             return HandSafetyResult(hand=hand, geometry_valid=False)
 
         started = time.perf_counter()
@@ -404,6 +385,7 @@ class PandaEndEffectorSafetyRuntime:
                     contact=False,
                     query_time_ms=elapsed_ms,
                     query_count=self._query_count - query_count_before,
+                    hand_pos=pos,
                 )
             final_hits = broad_hits
             for _ in range(self.thresholds.query_iterations):
@@ -429,6 +411,7 @@ class PandaEndEffectorSafetyRuntime:
             contact=contact,
             query_time_ms=elapsed_ms,
             query_count=self._query_count - query_count_before,
+            hand_pos=pos,
         )
         return result
 
@@ -489,6 +472,12 @@ class PandaEndEffectorSafetyRuntime:
             "dynamic_exact_closest_surface_point_velocity_available": True,
             "dynamic_angular_velocity_correction_used": True,
             "dynamic_surface_point_inside_collider_behavior": "invalid",
+            "safety_closest_collider_selection": (
+                "minimum_physx_attachment_center_to_surface_distance"
+            ),
+            "safety_closest_collider_tie_behavior": (
+                "retain_previous_within_query_tolerance"
+            ),
         }
 
     def _log_link_pose_error(self, link_name: str, exc: Exception) -> None:
@@ -669,11 +658,14 @@ class PandaEndEffectorSafetyRuntime:
         contact: bool,
         query_time_ms: float,
         query_count: int,
+        hand_pos,
     ) -> HandSafetyResult:
         hit_paths = tuple(
             sorted(path for path in hits if path in self._collider_to_link)
         )
-        closest_path = hit_paths[0] if hit_paths else ""
+        closest_path, closest_point, closest_point_valid = self._select_nearest_collider(
+            hand, hand_pos, hit_paths
+        )
         closest_link = self._collider_to_link.get(closest_path, "")
         classification = classify_surface_gap(
             surface_gap_m,
@@ -689,6 +681,12 @@ class PandaEndEffectorSafetyRuntime:
             closest_link_id=LINK_ID_BY_NAME.get(closest_link, 0),
             closest_collider_path=closest_path,
             closest_collider_id=self._collider_id_by_path.get(closest_path, 0),
+            closest_surface_point_world_pos=(
+                tuple(float(value) for value in closest_point)
+                if closest_point_valid
+                else (0.0, 0.0, 0.0)
+            ),
+            closest_surface_point_valid=closest_point_valid,
             contact=bool(contact),
             collision=classification.collision,
             contact_force_n=0.0,
@@ -700,6 +698,58 @@ class PandaEndEffectorSafetyRuntime:
             query_time_ms=float(query_time_ms),
             query_count=int(query_count),
         )
+
+    def _select_nearest_collider(
+        self, hand: str, hand_pos: np.ndarray, hit_paths: tuple[str, ...]
+    ) -> tuple[str, np.ndarray, bool]:
+        import carb
+
+        zero = np.zeros(3, dtype=float)
+        if not hit_paths:
+            self._previous_closest_collider[hand] = ""
+            return "", zero, False
+
+        distances: dict[str, float] = {}
+        points: dict[str, np.ndarray] = {}
+        query_point = [carb.Float3(*[float(value) for value in hand_pos])]
+        for collider_path in hit_paths:
+            try:
+                output = self._attachment_query.get_closest_points(
+                    query_point, collider_path
+                )
+                candidate_distances = np.asarray(
+                    output.get("dists", []), dtype=float
+                ).reshape(-1)
+                candidate_points = output.get("closest_points", [])
+                if (
+                    candidate_distances.size < 1
+                    or candidate_distances[0] <= 0.0
+                    or len(candidate_points) < 1
+                ):
+                    continue
+                point = np.asarray(candidate_points[0], dtype=float).reshape(-1)
+                if point.size < 3 or not np.all(np.isfinite(point[:3])):
+                    continue
+                distances[collider_path] = float(candidate_distances[0])
+                points[collider_path] = point[:3].copy()
+            except Exception as exc:
+                if collider_path not in self._closest_point_error_logged:
+                    self._closest_point_error_logged.add(collider_path)
+                    print(
+                        "[SafetyGeometry] closest surface point unavailable; "
+                        f"surface velocity will be invalid for collider={collider_path}: {exc}",
+                        flush=True,
+                    )
+
+        closest_path = select_nearest_collider_path(
+            hit_paths,
+            distances,
+            previous_path=self._previous_closest_collider.get(hand, ""),
+            tie_tolerance_m=self.thresholds.query_tolerance_m,
+        )
+        self._previous_closest_collider[hand] = closest_path
+        point = points.get(closest_path)
+        return closest_path, (point if point is not None else zero), point is not None
 
 
 def _owning_distal_link(path: str) -> str | None:

@@ -10,6 +10,10 @@ try:
     from v3_chan.dynamic_safety import DynamicSafetyConfig
 except ImportError:
     from dynamic_safety import DynamicSafetyConfig
+try:
+    from v3_chan.collection_provenance import validate_production_metadata
+except ImportError:
+    from collection_provenance import validate_production_metadata
 
 
 _OBS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rl", "observations.py")
@@ -35,6 +39,63 @@ validate_observation = _obs.validate_observation
 validate_auxiliary_observation = _obs.validate_auxiliary_observation
 
 
+_DYNAMIC_VECTOR_FIELDS = (
+    "left_hand_vel_raw_mps",
+    "right_hand_vel_raw_mps",
+    "left_hand_vel_filtered_mps",
+    "right_hand_vel_filtered_mps",
+    "left_closest_surface_point_world_pos",
+    "right_closest_surface_point_world_pos",
+    "left_closest_robot_origin_velocity_world_mps",
+    "right_closest_robot_origin_velocity_world_mps",
+    "left_closest_robot_angular_velocity_world_radps",
+    "right_closest_robot_angular_velocity_world_radps",
+    "left_closest_robot_rotational_velocity_world_mps",
+    "right_closest_robot_rotational_velocity_world_mps",
+    "left_closest_robot_velocity_world_mps",
+    "right_closest_robot_velocity_world_mps",
+    "left_relative_velocity_world_mps",
+    "right_relative_velocity_world_mps",
+)
+_DYNAMIC_TTC_FIELDS = ("left_ttc_s", "right_ttc_s", "min_ttc_s")
+_DYNAMIC_SCALAR_FIELDS = (
+    "left_hand_velocity_valid",
+    "right_hand_velocity_valid",
+    "left_robot_surface_velocity_valid",
+    "right_robot_surface_velocity_valid",
+    "left_surface_gap_rate_raw_mps",
+    "right_surface_gap_rate_raw_mps",
+    "left_surface_gap_rate_filtered_mps",
+    "right_surface_gap_rate_filtered_mps",
+    "left_closing_speed_mps",
+    "right_closing_speed_mps",
+    "left_dynamic_valid",
+    "right_dynamic_valid",
+    "left_tracking_valid",
+    "right_tracking_valid",
+    "left_gap_measurement_valid",
+    "right_gap_measurement_valid",
+    "left_gap_rate_valid",
+    "right_gap_rate_valid",
+    "left_relative_velocity_valid",
+    "right_relative_velocity_valid",
+    "left_closing_speed_valid",
+    "right_closing_speed_valid",
+    "left_ttc_valid",
+    "right_ttc_valid",
+    "left_dynamic_measurement_valid",
+    "right_dynamic_measurement_valid",
+    "max_closing_speed_mps",
+    "dynamic_measurement_valid",
+    "ttc_valid",
+    "dynamic_valid",
+    "closest_collider_switched_left",
+    "closest_collider_switched_right",
+    "pose_source_switched_left",
+    "pose_source_switched_right",
+)
+
+
 class HRIObsRecorder:
     """Small HDF5 recorder for VR HRI sessions.
 
@@ -42,7 +103,7 @@ class HRIObsRecorder:
     directly into the existing policy/training readers.
     """
 
-    SCHEMA_VERSION = "hri_obs_v7_83d_surface_point_dynamic_safety_sync"
+    SCHEMA_VERSION = "hri_obs_v8_dual_clock_tracked_action_aligned"
 
     def __init__(
         self,
@@ -70,6 +131,11 @@ class HRIObsRecorder:
             **DynamicSafetyConfig.from_env().metadata(),
             **dict(file_metadata or {}),
         }
+        validate_production_metadata(
+            production_mode=bool(merged_file_metadata.get("production_mode", False)),
+            participant_id=str(merged_file_metadata.get("participant_id", "")),
+            code_version=str(merged_file_metadata.get("code_version", "")),
+        )
         if self._use_hdf5:
             mode = "w" if overwrite else "a"
             try:
@@ -116,6 +182,12 @@ class HRIObsRecorder:
             self._file.attrs["hri_observation_dim"] = int(HRI_OBS_DIM)
             self._file.attrs["hri_observation_fields"] = ",".join(HRI_OBS_FIELD_NAMES)
             self._file.attrs["sample_interval_steps"] = int(self.sample_interval_steps)
+            self._file.attrs["row_state_semantics"] = "observation_at_state_t"
+            self._file.attrs["row_action_semantics"] = (
+                "previous_applied_action_t_minus_1_and_next_commanded_action_t"
+            )
+            self._file.attrs["canonical_dynamic_clock"] = "monotonic_wall_time"
+            self._file.attrs["unix_wall_time_usage"] = "EEG_and_external_stream_alignment_only"
             for key, value in merged_file_metadata.items():
                 self._file.attrs[str(key)] = value
         else:
@@ -136,6 +208,18 @@ class HRIObsRecorder:
                     "attrs/sample_interval_steps": np.asarray(
                         int(self.sample_interval_steps), dtype=np.int32
                     ),
+                    "attrs/row_state_semantics": np.asarray(
+                        "observation_at_state_t"
+                    ),
+                    "attrs/row_action_semantics": np.asarray(
+                        "previous_applied_action_t_minus_1_and_next_commanded_action_t"
+                    ),
+                    "attrs/canonical_dynamic_clock": np.asarray(
+                        "monotonic_wall_time"
+                    ),
+                    "attrs/unix_wall_time_usage": np.asarray(
+                        "EEG_and_external_stream_alignment_only"
+                    ),
                 }
             )
             for key, value in merged_file_metadata.items():
@@ -143,6 +227,7 @@ class HRIObsRecorder:
         self._open = False
         self._attrs = {}
         self._buffers = {}
+        self._initial_scene = {}
 
     @property
     def num_episodes(self) -> int:
@@ -154,7 +239,12 @@ class HRIObsRecorder:
     def is_open(self) -> bool:
         return self._open
 
-    def start_episode(self, metadata: Mapping | None = None) -> None:
+    def start_episode(
+        self,
+        metadata: Mapping | None = None,
+        *,
+        initial_scene: Mapping | None = None,
+    ) -> None:
         if self._open:
             return
         self._open = True
@@ -163,10 +253,15 @@ class HRIObsRecorder:
             "episode_start_wall_time_unix_ns": int(time.time_ns()),
             **dict(metadata or {}),
         }
+        self._initial_scene = dict(initial_scene or {})
         self._buffers = {
             "sim_time": [],
             "monotonic_time_ns": [],
+            "pose_monotonic_time_ns": [],
             "wall_time_unix_ns": [],
+            "real_time_factor": [],
+            "real_time_factor_valid": [],
+            "action_command_monotonic_ns": [],
             "step": [],
             "obs": {field.name: [] for field in RECORDED_OBSERVATION_FIELDS},
             "obs_policy": [],
@@ -179,6 +274,37 @@ class HRIObsRecorder:
                 "right_hand_vel_filtered_mps": [],
                 "left_hand_velocity_valid": [],
                 "right_hand_velocity_valid": [],
+                "head_pose_valid": [],
+                "left_hand_pose_valid": [],
+                "right_hand_pose_valid": [],
+                "head_position_tracked": [],
+                "left_hand_position_tracked": [],
+                "right_hand_position_tracked": [],
+                "head_tracking_status_known": [],
+                "left_hand_tracking_status_known": [],
+                "right_hand_tracking_status_known": [],
+                "head_pose_source_id": [],
+                "left_hand_pose_source_id": [],
+                "right_hand_pose_source_id": [],
+                "head_pose_source_name": [],
+                "left_hand_pose_source_name": [],
+                "right_hand_pose_source_name": [],
+                "head_pose_source_path": [],
+                "left_hand_pose_source_path": [],
+                "right_hand_pose_source_path": [],
+                "head_pose_source_switched": [],
+                "left_hand_pose_source_switched": [],
+                "right_hand_pose_source_switched": [],
+                "head_pose_acquisition_monotonic_ns": [],
+                "left_hand_pose_acquisition_monotonic_ns": [],
+                "right_hand_pose_acquisition_monotonic_ns": [],
+                "head_pose_age_ms": [],
+                "left_hand_pose_age_ms": [],
+                "right_hand_pose_age_ms": [],
+                "head_forward_world": [],
+                "head_forward_valid": [],
+                "head_orientation_wxyz": [],
+                "head_orientation_valid": [],
             },
             "current_pick_idx": [],
             "completed_picks": [],
@@ -259,12 +385,31 @@ class HRIObsRecorder:
                 "right_ttc_s": [],
                 "left_dynamic_valid": [],
                 "right_dynamic_valid": [],
+                "left_tracking_valid": [],
+                "right_tracking_valid": [],
+                "left_gap_measurement_valid": [],
+                "right_gap_measurement_valid": [],
+                "left_gap_rate_valid": [],
+                "right_gap_rate_valid": [],
+                "left_relative_velocity_valid": [],
+                "right_relative_velocity_valid": [],
+                "left_closing_speed_valid": [],
+                "right_closing_speed_valid": [],
+                "left_ttc_valid": [],
+                "right_ttc_valid": [],
+                "left_dynamic_measurement_valid": [],
+                "right_dynamic_measurement_valid": [],
                 "min_ttc_s": [],
                 "max_closing_speed_mps": [],
+                "dynamic_measurement_valid": [],
+                "ttc_valid": [],
                 "dynamic_valid": [],
                 "closest_collider_switched_left": [],
                 "closest_collider_switched_right": [],
+                "pose_source_switched_left": [],
+                "pose_source_switched_right": [],
             },
+            "dynamic_sim": {},
             "errp": {
                 "label": [],
                 "feedback": [],
@@ -273,9 +418,14 @@ class HRIObsRecorder:
                 "aligned_step": [],
             },
             "actions": {
-                "robot_joint_positions": [],
-                "robot_joint_velocities": [],
-                "robot_joint_efforts": [],
+                "previous_applied_joint_positions": [],
+                "previous_applied_joint_velocities": [],
+                "previous_applied_joint_efforts": [],
+                "previous_applied_valid": [],
+                "next_commanded_joint_positions": [],
+                "next_commanded_joint_velocities": [],
+                "next_commanded_joint_efforts": [],
+                "next_commanded_valid": [],
             },
             "rewards": {
                 "task": [],
@@ -300,7 +450,11 @@ class HRIObsRecorder:
         step: int,
         sim_time: float,
         monotonic_time_ns: int | None = None,
+        pose_monotonic_time_ns: int | None = None,
         wall_time_unix_ns: int | None = None,
+        real_time_factor: float = 0.0,
+        real_time_factor_valid: bool = False,
+        action_command_monotonic_ns: int | None = None,
         obs: dict[str, np.ndarray],
         current_pick_idx: int = 0,
         completed_picks: int = 0,
@@ -309,8 +463,12 @@ class HRIObsRecorder:
         failed_attempts: int = 0,
         safety: Mapping | None = None,
         dynamic: Mapping | None = None,
+        dynamic_sim: Mapping | None = None,
+        tracking: Mapping | None = None,
         errp: Mapping | None = None,
         action=None,
+        previous_action=None,
+        next_action=None,
         reward: Mapping | None = None,
     ) -> None:
         if not self._open:
@@ -320,11 +478,33 @@ class HRIObsRecorder:
         validate_observation(obs)
         validate_auxiliary_observation(obs)
         self._buffers["sim_time"].append(float(sim_time))
-        self._buffers["monotonic_time_ns"].append(
-            int(time.monotonic_ns() if monotonic_time_ns is None else monotonic_time_ns)
+        sample_monotonic_ns = int(
+            time.monotonic_ns() if monotonic_time_ns is None else monotonic_time_ns
         )
+        self._buffers["monotonic_time_ns"].append(sample_monotonic_ns)
         self._buffers["wall_time_unix_ns"].append(
             int(time.time_ns() if wall_time_unix_ns is None else wall_time_unix_ns)
+        )
+        valid_mask, inferred_pose_ns = self._append_tracking(tracking, obs)
+        self._buffers["pose_monotonic_time_ns"].append(
+            int(
+                (inferred_pose_ns or sample_monotonic_ns)
+                if pose_monotonic_time_ns is None
+                else pose_monotonic_time_ns
+            )
+        )
+        self._buffers["real_time_factor"].append(
+            _finite_scalar(real_time_factor, 0.0)
+        )
+        self._buffers["real_time_factor_valid"].append(
+            float(bool(real_time_factor_valid))
+        )
+        self._buffers["action_command_monotonic_ns"].append(
+            int(
+                sample_monotonic_ns
+                if action_command_monotonic_ns is None
+                else action_command_monotonic_ns
+            )
         )
         self._buffers["step"].append(int(step))
         for field in RECORDED_OBSERVATION_FIELDS:
@@ -333,21 +513,16 @@ class HRIObsRecorder:
             )
         self._buffers["obs_policy"].append(flatten_observation(obs))
         self._buffers["hri_obs_policy"].append(flatten_hri_observation(obs))
-        valid = np.array(
-            [
-                float(np.linalg.norm(obs["human_head_pos"]) > 1e-6),
-                float(np.linalg.norm(obs["human_left_hand_pos"]) > 1e-6),
-                float(np.linalg.norm(obs["human_right_hand_pos"]) > 1e-6),
-            ],
-            dtype=np.float32,
-        )
-        self._buffers["human_valid_mask"].append(valid)
+        self._buffers["human_valid_mask"].append(valid_mask)
         self._buffers["current_pick_idx"].append(int(current_pick_idx))
         self._buffers["completed_picks"].append(int(completed_picks))
         self._append_safety(obs, safety)
         self._append_dynamic(dynamic)
+        self._append_dynamic_sim(dynamic_sim)
         self._append_errp(errp, step)
-        self._append_action(action)
+        if previous_action is None and action is not None:
+            previous_action = action
+        self._append_actions(previous_action, next_action)
         self._append_reward(obs, reward)
         self._buffers["task"]["current_pick_idx"].append(int(current_pick_idx))
         self._buffers["task"]["completed_picks"].append(int(completed_picks))
@@ -366,6 +541,7 @@ class HRIObsRecorder:
             self._open = False
             self._attrs = {}
             self._buffers = {}
+            self._initial_scene = {}
             return None
 
         episode_name = f"episode_{self.num_episodes:06d}"
@@ -381,6 +557,7 @@ class HRIObsRecorder:
             self._open = False
             self._attrs = {}
             self._buffers = {}
+            self._initial_scene = {}
             return f"/episodes/{episode_name}"
 
         group = self._episodes.create_group(episode_name)
@@ -392,7 +569,23 @@ class HRIObsRecorder:
             group, "monotonic_time_ns", self._buffers["monotonic_time_ns"]
         )
         self._write_dataset(
+            group, "pose_monotonic_time_ns", self._buffers["pose_monotonic_time_ns"]
+        )
+        self._write_dataset(
             group, "wall_time_unix_ns", self._buffers["wall_time_unix_ns"]
+        )
+        self._write_dataset(
+            group, "real_time_factor", self._buffers["real_time_factor"]
+        )
+        self._write_dataset(
+            group,
+            "real_time_factor_valid",
+            self._buffers["real_time_factor_valid"],
+        )
+        self._write_dataset(
+            group,
+            "action_command_monotonic_ns",
+            self._buffers["action_command_monotonic_ns"],
         )
         self._write_dataset(group, "step", self._buffers["step"])
         self._write_dataset(group, "obs_policy", self._buffers["obs_policy"])
@@ -416,15 +609,27 @@ class HRIObsRecorder:
         for name, values in self._buffers["human"].items():
             self._write_dataset(human_group, name, values)
 
-        for group_name in ("safety", "errp", "actions", "rewards", "task"):
+        for group_name in (
+            "safety",
+            "dynamic_sim",
+            "errp",
+            "actions",
+            "rewards",
+            "task",
+        ):
             out_group = group.create_group(group_name)
             for name, values in self._buffers[group_name].items():
                 self._write_dataset(out_group, name, values)
+
+        initial_scene_group = group.create_group("initial_scene")
+        for name, value in self._initial_scene.items():
+            self._write_dataset(initial_scene_group, str(name), value)
 
         self._file.flush()
         self._open = False
         self._attrs = {}
         self._buffers = {}
+        self._initial_scene = {}
         return group.name
 
     def close(self) -> None:
@@ -437,7 +642,16 @@ class HRIObsRecorder:
 
     def _write_dataset(self, group, name: str, values) -> None:
         arr = np.asarray(values)
-        group.create_dataset(name, data=arr, compression=self.compression)
+        if arr.dtype.kind in ("U", "O"):
+            string_dtype = self._h5py.string_dtype(encoding="utf-8")
+            if arr.ndim == 0:
+                arr = np.asarray(str(arr.item()), dtype=string_dtype)
+            else:
+                arr = np.asarray([str(value) for value in arr.reshape(-1)], dtype=string_dtype).reshape(
+                    arr.shape
+                )
+        compression = self.compression if arr.ndim > 0 else None
+        group.create_dataset(name, data=arr, compression=compression)
 
     def _save_npz_episode(self, episode_name: str, attrs: Mapping) -> None:
         base = f"episodes/{episode_name}"
@@ -447,8 +661,20 @@ class HRIObsRecorder:
         self._npz_payload[f"{base}/monotonic_time_ns"] = np.asarray(
             self._buffers["monotonic_time_ns"], dtype=np.int64
         )
+        self._npz_payload[f"{base}/pose_monotonic_time_ns"] = np.asarray(
+            self._buffers["pose_monotonic_time_ns"], dtype=np.int64
+        )
         self._npz_payload[f"{base}/wall_time_unix_ns"] = np.asarray(
             self._buffers["wall_time_unix_ns"], dtype=np.int64
+        )
+        self._npz_payload[f"{base}/real_time_factor"] = np.asarray(
+            self._buffers["real_time_factor"], dtype=np.float32
+        )
+        self._npz_payload[f"{base}/real_time_factor_valid"] = np.asarray(
+            self._buffers["real_time_factor_valid"], dtype=np.float32
+        )
+        self._npz_payload[f"{base}/action_command_monotonic_ns"] = np.asarray(
+            self._buffers["action_command_monotonic_ns"], dtype=np.int64
         )
         self._npz_payload[f"{base}/step"] = np.asarray(self._buffers["step"])
         self._npz_payload[f"{base}/obs_policy"] = np.asarray(self._buffers["obs_policy"])
@@ -482,15 +708,93 @@ class HRIObsRecorder:
         )
         for name, values in self._buffers["human"].items():
             self._npz_payload[f"{base}/human/{name}"] = np.asarray(values)
-        for group_name in ("safety", "errp", "actions", "rewards", "task"):
+        for group_name in (
+            "safety",
+            "dynamic_sim",
+            "errp",
+            "actions",
+            "rewards",
+            "task",
+        ):
             for name, values in self._buffers[group_name].items():
                 self._npz_payload[f"{base}/{group_name}/{name}"] = np.asarray(values)
+        for name, value in self._initial_scene.items():
+            self._npz_payload[f"{base}/initial_scene/{name}"] = np.asarray(value)
 
     def _flush_npz(self) -> None:
         self._npz_payload["attrs/episode_count"] = np.asarray(
             int(self._npz_episode_count), dtype=np.int32
         )
         np.savez_compressed(self.path, **self._npz_payload)
+
+    def _append_tracking(
+        self, tracking: Mapping | None, obs: dict[str, np.ndarray]
+    ) -> tuple[np.ndarray, int]:
+        tracking = dict(tracking or {})
+        entities = (
+            ("head", "human_head_pos"),
+            ("left_hand", "human_left_hand_pos"),
+            ("right_hand", "human_right_hand_pos"),
+        )
+        mask = []
+        acquisition_times = []
+        for entity, obs_name in entities:
+            sample = tracking.get(entity)
+
+            def _value(name, default):
+                if isinstance(sample, Mapping):
+                    return sample.get(name, default)
+                return getattr(sample, name, default) if sample is not None else default
+
+            fallback_valid = bool(np.linalg.norm(obs[obs_name]) > 1e-6)
+            pose_valid = bool(_value("pose_valid", fallback_valid))
+            tracked = int(_value("position_tracked", -1))
+            tracking_known = bool(_value("tracking_status_known", False))
+            source_name = str(_value("source_name", "legacy_unknown"))
+            source_path = str(_value("source_path", ""))
+            source_id = int(_value("source_id", 0))
+            switched = bool(_value("source_switched", False))
+            acquisition_ns = int(_value("acquisition_monotonic_ns", 0))
+            pose_age_ms = _finite_scalar(_value("pose_age_ms", -1.0), -1.0)
+            prefix = entity
+            self._buffers["human"][f"{prefix}_pose_valid"].append(float(pose_valid))
+            self._buffers["human"][f"{prefix}_position_tracked"].append(tracked)
+            self._buffers["human"][f"{prefix}_tracking_status_known"].append(
+                float(tracking_known)
+            )
+            self._buffers["human"][f"{prefix}_pose_source_id"].append(source_id)
+            self._buffers["human"][f"{prefix}_pose_source_name"].append(source_name)
+            self._buffers["human"][f"{prefix}_pose_source_path"].append(source_path)
+            self._buffers["human"][f"{prefix}_pose_source_switched"].append(
+                float(switched)
+            )
+            self._buffers["human"][
+                f"{prefix}_pose_acquisition_monotonic_ns"
+            ].append(acquisition_ns)
+            self._buffers["human"][f"{prefix}_pose_age_ms"].append(pose_age_ms)
+            mask.append(float(pose_valid))
+            if acquisition_ns > 0:
+                acquisition_times.append(acquisition_ns)
+
+        head_sample = tracking.get("head")
+        if isinstance(head_sample, Mapping):
+            orientation = head_sample.get("orientation_wxyz")
+        else:
+            orientation = getattr(head_sample, "orientation_wxyz", None)
+        orientation_valid = orientation is not None
+        self._buffers["human"]["head_orientation_wxyz"].append(
+            _finite_array(orientation, 4) if orientation_valid else np.zeros(4, dtype=np.float32)
+        )
+        self._buffers["human"]["head_orientation_valid"].append(
+            float(orientation_valid)
+        )
+        forward = tracking.get("head_forward_world")
+        forward_valid = forward is not None
+        self._buffers["human"]["head_forward_world"].append(
+            _finite_array(forward, 3) if forward_valid else np.zeros(3, dtype=np.float32)
+        )
+        self._buffers["human"]["head_forward_valid"].append(float(forward_valid))
+        return np.asarray(mask, dtype=np.float32), max(acquisition_times, default=0)
 
     def _append_safety(self, obs: dict[str, np.ndarray], safety: Mapping | None) -> None:
         safety = dict(safety or {})
@@ -702,14 +1006,54 @@ class HRIObsRecorder:
             "right_ttc_s": dynamic.get("right_ttc_s", 10.0),
             "left_dynamic_valid": dynamic.get("left_dynamic_valid", 0.0),
             "right_dynamic_valid": dynamic.get("right_dynamic_valid", 0.0),
+            "left_tracking_valid": dynamic.get("left_tracking_valid", 0.0),
+            "right_tracking_valid": dynamic.get("right_tracking_valid", 0.0),
+            "left_gap_measurement_valid": dynamic.get(
+                "left_gap_measurement_valid", 0.0
+            ),
+            "right_gap_measurement_valid": dynamic.get(
+                "right_gap_measurement_valid", 0.0
+            ),
+            "left_gap_rate_valid": dynamic.get("left_gap_rate_valid", 0.0),
+            "right_gap_rate_valid": dynamic.get("right_gap_rate_valid", 0.0),
+            "left_relative_velocity_valid": dynamic.get(
+                "left_relative_velocity_valid", 0.0
+            ),
+            "right_relative_velocity_valid": dynamic.get(
+                "right_relative_velocity_valid", 0.0
+            ),
+            "left_closing_speed_valid": dynamic.get(
+                "left_closing_speed_valid", 0.0
+            ),
+            "right_closing_speed_valid": dynamic.get(
+                "right_closing_speed_valid", 0.0
+            ),
+            "left_ttc_valid": dynamic.get("left_ttc_valid", 0.0),
+            "right_ttc_valid": dynamic.get("right_ttc_valid", 0.0),
+            "left_dynamic_measurement_valid": dynamic.get(
+                "left_dynamic_measurement_valid", 0.0
+            ),
+            "right_dynamic_measurement_valid": dynamic.get(
+                "right_dynamic_measurement_valid", 0.0
+            ),
             "min_ttc_s": dynamic.get("min_ttc_s", 10.0),
             "max_closing_speed_mps": dynamic.get("max_closing_speed_mps", 0.0),
+            "dynamic_measurement_valid": dynamic.get(
+                "dynamic_measurement_valid", 0.0
+            ),
+            "ttc_valid": dynamic.get("ttc_valid", 0.0),
             "dynamic_valid": dynamic.get("dynamic_valid", 0.0),
             "closest_collider_switched_left": dynamic.get(
                 "closest_collider_switched_left", 0.0
             ),
             "closest_collider_switched_right": dynamic.get(
                 "closest_collider_switched_right", 0.0
+            ),
+            "pose_source_switched_left": dynamic.get(
+                "pose_source_switched_left", 0.0
+            ),
+            "pose_source_switched_right": dynamic.get(
+                "pose_source_switched_right", 0.0
             ),
         }
         for name, value in safety_values.items():
@@ -719,6 +1063,21 @@ class HRIObsRecorder:
                 default = 10.0 if name.endswith("_ttc_s") or name == "min_ttc_s" else 0.0
                 self._buffers["safety"][name].append(_finite_scalar(value, default))
 
+    def _append_dynamic_sim(self, dynamic: Mapping | None) -> None:
+        dynamic = dict(dynamic or {})
+        for name in _DYNAMIC_VECTOR_FIELDS:
+            self._buffers["dynamic_sim"].setdefault(name, []).append(
+                _finite_array(dynamic.get(name), 3)
+            )
+        for name in _DYNAMIC_TTC_FIELDS:
+            self._buffers["dynamic_sim"].setdefault(name, []).append(
+                _finite_scalar(dynamic.get(name, 10.0), 10.0)
+            )
+        for name in _DYNAMIC_SCALAR_FIELDS:
+            self._buffers["dynamic_sim"].setdefault(name, []).append(
+                _finite_scalar(dynamic.get(name, 0.0), 0.0)
+            )
+
     def _append_errp(self, errp: Mapping | None, step: int) -> None:
         errp = dict(errp or {})
         self._buffers["errp"]["label"].append(int(errp.get("label", 0)))
@@ -727,14 +1086,24 @@ class HRIObsRecorder:
         self._buffers["errp"]["timestamp"].append(float(errp.get("timestamp", np.nan)))
         self._buffers["errp"]["aligned_step"].append(int(errp.get("aligned_step", step)))
 
-    def _append_action(self, action) -> None:
-        for name, attr in (
-            ("robot_joint_positions", "joint_positions"),
-            ("robot_joint_velocities", "joint_velocities"),
-            ("robot_joint_efforts", "joint_efforts"),
+    def _append_actions(self, previous_action, next_action) -> None:
+        for prefix, action in (
+            ("previous_applied", previous_action),
+            ("next_commanded", next_action),
         ):
-            value = getattr(action, attr, None) if action is not None else None
-            self._buffers["actions"][name].append(_fixed_array(value, 9, fill=np.nan))
+            valid = False
+            for suffix, attr in (
+                ("joint_positions", "joint_positions"),
+                ("joint_velocities", "joint_velocities"),
+                ("joint_efforts", "joint_efforts"),
+            ):
+                value = getattr(action, attr, None) if action is not None else None
+                if value is not None:
+                    valid = True
+                self._buffers["actions"][f"{prefix}_{suffix}"].append(
+                    _fixed_array(value, 9, fill=np.nan)
+                )
+            self._buffers["actions"][f"{prefix}_valid"].append(float(valid))
 
     def _append_reward(self, obs: dict[str, np.ndarray], reward: Mapping | None) -> None:
         reward = dict(reward or {})

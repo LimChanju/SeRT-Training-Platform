@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
+from typing import Mapping
 
 
 DISTAL_LINK_NAMES = (
@@ -111,6 +112,8 @@ class HandSafetyResult:
     closest_link_id: int = 0
     closest_collider_path: str = ""
     closest_collider_id: int = 0
+    closest_surface_point_world_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    closest_surface_point_valid: bool = False
     contact: bool = False
     collision: bool = False
     contact_force_n: float = 0.0
@@ -121,6 +124,38 @@ class HandSafetyResult:
     distance_gate: float = 0.0
     query_time_ms: float = 0.0
     query_count: int = 0
+
+
+def select_nearest_collider_path(
+    candidates,
+    center_to_surface_distance_m: Mapping[str, float],
+    *,
+    previous_path: str = "",
+    tie_tolerance_m: float = 0.00025,
+) -> str:
+    """Select the geometrically nearest candidate with stable tie handling."""
+
+    valid = []
+    for path in candidates:
+        path = str(path)
+        try:
+            distance = float(center_to_surface_distance_m[path])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(distance) and distance > 0.0:
+            valid.append((distance, path))
+    if not valid:
+        paths = tuple(sorted(str(path) for path in candidates))
+        return previous_path if previous_path in paths else (paths[0] if paths else "")
+
+    valid.sort(key=lambda item: (item[0], item[1]))
+    minimum = valid[0][0]
+    tied = {
+        path for distance, path in valid if distance <= minimum + float(tie_tolerance_m)
+    }
+    if previous_path in tied:
+        return previous_path
+    return valid[0][1]
 
 
 @dataclass(frozen=True)

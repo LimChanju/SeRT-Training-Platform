@@ -1,14 +1,35 @@
 import os
 import time
 
+try:
+    from v3_chan.scene_randomization import resolve_session_seed
+except ImportError:
+    from scene_randomization import resolve_session_seed
+try:
+    from v3_chan.collection_provenance import resolve_code_version
+except ImportError:
+    from collection_provenance import resolve_code_version
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(BASE_DIR)
+HRI_PRODUCTION_MODE = os.environ.get("HRI_PRODUCTION_MODE", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 HRI_SESSION_ID = os.environ.get("HRI_SESSION_ID", "").strip() or (
     f"local_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
 )
+HRI_SESSION_SEED = resolve_session_seed(os.environ.get("HRI_SESSION_SEED"))
+(
+    HRI_CODE_VERSION,
+    HRI_CODE_VERSION_SOURCE,
+    HRI_SOURCE_TREE_SHA256,
+) = resolve_code_version(PROJECT_DIR, os.environ.get("HRI_CODE_VERSION"))
 HRI_PARTICIPANT_ID = os.environ.get("HRI_PARTICIPANT_ID", "unspecified").strip()
 HRI_PROTOCOL_VERSION = os.environ.get(
-    "HRI_PROTOCOL_VERSION", "surface_gap_dynamic_multispeed_counterbalanced_v3"
+    "HRI_PROTOCOL_VERSION", "surface_gap_dynamic_multispeed_dualclock_v4"
 ).strip()
 HRI_SPEED_ORDER_INDEX = int(os.environ.get("HRI_SPEED_ORDER_INDEX", "0"))
 HRI_SPEED_PROFILE_ORDER = os.environ.get(

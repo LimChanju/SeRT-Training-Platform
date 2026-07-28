@@ -9,6 +9,7 @@ from v3_chan.hri_obs_recorder import (
     build_observation,
     flatten_observation,
 )
+from v3_chan.pose_tracking import PoseSample, TRACKING_TRACKED
 
 
 class _PoseObject:
@@ -83,6 +84,12 @@ def test_surface_gap_flags_and_policy_compatibility():
 
 
 def test_hri_recorder_writes_surface_schema(tmp_path):
+    class _Action:
+        def __init__(self, value):
+            self.joint_positions = np.full(9, value, dtype=np.float32)
+            self.joint_velocities = None
+            self.joint_efforts = None
+
     path = tmp_path / "surface_obs.hdf5"
     recorder = HRIObsRecorder(
         str(path),
@@ -95,13 +102,35 @@ def test_hri_recorder_writes_surface_schema(tmp_path):
             "time_sync_schema": "sim_monotonic_unix_v1",
         },
     )
-    recorder.start_episode()
+    recorder.start_episode(
+        initial_scene={
+            "layout_id": "layout-001",
+            "cube_positions_world": np.zeros((6, 3)),
+        }
+    )
+    tracked_left = PoseSample(
+        position_world=[0.2, 0.0, 0.0],
+        pose_valid=True,
+        position_tracked=TRACKING_TRACKED,
+        tracking_status_known=True,
+        source_name="openxr_joint",
+        source_path="/user/hand/left/palm",
+        acquisition_monotonic_ns=120,
+    )
     recorder.add_sample(
         step=1,
         sim_time=0.01,
         monotonic_time_ns=123,
+        pose_monotonic_time_ns=124,
         wall_time_unix_ns=456,
+        real_time_factor=0.75,
+        real_time_factor_valid=True,
+        action_command_monotonic_ns=125,
         obs=_observation(0.01),
+        tracking={"left_hand": tracked_left},
+        dynamic_sim={"left_ttc_s": 1.25},
+        previous_action=_Action(1.0),
+        next_action=_Action(2.0),
     )
     recorder.end_episode(success=True)
     recorder.close()
@@ -111,7 +140,7 @@ def test_hri_recorder_writes_surface_schema(tmp_path):
     with h5py.File(path, "r") as data:
         episode = data["episodes/episode_000000"]
         assert data.attrs["schema_version"] == (
-            "hri_obs_v7_83d_surface_point_dynamic_safety_sync"
+            "hri_obs_v8_dual_clock_tracked_action_aligned"
         )
         assert int(data.attrs["observation_dim"]) == 84
         assert int(data.attrs["hri_observation_dim"]) == 83
@@ -125,9 +154,30 @@ def test_hri_recorder_writes_surface_schema(tmp_path):
         assert episode["obs_policy"].shape == (1, 84)
         assert episode["hri_obs_policy"].shape == (1, 83)
         assert episode["monotonic_time_ns"].shape == (1,)
+        assert int(episode["pose_monotonic_time_ns"][0]) == 124
         assert episode["wall_time_unix_ns"].shape == (1,)
         assert int(episode["monotonic_time_ns"][0]) == 123
         assert int(episode["wall_time_unix_ns"][0]) == 456
+        assert np.isclose(episode["real_time_factor"][0], 0.75)
+        assert bool(episode["real_time_factor_valid"][0])
+        assert int(episode["action_command_monotonic_ns"][0]) == 125
+        assert bool(episode["human/left_hand_pose_valid"][0])
+        assert int(episode["human/left_hand_position_tracked"][0]) == 1
+        assert int(episode["human_valid_mask"][0, 1]) == 1
+        assert np.isclose(episode["dynamic_sim/left_ttc_s"][0], 1.25)
+        np.testing.assert_allclose(
+            episode["actions/previous_applied_joint_positions"][0], 1.0
+        )
+        np.testing.assert_allclose(
+            episode["actions/next_commanded_joint_positions"][0], 2.0
+        )
+        assert bool(episode["actions/previous_applied_valid"][0])
+        assert bool(episode["actions/next_commanded_valid"][0])
+        layout_id = episode["initial_scene/layout_id"][()]
+        if isinstance(layout_id, bytes):
+            layout_id = layout_id.decode("utf-8")
+        assert layout_id == "layout-001"
+        assert episode["initial_scene/cube_positions_world"].shape == (6, 3)
         assert "episode_start_monotonic_ns" in episode.attrs
         assert "episode_end_monotonic_ns" in episode.attrs
         assert "min_hand_gripper_center_dist" in episode["obs"]
@@ -161,5 +211,5 @@ def test_hri_recorder_preserves_nonempty_legacy_schema(tmp_path):
         assert "episode_000000" in data["episodes"]
     with h5py.File(new_path, "r") as data:
         assert data.attrs["schema_version"] == (
-            "hri_obs_v7_83d_surface_point_dynamic_safety_sync"
+            "hri_obs_v8_dual_clock_tracked_action_aligned"
         )

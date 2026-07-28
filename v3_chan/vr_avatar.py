@@ -10,11 +10,27 @@
 #   이후 get_virtual_world_pose()가 직접 시뮬 월드 좌표를 반환하므로 그대로 사용.
 
 import os
+import time
 
 import numpy as np
 from pxr import Gf, Usd, UsdGeom
 
 from end_effector_safety_geometry import DEFAULT_THRESHOLDS
+
+try:
+    from v3_chan.pose_tracking import (
+        PoseSample,
+        PoseSourceLatch,
+        TRACKING_TRACKED,
+        TRACKING_UNKNOWN,
+    )
+except ImportError:
+    from pose_tracking import (
+        PoseSample,
+        PoseSourceLatch,
+        TRACKING_TRACKED,
+        TRACKING_UNKNOWN,
+    )
 
 # 아바타 머리 중심 위치 (시뮬 월드 좌표)
 AVATAR_HEAD_INIT = np.array([1.1, 0.0, 1.5])
@@ -68,6 +84,9 @@ XR_CONTROLLER_WORKSPACE_GUARD = os.environ.get(
 XR_CONTROLLER_MAX_HEAD_DIST_M = float(os.environ.get("XR_CONTROLLER_MAX_HEAD_DIST_M", "1.85"))
 XR_CONTROLLER_MIN_Z_M = float(os.environ.get("XR_CONTROLLER_MIN_Z_M", "0.35"))
 XR_CONTROLLER_MAX_Z_M = float(os.environ.get("XR_CONTROLLER_MAX_Z_M", "2.25"))
+XR_POSE_SOURCE_CONFIRMATION_FRAMES = max(
+    1, int(os.environ.get("XR_POSE_SOURCE_CONFIRMATION_FRAMES", "3"))
+)
 
 # SteamVR/OpenVR room space is X-right, Y-up, -Z-forward.
 # Isaac stage here is Z-up, with the user facing the table along -X.
@@ -282,6 +301,7 @@ class VRAvatar:
         self._debug_draw  = None
         self._devices = {}
         self._last_pose_mats = {}
+        self._last_pose_kind = {}
         self._stage_visual_candidates = {"left": [], "right": []}
         self._stage_visual_scan_ticks = {"left": 0, "right": 0}
         self._stage_visual_logged = {"left": False, "right": False}
@@ -289,6 +309,16 @@ class VRAvatar:
         self._external_hand_joints = {"left": {}, "right": {}}
         self._external_hand_logged = {"left": False, "right": False}
         self._external_hand_missing_logged = {"left": False, "right": False}
+        self._last_controller_source = {"left": None, "right": None}
+        self._last_stage_visual_path = {"left": "", "right": ""}
+        self._last_openxr_tracking = {
+            "left": (TRACKING_UNKNOWN, False),
+            "right": (TRACKING_UNKNOWN, False),
+        }
+        self._pose_source_latches = {
+            "left": PoseSourceLatch(XR_POSE_SOURCE_CONFIRMATION_FRAMES),
+            "right": PoseSourceLatch(XR_POSE_SOURCE_CONFIRMATION_FRAMES),
+        }
 
         # xrAnchor 이동 전 최초 HMD 실제 룸 좌표 (XR 트래킹 시작 후)
         self._p_hmd0: "np.ndarray | None" = None
@@ -319,6 +349,7 @@ class VRAvatar:
             f"workspace-guard={XR_CONTROLLER_WORKSPACE_GUARD} "
             f"z=[{XR_CONTROLLER_MIN_Z_M:.2f},{XR_CONTROLLER_MAX_Z_M:.2f}]m "
             f"max-head-dist={XR_CONTROLLER_MAX_HEAD_DIST_M:.2f}m | "
+            f"source-confirmation={XR_POSE_SOURCE_CONFIRMATION_FRAMES}frames | "
             "safety-geometry=built-in-panda-physx (external runtime) | "
             f"hand-radius={HAND_RADIUS:.3f}m | "
             f"zero-pose-invalid<{XR_ZERO_POSE_INVALID_DIST:.3f}m | "
@@ -462,6 +493,7 @@ class VRAvatar:
                     phys_pos = None
                 if phys_pos is not None and np.all(np.isfinite(phys_pos)) and not _is_invalid_xr_pos(xr_path, phys_pos):
                     self._last_pose_mats[(xr_path, label)] = phys_mat
+                    self._last_pose_kind[xr_path] = "physical"
                     key = f"{xr_path}:{label}:physical"
                     if key not in self._physical_pose_paths:
                         self._physical_pose_paths.add(key)
@@ -487,6 +519,7 @@ class VRAvatar:
                     and not _is_invalid_xr_pos(xr_path, raw_phys_pos)
                 ):
                     self._last_pose_mats[(xr_path, label)] = raw_mat
+                    self._last_pose_kind[xr_path] = "raw_physical"
                     key = f"{xr_path}:{label}:raw_physical"
                     if key not in self._physical_pose_paths:
                         self._physical_pose_paths.add(key)
@@ -527,6 +560,7 @@ class VRAvatar:
                 is_dummy = _is_dummy_xr_pos(pos)
                 if not is_dummy:
                     self._last_pose_mats[(xr_path, label)] = mat
+                    self._last_pose_kind[xr_path] = "virtual_world"
                     self._seen_paths.add(xr_path)
                     print(f"[Avatar] XR input detected: {xr_path}:{label} raw={np.round(pos, 3)}")
                     return pos
@@ -690,8 +724,10 @@ class VRAvatar:
                 best = (center, volume)
                 best_path = str(prim.GetPath())
         if best is None:
+            self._last_stage_visual_path[hand] = ""
             return None
         pos = best[0]
+        self._last_stage_visual_path[hand] = str(best_path or "")
         key = f"stage_visual:{hand}"
         if key not in self._seen_paths:
             self._seen_paths.add(key)
@@ -752,6 +788,28 @@ class VRAvatar:
                     f"[Avatar] {hand} controller using {source} pose "
                     f"pos={np.round(arr, 3)}"
                 )
+            source_name = {
+                "physical": "xr_physical",
+                "raw_physical": "xr_raw_physical",
+                "virtual_world": "xr_virtual_world",
+                "stage_visual": "xr_stage_visual",
+                "openxr_joint": "openxr_joint",
+            }.get(source, source)
+            source_path = xr_path_for_hand(hand)
+            tracked, known = TRACKING_UNKNOWN, False
+            if source == "stage_visual":
+                source_path = self._last_stage_visual_path.get(hand, "")
+            elif source == "openxr_joint":
+                source_path = f"{xr_path_for_hand(hand)}/palm"
+                tracked, known = self._last_openxr_tracking.get(
+                    hand, (TRACKING_UNKNOWN, False)
+                )
+            self._last_controller_source[hand] = (
+                source_name,
+                source_path,
+                int(tracked),
+                bool(known),
+            )
             return arr
         self._log_implausible_controller_pose(hand, source, arr)
         return None
@@ -768,7 +826,8 @@ class VRAvatar:
         if raw is None:
             return None
         world_pos = self._room_to_world_from_hmd(raw, AVATAR_EYE_POS)
-        return self._accept_controller_world_pos(hand, "physical", world_pos)
+        source = self._last_pose_kind.get(xr_path, "physical")
+        return self._accept_controller_world_pos(hand, source, world_pos)
 
     def _controller_world_pos_from_virtual(
         self,
@@ -861,7 +920,20 @@ class VRAvatar:
             flags = joint.locationFlags
             valid = flags & self._openxr_spec.XR_SPACE_LOCATION_POSITION_VALID_BIT
             if not valid:
+                self._last_openxr_tracking[hand] = (0, True)
                 return None
+            tracked_bit = getattr(
+                self._openxr_spec,
+                "XR_SPACE_LOCATION_POSITION_TRACKED_BIT",
+                None,
+            )
+            if tracked_bit is None:
+                self._last_openxr_tracking[hand] = (TRACKING_UNKNOWN, False)
+            else:
+                self._last_openxr_tracking[hand] = (
+                    TRACKING_TRACKED if flags & tracked_bit else 0,
+                    True,
+                )
             p = joint.pose.position
             pos = np.array([p.x, p.y, p.z], dtype=float)
             if not np.all(np.isfinite(pos)):
@@ -938,6 +1010,22 @@ class VRAvatar:
             return None
         return self._room_to_world_from_hmd(raw, AVATAR_HEAD_INIT)
 
+    def get_hmd_pose_sample(self) -> PoseSample:
+        position = self.get_hmd_pos()
+        acquired_ns = time.monotonic_ns()
+        if position is None:
+            return PoseSample.invalid(acquisition_monotonic_ns=acquired_ns)
+        return PoseSample(
+            position_world=position,
+            pose_valid=True,
+            position_tracked=TRACKING_UNKNOWN,
+            tracking_status_known=False,
+            source_name="hmd_xr_physical",
+            source_path="displayDevice",
+            acquisition_monotonic_ns=acquired_ns,
+            pose_age_ms=0.0,
+        )
+
     def get_hmd_forward(self) -> "np.ndarray | None":
         """HMD forward direction in Isaac world coordinates."""
         if self._p_hmd0 is None:
@@ -1011,10 +1099,39 @@ class VRAvatar:
         return None
 
     def get_controller_pos(self, hand: str) -> "np.ndarray | None":
+        return self.get_controller_pose_sample(hand).position_world
+
+    def get_controller_pose_sample(self, hand: str) -> PoseSample:
+        self._last_controller_source[hand] = None
         external_pos = self._external_hand_center(hand)
         if external_pos is not None:
-            return external_pos
-        return self._controller_world_pos(hand, XR_CONTROLLER_POSE_PRIORITY)
+            position = external_pos
+            source = (
+                "external_hand_tracking",
+                f"udp:{hand}",
+                TRACKING_UNKNOWN,
+                False,
+            )
+        else:
+            position = self._controller_world_pos(hand, XR_CONTROLLER_POSE_PRIORITY)
+            source = self._last_controller_source.get(hand)
+
+        acquired_ns = time.monotonic_ns()
+        if position is None or source is None:
+            candidate = PoseSample.invalid(acquisition_monotonic_ns=acquired_ns)
+        else:
+            source_name, source_path, tracked, tracking_known = source
+            candidate = PoseSample(
+                position_world=position,
+                pose_valid=True,
+                position_tracked=tracked,
+                tracking_status_known=tracking_known,
+                source_name=source_name,
+                source_path=source_path,
+                acquisition_monotonic_ns=acquired_ns,
+                pose_age_ms=0.0,
+            )
+        return self._pose_source_latches[hand].update(candidate)
 
     def get_hand_pose_pos(self, hand: str, pose_name: str) -> "np.ndarray | None":
         external_points = self._external_hand_joint_positions(hand)
@@ -1115,12 +1232,21 @@ class VRAvatar:
         return head_pos + np.array([0.0, sign * SHOULDER_Y, SHOULDER_Z])
 
     # ── 매 프레임 갱신 ─────────────────────────────────────────────────────
-    def update(self) -> "tuple[np.ndarray|None, np.ndarray|None, np.ndarray|None]":
-        head_pos  = self.get_hmd_pos()
-        left_pos  = self.get_controller_pos("left")
-        right_pos = self.get_controller_pos("right")
+    def update_with_status(self) -> "tuple[PoseSample, PoseSample, PoseSample]":
+        head_sample = self.get_hmd_pose_sample()
+        left_sample = self.get_controller_pose_sample("left")
+        right_sample = self.get_controller_pose_sample("right")
+        head_pos = head_sample.position_world
+        left_pos = left_sample.position_world
+        right_pos = right_sample.position_world
         if head_pos is None and (left_pos is not None or right_pos is not None):
             head_pos = AVATAR_HEAD_INIT
+            head_sample = PoseSample(
+                position_world=head_pos,
+                pose_valid=False,
+                source_name="synthetic_head_fallback",
+                acquisition_monotonic_ns=time.monotonic_ns(),
+            )
 
         if left_pos  is not None and self._lhand_prim is not None:
             self._lhand_prim.set_world_pose(position=left_pos)
@@ -1147,7 +1273,11 @@ class VRAvatar:
                     except Exception:
                         pass
 
-        return head_pos, left_pos, right_pos
+        return head_sample, left_sample, right_sample
+
+    def update(self) -> "tuple[np.ndarray|None, np.ndarray|None, np.ndarray|None]":
+        head, left, right = self.update_with_status()
+        return head.position_world, left.position_world, right.position_world
 
     def get_avatar_prims(self) -> list:
         prims = [p for p in (self._lhand_prim, self._rhand_prim) if p is not None]

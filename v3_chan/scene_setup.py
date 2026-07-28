@@ -9,6 +9,11 @@ from omni.isaac.core import World
 from omni.isaac.core.utils.viewports import set_camera_view
 from omni.isaac.core.objects import DynamicCuboid, FixedCuboid, VisualCuboid
 
+try:
+    from v3_chan.scene_randomization import sample_cube_positions
+except ImportError:
+    from scene_randomization import sample_cube_positions
+
 
 def create_world() -> World:
     world = World(
@@ -25,30 +30,20 @@ def _sample_positions(
     cube_size: float,
     count: int,
     forbidden_xy: np.ndarray = None,
+    rng: np.random.Generator | None = None,
 ):
-    xy_half = (table_size[:2] / 2.0) - 0.1
-    # Keep cubes farther apart to reduce gripper interference with neighbors
-    min_dist = cube_size * 2.6
     x_min = float(os.environ.get("PICK_PLACE_CUBE_X_MIN", "0.30"))
     x_max = float(os.environ.get("PICK_PLACE_CUBE_X_MAX", "0.65"))
-    y_min, y_max = -0.25, 0.25
-
-    positions = []
-    attempts = 0
-    while len(positions) < count and attempts < 2000:
-        attempts += 1
-        rand_xy = np.random.uniform(-xy_half, xy_half)
-        candidate = table_xy + rand_xy
-        if not (x_min <= candidate[0] <= x_max and y_min <= candidate[1] <= y_max):
-            continue
-        if forbidden_xy is not None:
-            if np.linalg.norm(candidate - forbidden_xy) < min_dist:
-                continue
-        if all(np.linalg.norm(candidate - p) >= min_dist for p in positions):
-            positions.append(candidate)
-    if len(positions) < count:
-        raise RuntimeError("Could not place cubes without overlap; increase table size.")
-    return positions
+    return sample_cube_positions(
+        rng=rng or np.random.default_rng(),
+        table_xy=table_xy,
+        table_size=table_size,
+        cube_size=cube_size,
+        count=count,
+        forbidden_xy=forbidden_xy,
+        x_bounds=(x_min, x_max),
+        y_bounds=(-0.25, 0.25),
+    )
 
 
 def randomize_cubes(
@@ -58,6 +53,7 @@ def randomize_cubes(
     cube_center_z: float,
     cube_size: float,
     forbidden_xy: np.ndarray = None,
+    rng: np.random.Generator | None = None,
 ):
     cube_xy_positions = _sample_positions(
         table_xy,
@@ -65,27 +61,36 @@ def randomize_cubes(
         cube_size,
         len(cubes),
         forbidden_xy=forbidden_xy,
+        rng=rng,
     )
     for cube, pos_xy in zip(cubes, cube_xy_positions):
         if hasattr(cube, "disable_rigid_body_physics"):
             cube.disable_rigid_body_physics()
         new_pos = np.array([pos_xy[0], pos_xy[1], cube_center_z])
+        reset_orientation = np.array([1.0, 0.0, 0.0, 0.0])
         if hasattr(cube, "set_default_state"):
             cube.set_default_state(
                 position=new_pos,
+                orientation=reset_orientation,
                 linear_velocity=np.zeros(3),
                 angular_velocity=np.zeros(3),
             )
-        cube.set_world_pose(position=new_pos)
+        cube.set_world_pose(position=new_pos, orientation=reset_orientation)
         if hasattr(cube, "enable_rigid_body_physics"):
             cube.enable_rigid_body_physics()
         if hasattr(cube, "set_linear_velocity"):
             cube.set_linear_velocity(np.zeros(3))
         if hasattr(cube, "set_angular_velocity"):
             cube.set_angular_velocity(np.zeros(3))
+    return cube_xy_positions
 
 
-def setup_scene(world: World, cube_count: int = 6):
+def setup_scene(
+    world: World,
+    cube_count: int = 6,
+    *,
+    rng: np.random.Generator | None = None,
+):
     """
     씬 구성
     - 바닥
@@ -129,6 +134,7 @@ def setup_scene(world: World, cube_count: int = 6):
         cube_size,
         cube_count,
         forbidden_xy=stack_base_xy,
+        rng=rng,
     )
 
     cubes = []

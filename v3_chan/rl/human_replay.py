@@ -428,21 +428,25 @@ class HumanEncounterReplay:
 
 def _load_episode_group(group: h5py.Group) -> dict[str, Any]:
     sim_time = _dataset_or_none(group, "sim_time")
+    pose_monotonic_ns = _dataset_or_none(group, "pose_monotonic_time_ns")
+    if pose_monotonic_ns is None:
+        pose_monotonic_ns = _dataset_or_none(group, "monotonic_time_ns")
+    velocity_time = (
+        np.asarray(pose_monotonic_ns, dtype=np.float64) * 1e-9
+        if pose_monotonic_ns is not None
+        else sim_time
+    )
     if "human" in group:
         human = group["human"]
         head_pos = _dataset_or_zeros(human, "head_pos", (3,))
         left_hand_pos = _dataset_or_zeros(human, "left_hand_pos", (3,))
         right_hand_pos = _dataset_or_zeros(human, "right_hand_pos", (3,))
-        left_hand_vel = (
-            np.asarray(human["left_hand_vel"], dtype=np.float32)
-            if "left_hand_vel" in human
-            else _finite_difference(left_hand_pos, sim_time)
-        )
-        right_hand_vel = (
-            np.asarray(human["right_hand_vel"], dtype=np.float32)
-            if "right_hand_vel" in human
-            else _finite_difference(right_hand_pos, sim_time)
-        )
+        left_hand_vel = _preferred_recorded_velocity(human, "left")
+        if left_hand_vel is None:
+            left_hand_vel = _finite_difference(left_hand_pos, velocity_time)
+        right_hand_vel = _preferred_recorded_velocity(human, "right")
+        if right_hand_vel is None:
+            right_hand_vel = _finite_difference(right_hand_pos, velocity_time)
         valid_mask = _dataset_or_derived_valid_mask(
             human,
             head_pos,
@@ -454,8 +458,8 @@ def _load_episode_group(group: h5py.Group) -> dict[str, Any]:
         head_pos = _dataset_or_zeros(obs, "human_head_pos", (3,))
         left_hand_pos = _dataset_or_zeros(obs, "human_left_hand_pos", (3,))
         right_hand_pos = _dataset_or_zeros(obs, "human_right_hand_pos", (3,))
-        left_hand_vel = _finite_difference(left_hand_pos, sim_time)
-        right_hand_vel = _finite_difference(right_hand_pos, sim_time)
+        left_hand_vel = _finite_difference(left_hand_pos, velocity_time)
+        right_hand_vel = _finite_difference(right_hand_pos, velocity_time)
         valid_mask = _derived_valid_mask(
             head_pos,
             left_hand_pos,
@@ -580,15 +584,26 @@ def _valid_position_series(values: np.ndarray) -> np.ndarray:
     return np.logical_and(finite, nonzero).astype(np.float32)
 
 
-def _finite_difference(values: np.ndarray, sim_time: np.ndarray | None) -> np.ndarray:
+def _preferred_recorded_velocity(human, hand: str) -> np.ndarray | None:
+    for name in (
+        f"{hand}_hand_vel_filtered_mps",
+        f"{hand}_hand_vel",
+        f"{hand}_hand_vel_raw_mps",
+    ):
+        if name in human:
+            return np.asarray(human[name], dtype=np.float32)
+    return None
+
+
+def _finite_difference(values: np.ndarray, timestamps: np.ndarray | None) -> np.ndarray:
     values = np.asarray(values, dtype=np.float32)
     vel = np.zeros_like(values)
     if values.shape[0] <= 1:
         return vel
-    if sim_time is None or len(sim_time) != values.shape[0]:
+    if timestamps is None or len(timestamps) != values.shape[0]:
         dt = np.ones((values.shape[0] - 1, 1), dtype=np.float32)
     else:
-        dt = np.diff(sim_time).reshape(-1, 1).astype(np.float32)
+        dt = np.diff(timestamps).reshape(-1, 1).astype(np.float32)
         dt = np.maximum(dt, 1e-6)
     vel[1:] = (values[1:] - values[:-1]) / dt
     return vel
