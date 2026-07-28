@@ -128,6 +128,8 @@ from app_config import (
     HRI_PROTOCOL_VERSION,
     HRI_ROOM_CALIBRATION_ID,
     HRI_SESSION_ID,
+    HRI_SPEED_ORDER_INDEX,
+    HRI_SPEED_PROFILE_ORDER,
     HRI_TRAJECTORY_MAX_EPISODES,
     HRI_TRAJECTORY_OVERWRITE,
     HRI_TRAJECTORY_PATH,
@@ -148,6 +150,13 @@ from haptics_udp import HapticsUdpClient
 from hri_obs_recorder import HRIObsRecorder, build_observation
 from panda_robot import add_panda, print_robot_info
 from pick_controller import create_pick_controller, run_pick_place
+from pick_place_speed import (
+    events_dt_for_speed_profile,
+    normalize_speed_profile_order,
+    speed_profile_for_episode,
+    speed_profile_metadata,
+    speed_schedule_metadata,
+)
 from pick_place_validation import evaluate_place_success
 from vr_grab import VRGrabManager
 from vr_avatar import (
@@ -639,10 +648,23 @@ def main():
     # change dataset semantics.
     safety_geometry = PandaEndEffectorSafetyRuntime(robot_prim_path="/World/Franka")
     dynamic_safety = DynamicSafetyEstimator()
+    session_speed_profile_order = normalize_speed_profile_order(
+        HRI_SPEED_PROFILE_ORDER
+    )
+    collection_episode_index = 0
+    current_speed_profile = speed_profile_for_episode(
+        collection_episode_index, session_speed_profile_order
+    )
+    physics_dt_s = float(world.get_physics_dt())
     collection_file_metadata = {
         **_collection_file_metadata(world),
         **safety_geometry.metadata(),
         **dynamic_safety.metadata(),
+        **speed_schedule_metadata(
+            physics_dt_s=physics_dt_s,
+            profile_order=session_speed_profile_order,
+            counterbalance_order_index=HRI_SPEED_ORDER_INDEX,
+        ),
     }
 
     place_target.set_world_pose(
@@ -656,8 +678,19 @@ def main():
     controller = None
     approach_height = table_top_z + 0.2
     if ENABLE_PICK_PLACE:
-        controller = create_pick_controller(panda, end_effector_initial_height=approach_height)
-        print("[Phase 2] Pick-and-Place 컨트롤러 활성화")
+        controller = create_pick_controller(
+            panda,
+            end_effector_initial_height=approach_height,
+            speed_profile=current_speed_profile,
+        )
+        profile_info = speed_profile_metadata(
+            current_speed_profile, physics_dt_s=physics_dt_s
+        )
+        print(
+            "[Phase 2] Pick-and-Place controller enabled: "
+            f"speed={current_speed_profile} "
+            f"nominal_cycle={profile_info['controller_nominal_cycle_duration_s']:.2f}s"
+        )
     else:
         print("[Phase 1] 씬 확인 모드")
 
@@ -705,6 +738,22 @@ def main():
         min_interval=float(os.environ.get("BHAPTICS_MIN_INTERVAL", "0.08")),
     )
     hand_tracking = HandTrackingReceiver(HAND_TRACKING_UDP_HOST, HAND_TRACKING_UDP_PORT)
+
+    def _episode_metadata(reason: str) -> dict[str, object]:
+        return {
+            "reason": reason,
+            "mode": "vr_pick_place",
+            "proxy": "sphere",
+            "session_episode_index": int(collection_episode_index),
+            "controller_speed_counterbalance_order_index": int(
+                HRI_SPEED_ORDER_INDEX
+            ),
+            "controller_speed_schedule": ",".join(session_speed_profile_order),
+            **speed_profile_metadata(
+                current_speed_profile, physics_dt_s=physics_dt_s
+            ),
+        }
+
     hri_recorder = None
     if ENABLE_HRI_TRAJECTORY_RECORDING:
         try:
@@ -732,13 +781,22 @@ def main():
                     sample_interval_steps=SAMPLE_LOG_INTERVAL_STEPS,
                     file_metadata=collection_file_metadata,
                 )
+            collection_episode_index = int(hri_recorder.num_episodes)
+            current_speed_profile = speed_profile_for_episode(
+                collection_episode_index, session_speed_profile_order
+            )
+            if controller is not None:
+                controller.reset(
+                    end_effector_initial_height=approach_height,
+                    events_dt=list(
+                        events_dt_for_speed_profile(current_speed_profile)
+                    ),
+                )
             if (
                 HRI_TRAJECTORY_MAX_EPISODES <= 0
                 or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
             ):
-                hri_recorder.start_episode(
-                    {"reason": "run_start", "mode": "vr_pick_place", "proxy": "sphere"}
-                )
+                hri_recorder.start_episode(_episode_metadata("run_start"))
                 dynamic_safety.reset()
             print(f"[HRI] recording obs dataset: {hri_recorder.path}")
         except Exception as exc:
@@ -806,13 +864,7 @@ def main():
                         or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
                     )
                 ):
-                    hri_recorder.start_episode(
-                        {
-                            "reason": "world_time_reset",
-                            "mode": "vr_pick_place",
-                            "proxy": "sphere",
-                        }
-                    )
+                    hri_recorder.start_episode(_episode_metadata("world_time_reset"))
                     dynamic_safety.reset()
 
             step += 1
@@ -825,7 +877,9 @@ def main():
                 monotonic_time_ns=sample_monotonic_time_ns,
                 wall_time_unix_ns=sample_wall_time_unix_ns,
             )
-            logger.ensure_episode_started()
+            logger.ensure_episode_started(
+                f"reason=run_start,speed_profile={current_speed_profile}"
+            )
 
             hand_tracking.poll()
             pinch_points = hand_tracking.get_pinch_points()
@@ -1216,7 +1270,8 @@ def main():
                     if completed_picks % len(pick_targets) == 0:
                         logger.end_episode(
                             "reason=verified_three_cube_stack,"
-                            f"picks={len(pick_targets)},failed_attempts={failed_attempts}"
+                            f"picks={len(pick_targets)},failed_attempts={failed_attempts},"
+                            f"speed_profile={current_speed_profile}"
                         )
                         if hri_recorder is not None and hri_recorder.is_open:
                             episode_path = hri_recorder.end_episode(
@@ -1226,6 +1281,10 @@ def main():
                                     "picks": len(pick_targets),
                                     "failed_attempts": failed_attempts,
                                     "total_attempts": attempt_index - 1,
+                                    **speed_profile_metadata(
+                                        current_speed_profile,
+                                        physics_dt_s=physics_dt_s,
+                                    ),
                                 },
                             )
                             if episode_path:
@@ -1243,16 +1302,36 @@ def main():
                                     flush=True,
                                 )
                                 break
+                        collection_episode_index += 1
+                        current_speed_profile = speed_profile_for_episode(
+                            collection_episode_index, session_speed_profile_order
+                        )
+                        if controller is not None:
+                            controller.reset(
+                                end_effector_initial_height=approach_height,
+                                events_dt=list(
+                                    events_dt_for_speed_profile(
+                                        current_speed_profile
+                                    )
+                                ),
+                            )
+                        next_profile_info = speed_profile_metadata(
+                            current_speed_profile, physics_dt_s=physics_dt_s
+                        )
+                        print(
+                            "[PickPlace] next episode speed profile: "
+                            f"{current_speed_profile} "
+                            "nominal_cycle="
+                            f"{next_profile_info['controller_nominal_cycle_duration_s']:.2f}s",
+                            flush=True,
+                        )
+                        if hri_recorder is not None:
                             if (
                                 HRI_TRAJECTORY_MAX_EPISODES <= 0
                                 or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
                             ):
                                 hri_recorder.start_episode(
-                                    {
-                                        "reason": "cubes_randomized",
-                                        "mode": "vr_pick_place",
-                                        "proxy": "sphere",
-                                    }
+                                    _episode_metadata("cubes_randomized")
                                 )
                                 dynamic_safety.reset()
                         randomize_cubes(
@@ -1266,10 +1345,18 @@ def main():
                         failed_attempts = 0
                         current_cube_max_lift_m = 0.0
                         current_cube_grasp_observed = False
-                        controller.reset(end_effector_initial_height=approach_height)
+                        controller.reset(
+                            end_effector_initial_height=approach_height,
+                            events_dt=list(
+                                events_dt_for_speed_profile(current_speed_profile)
+                            ),
+                        )
                         cycle_reset_requested = True
                         logger.reset_cycle()
-                        logger.start_episode("reason=cubes_randomized")
+                        logger.start_episode(
+                            "reason=cubes_randomized,"
+                            f"speed_profile={current_speed_profile}"
+                        )
                         print(f"\n✅ [Step {step}] 3개 Pick-and-Place 완료! 새 배치로 재시작")
 
             if cycle_reset_requested:

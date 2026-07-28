@@ -8,7 +8,11 @@ HRI_SESSION_ID = os.environ.get("HRI_SESSION_ID", "").strip() or (
 )
 HRI_PARTICIPANT_ID = os.environ.get("HRI_PARTICIPANT_ID", "unspecified").strip()
 HRI_PROTOCOL_VERSION = os.environ.get(
-    "HRI_PROTOCOL_VERSION", "surface_gap_dynamic_v1"
+    "HRI_PROTOCOL_VERSION", "surface_gap_dynamic_multispeed_counterbalanced_v3"
+).strip()
+HRI_SPEED_ORDER_INDEX = int(os.environ.get("HRI_SPEED_ORDER_INDEX", "0"))
+HRI_SPEED_PROFILE_ORDER = os.environ.get(
+    "HRI_SPEED_PROFILE_ORDER", "slow,medium,fast"
 ).strip()
 HRI_ROOM_CALIBRATION_ID = os.environ.get(
     "HRI_ROOM_CALIBRATION_ID", "room_to_world_default_v1"

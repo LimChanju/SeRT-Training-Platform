@@ -7,9 +7,47 @@ cd "$PROJECT_ROOT"
 HRI_SESSION_ID="$(date +%Y%m%d_%H%M%S_%N)_$$"
 export HRI_SESSION_ID
 export HRI_PARTICIPANT_ID="${HRI_PARTICIPANT_ID:-unspecified}"
-export HRI_PROTOCOL_VERSION="${HRI_PROTOCOL_VERSION:-surface_gap_dynamic_v1}"
+export HRI_PROTOCOL_VERSION="${HRI_PROTOCOL_VERSION:-surface_gap_dynamic_multispeed_counterbalanced_v3}"
 export HRI_ROOM_CALIBRATION_ID="${HRI_ROOM_CALIBRATION_ID:-room_to_world_default_v1}"
 HRI_COLLECTION_TEST_MODE="${HRI_COLLECTION_TEST_MODE:-0}"
+
+mkdir -p "$PROJECT_ROOT/v3_chan/logs" "$PROJECT_ROOT/v3_chan/trajectories"
+
+# Rotate the three episode orders across production sessions. Set
+# HRI_SPEED_ORDER_INDEX=0,1,2 to reproduce a specific order without consuming
+# the automatic counter. Test mode never advances the counter.
+_speed_order_auto=0
+if [[ -n "${HRI_SPEED_ORDER_INDEX:-}" ]]; then
+    if [[ ! "$HRI_SPEED_ORDER_INDEX" =~ ^[0-9]+$ ]]; then
+        printf '[Collect] invalid HRI_SPEED_ORDER_INDEX=%s (expected non-negative integer)\n' \
+            "$HRI_SPEED_ORDER_INDEX" >&2
+        exit 2
+    fi
+    _speed_order_index=$((10#$HRI_SPEED_ORDER_INDEX % 3))
+elif [[ "$HRI_COLLECTION_TEST_MODE" == "1" ]]; then
+    _speed_order_index=0
+else
+    _speed_order_auto=1
+    _speed_order_state_path="${HRI_SPEED_ORDER_STATE_PATH:-$PROJECT_ROOT/v3_chan/logs/.speed_order_counter}"
+    exec 9>"${_speed_order_state_path}.lock"
+    flock 9
+    _speed_order_counter=0
+    if [[ -f "$_speed_order_state_path" ]]; then
+        read -r _speed_order_counter < "$_speed_order_state_path" || _speed_order_counter=0
+    fi
+    if [[ ! "$_speed_order_counter" =~ ^[0-9]+$ ]]; then
+        _speed_order_counter=0
+    fi
+    _speed_order_index=$((10#$_speed_order_counter % 3))
+fi
+
+case "$_speed_order_index" in
+    0) HRI_SPEED_PROFILE_ORDER="slow,medium,fast" ;;
+    1) HRI_SPEED_PROFILE_ORDER="medium,fast,slow" ;;
+    2) HRI_SPEED_PROFILE_ORDER="fast,slow,medium" ;;
+esac
+export HRI_SPEED_ORDER_INDEX="$_speed_order_index"
+export HRI_SPEED_PROFILE_ORDER
 
 export BHAPTICS_NOTEBOOK_IP=10.3.129.185
 export BHAPTICS_UDP_PORT=5005
@@ -85,7 +123,6 @@ LOG_PATH="$PROJECT_ROOT/v3_chan/logs/pick_place_${HRI_SESSION_ID}.log"
 export HRI_LOG_DIR="$PROJECT_ROOT/v3_chan/logs"
 export ERRP_MARKERS_PATH="$HRI_LOG_DIR/errp_markers_${HRI_SESSION_ID}.csv"
 export SESSION_SAMPLES_PATH="$HRI_LOG_DIR/session_samples_${HRI_SESSION_ID}.csv"
-mkdir -p "$PROJECT_ROOT/v3_chan/logs" "$PROJECT_ROOT/v3_chan/trajectories"
 
 printf '[Collect] session=%s\n' "$HRI_SESSION_ID"
 printf '[Collect] hdf5=%s\n' "$HRI_TRAJECTORY_PATH"
@@ -94,6 +131,8 @@ printf '[Collect] markers=%s\n' "$ERRP_MARKERS_PATH"
 printf '[Collect] samples=%s\n' "$SESSION_SAMPLES_PATH"
 printf '[Collect] participant=%s protocol=%s calibration=%s\n' \
     "$HRI_PARTICIPANT_ID" "$HRI_PROTOCOL_VERSION" "$HRI_ROOM_CALIBRATION_ID"
+printf '[Collect] speed_order_index=%s episode_speed_schedule=%s motion_scale=slow:1.0,medium:1.5,fast:2.0\n' \
+    "$HRI_SPEED_ORDER_INDEX" "$HRI_SPEED_PROFILE_ORDER"
 printf '[Collect] test_mode=%s episodes=%s recording=%s debug_visualization=%s\n' \
     "$HRI_COLLECTION_TEST_MODE" \
     "$HRI_TRAJECTORY_MAX_EPISODES" \
@@ -109,3 +148,15 @@ printf '[Collect] safety_gap_m collision=%s near_miss=%s near=%s gate_full=%s ga
 # Keep the log pipe alive after Ctrl+C so main.py can flush an interrupted
 # episode before Isaac Sim exits.
 ./launch_isaac.sh "$PROJECT_ROOT/v3_chan/main.py" 2>&1 | tee -i "$LOG_PATH"
+
+if [[ "$_speed_order_auto" == "1" ]]; then
+    if grep -Fq '[HRI] collection complete:' "$LOG_PATH"; then
+        printf '%s\n' "$(((_speed_order_index + 1) % 3))" > "$_speed_order_state_path"
+        printf '[Collect] completed; next_speed_order_index=%s\n' \
+            "$(((_speed_order_index + 1) % 3))"
+    else
+        printf '[Collect] incomplete session; speed order counter was not advanced\n'
+    fi
+    flock -u 9
+    exec 9>&-
+fi

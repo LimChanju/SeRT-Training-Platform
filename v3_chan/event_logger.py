@@ -64,8 +64,8 @@ class EventLogger:
             time.time_ns() if wall_time_unix_ns is None else wall_time_unix_ns
         )
 
-    def ensure_episode_started(self) -> None:
-        self.start_episode("reason=run_start")
+    def ensure_episode_started(self, details: str = "reason=run_start") -> None:
+        self.start_episode(details)
 
     def start_episode(self, details: str = "") -> None:
         if not self._episode_started:

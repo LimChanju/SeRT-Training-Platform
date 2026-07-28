@@ -60,6 +60,10 @@
 | `hri_observation_dim` | `hri_obs_policy` 차원 |
 | `hri_observation_fields` | `hri_obs_policy`를 구성하는 field 목록 |
 | `sample_interval_steps` | 몇 step마다 샘플을 저장했는지 |
+| `controller_speed_schedule` | 해당 session에 적용된 세 episode의 speed 순서 |
+| `controller_speed_counterbalance_order_index` | counterbalance 순서 번호. `0`, `1`, `2` |
+| `controller_speed_counterbalance_orders_json` | 전체 counterbalance 순서 정의 |
+| `controller_speed_profiles_json` | profile별 motion scale, 실제 `events_dt`, nominal cycle 길이 |
 
 ### Episode-Level Datasets
 
@@ -78,6 +82,8 @@
 | `completed_picks` | 현재 episode 안에서 완료한 pick 개수 |
 
 새 수집 데이터에서 episode 길이는 고정값이 아니다. 실제 place 검증에 실패하면 같은 cube를 재시도하므로, 3회보다 많은 pick-and-place controller attempt가 포함될 수 있다.
+
+session별 episode 속도 순서는 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환한다. 각 episode attribute에는 해당 session schedule과 `controller_speed_profile`, `controller_motion_phase_scale`, `controller_events_dt_json`, `controller_nominal_cycle_steps`, `controller_nominal_cycle_duration_s`를 기록한다. 속도 변화는 이동 phase에만 적용하며 grasp/release와 안정화 phase timing은 바꾸지 않는다.
 
 새 recorder schema는 `hri_obs_v7_83d_surface_point_dynamic_safety_sync`이며, safety observation schema는 `hri_policy_obs_v1_83d_surface_gap`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원을 저장한다. 기존 v1/v2의 74차원, v3의 77차원, v5/v6 파일은 과거 데이터로 그대로 유지된다.
 

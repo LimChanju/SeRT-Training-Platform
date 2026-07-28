@@ -35,6 +35,8 @@ distance_gate: clip((0.13 - surface_gap) / (0.13 - 0.05), 0, 1)
 - HDF5 root에는 session/participant/protocol/git/Isaac/physics dt/room calibration metadata를 저장한다.
 - 각 step에는 simulation time, monotonic time, Unix epoch time을 함께 저장해 이후 EEG marker와 정렬할 수 있게 한다.
 - marker와 sample CSV도 session별 파일로 저장하고 `session_id`, `episode_index`를 포함한다.
+- 한 session의 세 episode 속도 순서는 session마다 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환한다. 이동 phase의 controller progress만 각각 `1.0x`, `1.5x`, `2.0x`로 조절하고, grasp/release 및 안정화 phase timing은 동일하게 유지한다.
+- HDF5 root에는 해당 session의 speed schedule과 counterbalance order index를, 각 episode attribute에는 `controller_speed_profile`, 실제 `events_dt`, motion scale, nominal cycle step/time을 저장한다.
 
 ## 이전 데이터 보관
 
@@ -54,4 +56,4 @@ cd /home/railab/Desktop/Isaac_HRC
 bash v3_chan/run_pick_place.sh
 ```
 
-한 번 실행하면 최대 3 episode를 수집하고 session별 HDF5와 로그를 새로 저장한다.
+한 번 실행하면 최대 3 episode를 수집하고 session별 HDF5와 로그를 새로 저장한다. 정상 수집 실행마다 speed order counter가 자동으로 진행하며 테스트 모드는 counter를 변경하지 않는다. 특정 순서를 재현할 때는 `HRI_SPEED_ORDER_INDEX=0`, `1`, `2`를 지정한다.

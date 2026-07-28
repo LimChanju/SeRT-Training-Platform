@@ -6,28 +6,39 @@ import numpy as np
 from omni.isaac.franka import Franka
 from omni.isaac.franka.controllers import PickPlaceController
 
+try:
+    from v3_chan.pick_place_speed import events_dt_for_speed_profile
+except ImportError:
+    from pick_place_speed import events_dt_for_speed_profile
+
 
 def create_pick_controller(
     robot: Franka,
     end_effector_initial_height: float = None,
+    speed_profile: str = "slow",
 ) -> PickPlaceController:
     """
     PickPlaceController 생성
-    내부 FSM 8단계:
+    내부 FSM 10단계의 이동 속도 profile을 명시적으로 설정한다.
+
+    주요 단계:
       0) EE → 큐브 위 (pre-grasp)
-      1) 그리퍼 열기
-      2) EE → 큐브 높이 (approach)
+      1) EE → 큐브 높이 (approach)
+      2) 로봇 관성 안정화 대기
       3) 그리퍼 닫기 (grasp)
       4) EE → 위로 들기 (lift)
       5) EE → 목표 위 이동
       6) EE → 목표 높이 (descend)
       7) 그리퍼 열기 (release)
+      8) EE → 목표 위로 후퇴 (retract)
+      9) EE → 기존 xy 위치로 복귀
     """
     controller = PickPlaceController(
         name="pick_place_controller",
         gripper=robot.gripper,
         robot_articulation=robot,
         end_effector_initial_height=end_effector_initial_height,
+        events_dt=list(events_dt_for_speed_profile(speed_profile)),
     )
     return controller
 
