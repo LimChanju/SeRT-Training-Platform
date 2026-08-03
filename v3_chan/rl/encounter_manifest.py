@@ -12,6 +12,7 @@ import numpy as np
 
 
 MANIFEST_VERSION = "hri_encounter_manifest_v2"
+SOURCE_CONFIGURATION_VERSION = "hri_source_configuration_v1"
 SEVERITY_ORDER = ("safe", "gate_only", "near", "near_miss", "collision")
 TASK_PHASE_NAMES = (
     "approach_cube",
@@ -84,6 +85,7 @@ def build_encounter_manifest(
     }
     manifest = {
         "schema_version": MANIFEST_VERSION,
+        "source_configuration_schema_version": SOURCE_CONFIGURATION_VERSION,
         "phase_anchor_policy": "minimum_surface_gap_in_core",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "build_config": asdict(cfg),
@@ -178,6 +180,287 @@ def resolve_scenario_source(
         f"Source HDF5 for encounter {scenario.get('id', '')} was not found: "
         f"{source_path}"
     )
+
+
+def extract_episode_source_configuration(
+    group: h5py.Group,
+    *,
+    active_cube_index: int,
+    source_anchor_step: int,
+) -> dict[str, Any]:
+    """Extract reproducible scene provenance from one recorded episode.
+
+    Current v8 collections contain exact cube and target poses. Older files are
+    supported by recording which fields are absent and, where possible, using
+    the first observation for the robot's initial joint state.
+    """
+
+    provenance: dict[str, str] = {}
+
+    def value(paths: Sequence[str], *, attr_names: Sequence[str] = ()) -> Any:
+        for path in paths:
+            if path in group:
+                provenance[paths[0]] = path
+                return group[path][()]
+        for attr_name in attr_names:
+            if attr_name in group.attrs:
+                provenance[paths[0]] = f"@{attr_name}"
+                return group.attrs[attr_name]
+        return None
+
+    cube_names = _string_list(
+        value(("initial_scene/cube_names",)),
+    )
+    cube_roles = _string_list(
+        value(("initial_scene/cube_roles",)),
+    )
+    cube_positions = _finite_array_or_none(
+        value(("initial_scene/cube_positions_world",)),
+        width=3,
+    )
+    cube_orientations = _finite_array_or_none(
+        value(("initial_scene/cube_orientations_wxyz",)),
+        width=4,
+    )
+    target_position = _finite_vector_or_none(
+        value(("initial_scene/place_target_position_world",)),
+        width=3,
+    )
+    target_orientation = _finite_vector_or_none(
+        value(("initial_scene/place_target_orientation_wxyz",)),
+        width=4,
+    )
+
+    robot_initial_joint_positions = _finite_vector_or_none(
+        value(
+            (
+                "initial_scene/robot_joint_positions",
+                "initial_scene/robot_joint_pos",
+            )
+        ),
+    )
+    if robot_initial_joint_positions is None:
+        robot_initial_joint_positions = _step_vector_or_none(
+            group,
+            ("obs/robot_joint_pos",),
+            0,
+        )
+        if robot_initial_joint_positions is not None:
+            provenance["initial_scene/robot_joint_positions"] = (
+                "obs/robot_joint_pos[0]"
+            )
+    robot_initial_joint_positions = _complete_panda_joint_positions(
+        group,
+        robot_initial_joint_positions,
+        step=0,
+    )
+    robot_initial_joint_velocities = _finite_vector_or_none(
+        value(
+            (
+                "initial_scene/robot_joint_velocities",
+                "initial_scene/robot_joint_vel",
+            )
+        ),
+    )
+    if robot_initial_joint_velocities is None:
+        robot_initial_joint_velocities = _step_vector_or_none(
+            group,
+            ("obs/robot_joint_vel",),
+            0,
+        )
+        if robot_initial_joint_velocities is not None:
+            provenance["initial_scene/robot_joint_velocities"] = (
+                "obs/robot_joint_vel[0]"
+            )
+    robot_initial_joint_velocities = _complete_panda_joint_velocities(
+        robot_initial_joint_velocities,
+        robot_initial_joint_positions,
+    )
+
+    source_anchor_ee_pos = _step_vector_or_none(
+        group,
+        ("obs/ee_pos",),
+        source_anchor_step,
+        width=3,
+    )
+    source_anchor_ee_quat = _step_vector_or_none(
+        group,
+        ("obs/ee_quat",),
+        source_anchor_step,
+        width=4,
+    )
+    source_anchor_robot_joint_positions = _step_vector_or_none(
+        group,
+        ("obs/robot_joint_pos",),
+        source_anchor_step,
+    )
+    source_anchor_robot_joint_velocities = _step_vector_or_none(
+        group,
+        ("obs/robot_joint_vel",),
+        source_anchor_step,
+    )
+    source_anchor_robot_joint_positions = _complete_panda_joint_positions(
+        group,
+        source_anchor_robot_joint_positions,
+        step=source_anchor_step,
+    )
+    source_anchor_robot_joint_velocities = _complete_panda_joint_velocities(
+        source_anchor_robot_joint_velocities,
+        source_anchor_robot_joint_positions,
+    )
+
+    collection_seed = _int_or_none(
+        value(
+            ("initial_scene/session_seed",),
+            attr_names=("session_seed", "collection_seed"),
+        )
+    )
+    layout_seed = _int_or_none(
+        value(
+            ("initial_scene/layout_seed",),
+            attr_names=("layout_seed",),
+        )
+    )
+    layout_id = _text_or_none(
+        value(
+            ("initial_scene/layout_id",),
+            attr_names=("layout_id",),
+        )
+    )
+    measured_layout_id = _text_or_none(
+        value(("initial_scene/measured_layout_id",))
+    )
+
+    required_exact = {
+        "cube_names": cube_names,
+        "cube_positions_world": cube_positions,
+        "cube_orientations_wxyz": cube_orientations,
+        "place_target_position_world": target_position,
+        "place_target_orientation_wxyz": target_orientation,
+    }
+    missing_fields = [name for name, item in required_exact.items() if item is None]
+    cube_count = 0 if cube_positions is None else int(cube_positions.shape[0])
+    if cube_orientations is not None and cube_orientations.shape[0] != cube_count:
+        missing_fields.append("cube_pose_row_count_match")
+    if cube_names is not None and len(cube_names) != cube_count:
+        missing_fields.append("cube_name_count_match")
+    if not 0 <= int(active_cube_index) < cube_count:
+        missing_fields.append("active_cube_index_in_range")
+
+    source_cube_name = None
+    if cube_names is not None and 0 <= int(active_cube_index) < len(cube_names):
+        source_cube_name = cube_names[int(active_cube_index)]
+
+    return {
+        "schema_version": SOURCE_CONFIGURATION_VERSION,
+        "episode_name": group.name.rsplit("/", 1)[-1],
+        "active_cube_index": int(active_cube_index),
+        "active_cube_name": source_cube_name,
+        "collection_seed": collection_seed,
+        "layout_seed": layout_seed,
+        "layout_id": layout_id,
+        "measured_layout_id": measured_layout_id,
+        "cube_names": cube_names,
+        "cube_roles": cube_roles,
+        "cube_positions_world": _array_list(cube_positions),
+        "cube_orientations_wxyz": _array_list(cube_orientations),
+        "place_target_position_world": _array_list(target_position),
+        "place_target_orientation_wxyz": _array_list(target_orientation),
+        "robot_initial_joint_positions": _array_list(
+            robot_initial_joint_positions
+        ),
+        "robot_initial_joint_velocities": _array_list(
+            robot_initial_joint_velocities
+        ),
+        "source_anchor_step": int(source_anchor_step),
+        "source_anchor_ee_pos": _array_list(source_anchor_ee_pos),
+        "source_anchor_ee_quat_wxyz": _array_list(source_anchor_ee_quat),
+        "source_anchor_robot_joint_positions": _array_list(
+            source_anchor_robot_joint_positions
+        ),
+        "source_anchor_robot_joint_velocities": _array_list(
+            source_anchor_robot_joint_velocities
+        ),
+        "exact_pose_available": not missing_fields,
+        "collection_seed_available": layout_seed is not None,
+        "missing_fields": sorted(set(missing_fields)),
+        "provenance": provenance,
+    }
+
+
+def resolve_source_restoration(
+    scenario: dict[str, Any],
+    *,
+    screening_seed: int,
+    allow_legacy_fallback: bool = False,
+) -> dict[str, Any]:
+    """Choose the safest available source-scene restoration strategy."""
+
+    source = scenario.get("source_configuration")
+    source = dict(source) if isinstance(source, dict) else {}
+    source_cube_index = _int_or_none(
+        source.get("active_cube_index", scenario.get("cube_index"))
+    )
+    base = {
+        "source_configuration_schema_version": source.get("schema_version", ""),
+        "source_configuration_available": False,
+        "restoration_mode": "unavailable",
+        "restoration_reason": "source_configuration_missing",
+        "source_cube_index": source_cube_index,
+        "screening_cube_index": None,
+        "source_cube_name": source.get("active_cube_name"),
+        "collection_seed": _int_or_none(source.get("collection_seed")),
+        "layout_seed": _int_or_none(source.get("layout_seed")),
+        "screening_seed": int(screening_seed),
+        "source_layout_id": source.get("layout_id"),
+        "source_measured_layout_id": source.get("measured_layout_id"),
+        "cube_pose_restored": False,
+        "target_pose_restored": False,
+        "robot_initial_state_restored": False,
+        "pose_mismatch": False,
+        "pose_mismatch_reason": "",
+        "missing_fields": list(source.get("missing_fields", [])),
+        "source_configuration": source,
+    }
+    if source_cube_index is None or source_cube_index < 0:
+        base["restoration_reason"] = "active_cube_index_missing"
+        return base
+
+    if bool(source.get("exact_pose_available", False)):
+        base.update(
+            {
+                "source_configuration_available": True,
+                "restoration_mode": "exact_pose",
+                "restoration_reason": "",
+            }
+        )
+        return base
+
+    layout_seed = _int_or_none(source.get("layout_seed"))
+    if layout_seed is not None:
+        base.update(
+            {
+                "source_configuration_available": True,
+                "restoration_mode": "collection_seed",
+                "restoration_reason": "exact_pose_unavailable",
+                "layout_seed": layout_seed,
+            }
+        )
+        return base
+
+    if allow_legacy_fallback:
+        base.update(
+            {
+                "source_configuration_available": True,
+                "restoration_mode": "legacy_fallback",
+                "restoration_reason": "explicit_legacy_fallback",
+            }
+        )
+        return base
+
+    if source:
+        base["restoration_reason"] = "source_configuration_incomplete"
+    return base
 
 
 def _build_episode_scenarios(
@@ -293,29 +576,32 @@ def _build_episode_scenarios(
             start = max(segment_start, core_start - int(cfg.margin_frames))
             end = min(segment_end, core_end + int(cfg.margin_frames))
             scenarios.append(
-                _scenario_dict(
-                    source_path=source_path,
-                    session_id=session_id,
-                    episode_name=episode_name,
-                    source_episode=source_episode,
-                    start=start,
-                    core_start=core_start,
-                    core_end=core_end,
-                    end=end,
-                    target_severity=_max_severity(
-                        gap[core_start:core_end],
-                        contact[core_start:core_end],
-                        cfg,
+                _scenario_with_source_configuration(
+                    group,
+                    _scenario_dict(
+                        source_path=source_path,
+                        session_id=session_id,
+                        episode_name=episode_name,
+                        source_episode=source_episode,
+                        start=start,
+                        core_start=core_start,
+                        core_end=core_end,
+                        end=end,
+                        target_severity=_max_severity(
+                            gap[core_start:core_end],
+                            contact[core_start:core_end],
+                            cfg,
+                        ),
+                        gap=gap,
+                        contact=contact,
+                        cube_index=cube_index,
+                        attempt_index=attempt_index,
+                        task_phase=task_phase,
+                        controller_event=controller_event,
+                        ee_pos=ee_pos,
+                        closest_link=closest_link,
+                        closest_hand=closest_hand,
                     ),
-                    gap=gap,
-                    contact=contact,
-                    cube_index=cube_index,
-                    attempt_index=attempt_index,
-                    task_phase=task_phase,
-                    controller_event=controller_event,
-                    ee_pos=ee_pos,
-                    closest_link=closest_link,
-                    closest_hand=closest_hand,
                 )
             )
 
@@ -340,25 +626,28 @@ def _build_episode_scenarios(
                     break
                 safe_end = safe_start + window
                 scenarios.append(
-                    _scenario_dict(
-                        source_path=source_path,
-                        session_id=session_id,
-                        episode_name=episode_name,
-                        source_episode=source_episode,
-                        start=safe_start,
-                        core_start=safe_start,
-                        core_end=safe_end,
-                        end=safe_end,
-                        target_severity="safe",
-                        gap=gap,
-                        contact=contact,
-                        cube_index=cube_index,
-                        attempt_index=attempt_index,
-                        task_phase=task_phase,
-                        controller_event=controller_event,
-                        ee_pos=ee_pos,
-                        closest_link=closest_link,
-                        closest_hand=closest_hand,
+                    _scenario_with_source_configuration(
+                        group,
+                        _scenario_dict(
+                            source_path=source_path,
+                            session_id=session_id,
+                            episode_name=episode_name,
+                            source_episode=source_episode,
+                            start=safe_start,
+                            core_start=safe_start,
+                            core_end=safe_end,
+                            end=safe_end,
+                            target_severity="safe",
+                            gap=gap,
+                            contact=contact,
+                            cube_index=cube_index,
+                            attempt_index=attempt_index,
+                            task_phase=task_phase,
+                            controller_event=controller_event,
+                            ee_pos=ee_pos,
+                            closest_link=closest_link,
+                            closest_hand=closest_hand,
+                        ),
                     )
                 )
                 episode_safe_count += 1
@@ -467,6 +756,18 @@ def _scenario_dict(
             closest_hand[core_start:core_end]
         ),
     }
+
+
+def _scenario_with_source_configuration(
+    group: h5py.Group,
+    scenario: dict[str, Any],
+) -> dict[str, Any]:
+    scenario["source_configuration"] = extract_episode_source_configuration(
+        group,
+        active_cube_index=int(scenario["cube_index"]),
+        source_anchor_step=int(scenario["source_anchor_step"]),
+    )
+    return scenario
 
 
 def _find_encounters(
@@ -629,6 +930,133 @@ def _align_1d(values: np.ndarray, length: int, fill: float) -> np.ndarray:
     count = min(length, len(values))
     result[:count] = values[:count]
     return result
+
+
+def _string_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    values = np.asarray(value).reshape(-1)
+    return [_attr_text(item) for item in values]
+
+
+def _finite_array_or_none(value: Any, *, width: int) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if array.ndim != 2 or array.shape[1] != int(width) or array.shape[0] <= 0:
+        return None
+    if not np.all(np.isfinite(array)):
+        return None
+    return array
+
+
+def _finite_vector_or_none(
+    value: Any,
+    *,
+    width: int | None = None,
+) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        array = np.asarray(value, dtype=np.float64).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if width is not None:
+        if array.size != int(width):
+            return None
+    elif array.size <= 0:
+        return None
+    if not np.all(np.isfinite(array)):
+        return None
+    return array
+
+
+def _step_vector_or_none(
+    group: h5py.Group,
+    paths: Sequence[str],
+    step: int,
+    *,
+    width: int | None = None,
+) -> np.ndarray | None:
+    for path in paths:
+        if path not in group:
+            continue
+        dataset = group[path]
+        if not dataset.shape or not 0 <= int(step) < int(dataset.shape[0]):
+            continue
+        return _finite_vector_or_none(dataset[int(step)], width=width)
+    return None
+
+
+def _complete_panda_joint_positions(
+    group: h5py.Group,
+    arm_or_full_positions: np.ndarray | None,
+    *,
+    step: int,
+) -> np.ndarray | None:
+    if arm_or_full_positions is None:
+        return None
+    positions = np.asarray(arm_or_full_positions, dtype=np.float64).reshape(-1)
+    if positions.size != 7:
+        return positions
+    gripper_width = _step_vector_or_none(
+        group,
+        ("obs/gripper_width",),
+        step,
+        width=1,
+    )
+    if gripper_width is None:
+        return positions
+    finger_position = max(0.0, float(gripper_width[0])) / 2.0
+    return np.concatenate(
+        (positions, np.asarray([finger_position, finger_position], dtype=np.float64))
+    )
+
+
+def _complete_panda_joint_velocities(
+    arm_or_full_velocities: np.ndarray | None,
+    completed_positions: np.ndarray | None,
+) -> np.ndarray | None:
+    if arm_or_full_velocities is None:
+        return None
+    velocities = np.asarray(arm_or_full_velocities, dtype=np.float64).reshape(-1)
+    if (
+        velocities.size == 7
+        and completed_positions is not None
+        and np.asarray(completed_positions).size == 9
+    ):
+        return np.concatenate((velocities, np.zeros(2, dtype=np.float64)))
+    return velocities
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        scalar = np.asarray(value).reshape(-1)[0]
+        result = int(scalar)
+    except (IndexError, TypeError, ValueError, OverflowError):
+        return None
+    return result
+
+
+def _text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    array = np.asarray(value).reshape(-1)
+    if array.size <= 0:
+        return None
+    text = _attr_text(array[0]).strip()
+    return text or None
+
+
+def _array_list(value: np.ndarray | None) -> list[Any] | None:
+    if value is None:
+        return None
+    return np.asarray(value).tolist()
 
 
 def _session_id(source_path: str, group: h5py.Group) -> str:

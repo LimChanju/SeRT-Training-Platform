@@ -67,6 +67,17 @@ def _parse_args() -> argparse.Namespace:
         default="ee",
     )
     parser.add_argument(
+        "--encounter-timebase",
+        choices=("recorded", "step"),
+        default="recorded",
+    )
+    parser.add_argument("--encounter-playback-speed", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-legacy-source-configuration",
+        action="store_true",
+        help="Explicitly allow random-layout fallback for legacy encounter sources.",
+    )
+    parser.add_argument(
         "--no-encounter-phase-match",
         dest="encounter_phase_match",
         action="store_false",
@@ -104,6 +115,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--distance-progress-weight", type=float, default=0.0)
     parser.add_argument("--distance-progress-clip-m", type=float, default=0.03)
     parser.add_argument("--max-grad-norm", type=float, default=5.0)
+    parser.add_argument(
+        "--target-q-clip",
+        type=float,
+        default=0.0,
+        help="Symmetric critic-target clip; non-positive disables clipping.",
+    )
+    parser.add_argument(
+        "--critic-loss",
+        choices=("mse", "huber"),
+        default="mse",
+    )
     parser.add_argument("--residual-alpha", type=float, default=0.1)
     parser.add_argument("--xyz-only-residual", action="store_true")
     parser.add_argument("--safety-gate-start-dist", type=float, default=0.13)
@@ -169,7 +191,8 @@ simulation_app = SimulationApp(
         "physics_gpu": 0,
         "multi_gpu": False,
         "max_gpu_count": 1,
-    }
+    },
+    experience=os.environ.get("ISAAC_SIM_EXPERIENCE", ""),
 )
 print(f"[TrainSafetyTD3] SimulationApp headless={not args.render}", flush=True)
 
@@ -179,18 +202,41 @@ from torch import nn  # noqa: E402
 
 from rl import (  # noqa: E402
     ACTION_DIM,
-    HRI_OBS_DIM,
-    HRI_OBS_FIELD_NAMES,
+    DYNAMIC_HRI_OBS_DIM as HRI_OBS_DIM,
+    DYNAMIC_HRI_OBS_FIELD_NAMES as HRI_OBS_FIELD_NAMES,
+    DYNAMIC_HRI_OBSERVATION_VERSION as HRI_OBSERVATION_VERSION,
     HumanEncounterReplay,
     HumanTrajectoryReplay,
     IsaacPickPlaceEnv,
     PickPlaceEnvConfig,
-    flatten_hri_observation,
+    flatten_dynamic_hri_observation as flatten_hri_observation,
     parse_pseudo_errp_sources,
 )
 from rl.actions import clip_action  # noqa: E402
 from rl.observations import MISSING_DISTANCE_M, observation_slices  # noqa: E402
 from rl.policies import MLPPolicy  # noqa: E402
+
+
+def _reset_training_episode(
+    env: IsaacPickPlaceEnv,
+    human_replay: HumanTrajectoryReplay | HumanEncounterReplay | None,
+    episode_index: int,
+    seed: int,
+):
+    source_restoration = None
+    if human_replay is not None:
+        human_replay.reset(episode_index, seed=seed)
+    if isinstance(human_replay, HumanEncounterReplay):
+        source_restoration = human_replay.source_restoration(
+            screening_seed=seed,
+            allow_legacy_fallback=args.allow_legacy_source_configuration,
+        )
+        if not bool(source_restoration.get("source_configuration_available", False)):
+            raise ValueError(
+                "source_configuration_unavailable: "
+                f"{source_restoration.get('restoration_reason', 'unknown')}"
+            )
+    return env.reset(seed=seed, source_restoration=source_restoration)
 
 
 def _mlp(
@@ -474,9 +520,7 @@ def _run() -> None:
     metrics: dict[str, float] = {}
     update_count = 0
     started_at = time.time()
-    if human_replay is not None:
-        human_replay.reset(0, seed=args.seed)
-    obs, info = env.reset(seed=args.seed)
+    obs, info = _reset_training_episode(env, human_replay, 0, args.seed)
     episode_return = 0.0
     episode_length = 0
     episode_gate_count = 0
@@ -608,9 +652,12 @@ def _run() -> None:
                 )
                 episode_index = len(episodes)
                 episode_seed = args.seed + episode_index
-                if human_replay is not None:
-                    human_replay.reset(episode_index, seed=episode_seed)
-                obs, info = env.reset(seed=episode_seed)
+                obs, info = _reset_training_episode(
+                    env,
+                    human_replay,
+                    episode_index,
+                    episode_seed,
+                )
                 episode_return = 0.0
                 episode_length = 0
                 episode_gate_count = 0
@@ -662,7 +709,10 @@ def _run() -> None:
                     f"success={record['recent_success_rate']:.3f} "
                     f"return={record['recent_return']:.2f} "
                     f"actor={record.get('actor_loss', 0.0):.4f} "
-                    f"critic={record.get('critic_loss', 0.0):.4f}",
+                    f"critic={record.get('critic_loss', 0.0):.4f} "
+                    f"q={record.get('mean_q', 0.0):.3f} "
+                    f"residual={record.get('mean_residual_norm', 0.0):.4f} "
+                    f"gate={record.get('gate_fraction', 0.0):.3f}",
                     flush=True,
                 )
                 if (
@@ -793,10 +843,25 @@ def _td3_update(
             target_q1(torch.cat((next_obs, next_action), dim=1)),
             target_q2(torch.cat((next_obs, next_action), dim=1)),
         )
+        if args.target_q_clip > 0.0:
+            target_q = torch.clamp(
+                target_q,
+                -args.target_q_clip,
+                args.target_q_clip,
+            )
         target = reward + args.gamma * (1.0 - done) * target_q
+        if args.target_q_clip > 0.0:
+            target = torch.clamp(
+                target,
+                -args.target_q_clip,
+                args.target_q_clip,
+            )
     q1_value = q1(torch.cat((obs, action), dim=1))
     q2_value = q2(torch.cat((obs, action), dim=1))
-    critic_loss = F.mse_loss(q1_value, target) + F.mse_loss(q2_value, target)
+    loss_fn = F.smooth_l1_loss if args.critic_loss == "huber" else F.mse_loss
+    critic_loss = loss_fn(q1_value, target) + loss_fn(q2_value, target)
+    if not torch.isfinite(critic_loss):
+        raise FloatingPointError("TD3 critic loss became non-finite")
     critic_optimizer.zero_grad(set_to_none=True)
     critic_loss.backward()
     nn.utils.clip_grad_norm_(
@@ -805,24 +870,26 @@ def _td3_update(
     )
     critic_optimizer.step()
 
-    actor_loss_value = 0.0
-    mean_residual_norm = 0.0
+    sampled_action = torch.tanh(actor(obs))
+    if controlled_dims < ACTION_DIM:
+        sampled_action = sampled_action.clone()
+        sampled_action[:, controlled_dims:] = 0.0
+    active_weight = (gate > 0.0).float()
+    weight_sum = torch.clamp(active_weight.sum(), min=1.0)
+    sampled_q = q1(torch.cat((obs, sampled_action), dim=1))
+    residual_penalty = sampled_action[:, :controlled_dims].square().sum(
+        dim=1,
+        keepdim=True,
+    )
+    actor_terms = -sampled_q + args.residual_actor_penalty * residual_penalty
+    actor_loss = (active_weight * actor_terms).sum() / weight_sum
+    if not torch.isfinite(actor_loss):
+        raise FloatingPointError("TD3 actor loss became non-finite")
+    actor_loss_value = float(actor_loss.item())
+    mean_residual_norm = float(
+        sampled_action[:, :controlled_dims].norm(dim=1).mean().item()
+    )
     if update_count % max(1, args.policy_delay) == 0:
-        sampled_action = torch.tanh(actor(obs))
-        if controlled_dims < ACTION_DIM:
-            sampled_action = sampled_action.clone()
-            sampled_action[:, controlled_dims:] = 0.0
-        active_weight = (gate > 0.0).float()
-        weight_sum = torch.clamp(active_weight.sum(), min=1.0)
-        sampled_q = q1(torch.cat((obs, sampled_action), dim=1))
-        residual_penalty = sampled_action[:, :controlled_dims].square().sum(
-            dim=1,
-            keepdim=True,
-        )
-        actor_terms = (
-            -sampled_q + args.residual_actor_penalty * residual_penalty
-        )
-        actor_loss = (active_weight * actor_terms).sum() / weight_sum
         actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
         nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
@@ -830,10 +897,6 @@ def _td3_update(
         _soft_update(target_actor, actor, args.tau)
         _soft_update(target_q1, q1, args.tau)
         _soft_update(target_q2, q2, args.tau)
-        actor_loss_value = float(actor_loss.item())
-        mean_residual_norm = float(
-            sampled_action[:, :controlled_dims].norm(dim=1).mean().item()
-        )
     return {
         "actor_loss": actor_loss_value,
         "critic_loss": float(critic_loss.item()),
@@ -880,7 +943,7 @@ def _save(
             "observation_fields": list(HRI_OBS_FIELD_NAMES),
             "action_dim": ACTION_DIM,
             "hidden_dims": hidden,
-            "observation_version": "hri_obs_v4_distal_surface_safety_83d",
+            "observation_version": HRI_OBSERVATION_VERSION,
             "policy_mode": "direct",
             "output_activation": "tanh",
             "residual_alpha": args.residual_alpha,
@@ -927,6 +990,8 @@ def _load_human_replay(
             anchor_mode=args.encounter_anchor_mode,
             phase_match=args.encounter_phase_match,
             event_match=args.encounter_event_match,
+            playback_timebase=args.encounter_timebase,
+            playback_speed=args.encounter_playback_speed,
             seed=args.seed,
         )
     if not args.human_replay_data:

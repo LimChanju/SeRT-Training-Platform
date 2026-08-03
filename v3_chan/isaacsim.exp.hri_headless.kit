@@ -1,0 +1,38 @@
+[package]
+title = "Isaac Sim HRI Headless"
+description = "Minimal physics-only experience for HRI safety-policy training"
+version = "1.0.0"
+
+[dependencies]
+"omni.kit.loop-isaac" = {}
+"isaacsim.simulation_app" = {}
+"isaacsim.core.api" = {}
+"isaacsim.robot.manipulators.examples" = {}
+"omni.isaac.core" = {}
+"omni.isaac.franka" = {}
+"omni.isaac.manipulators" = {}
+"omni.physx.stageupdate" = {}
+"omni.physx.tensors" = {}
+
+[settings]
+app.name = "Isaac-Sim HRI Headless"
+app.version = "4.5.0"
+app.fastShutdown = true
+app.file.ignoreUnsavedOnExit = true
+app.settings.persistent = false
+app.settings.fabricDefaultStageFrameHistoryCount = 3
+app.window.hideUi = true
+app.renderer.enabled = false
+renderer.multiGpu.enabled = false
+renderer.multiGpu.autoEnable = false
+physics.autoPopupSimulationOutputWindow = false
+exts."omni.kit.viewport.window".startup.disableWindowOnLoad = true
+
+[settings.app.exts.folders]
+'++' = [
+    "${app}/../exts",
+    "${app}/../extscache",
+    "${app}/../extsPhysics",
+    "${app}/../extsUser",
+    "${app}/../extsDeprecated",
+]

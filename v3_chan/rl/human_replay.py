@@ -12,9 +12,11 @@ import numpy as np
 try:
     from .encounter_manifest import (
         SEVERITY_ORDER,
+        extract_episode_source_configuration,
         load_encounter_manifest,
         parse_severity_mix,
         resolve_scenario_source,
+        resolve_source_restoration,
     )
 except ImportError:
     # Keep direct file imports used by the lightweight unit tests working.
@@ -32,13 +34,25 @@ except ImportError:
     sys.modules[_manifest_spec.name] = _manifest_module
     _manifest_spec.loader.exec_module(_manifest_module)
     SEVERITY_ORDER = _manifest_module.SEVERITY_ORDER
+    extract_episode_source_configuration = (
+        _manifest_module.extract_episode_source_configuration
+    )
     load_encounter_manifest = _manifest_module.load_encounter_manifest
     parse_severity_mix = _manifest_module.parse_severity_mix
     resolve_scenario_source = _manifest_module.resolve_scenario_source
+    resolve_source_restoration = _manifest_module.resolve_source_restoration
 
 
 HumanReplayMode = Literal["step", "loop"]
 HumanReplayEpisodePolicy = Literal["cycle", "random"]
+EncounterReplayTimebase = Literal["recorded", "step"]
+
+_LATEST_PRE_SUCCESS_TRIGGER_EVENT = {
+    "approach_cube": 1,
+    "grasp_cube": 3,
+    "move_to_target": 5,
+    "release_cube": 6,
+}
 
 
 @dataclass(frozen=True)
@@ -173,6 +187,8 @@ class HumanEncounterReplayInfo:
     phase_match: bool
     event_match: bool
     severity_mix: dict[str, float]
+    playback_timebase: str
+    playback_speed: float
 
 
 class HumanEncounterReplay:
@@ -193,6 +209,8 @@ class HumanEncounterReplay:
         anchor_mode: Literal["ee", "world"] = "ee",
         phase_match: bool = True,
         event_match: bool = True,
+        playback_timebase: EncounterReplayTimebase = "recorded",
+        playback_speed: float = 1.0,
         seed: int = 0,
     ) -> None:
         self.path = os.path.abspath(os.path.expanduser(manifest_path))
@@ -202,6 +220,14 @@ class HumanEncounterReplay:
         self.anchor_mode = anchor_mode
         self.phase_match = bool(phase_match)
         self.event_match = bool(event_match)
+        if playback_timebase not in ("recorded", "step"):
+            raise ValueError(
+                f"Unknown encounter playback timebase: {playback_timebase}"
+            )
+        if not np.isfinite(playback_speed) or float(playback_speed) <= 0.0:
+            raise ValueError("encounter playback_speed must be finite and positive")
+        self.playback_timebase = playback_timebase
+        self.playback_speed = float(playback_speed)
         self.rng = np.random.default_rng(seed)
         self._scenarios = tuple(self.manifest["scenarios"])
         self._by_severity = {
@@ -220,6 +246,9 @@ class HumanEncounterReplay:
         self._finished = False
         self._anchor_offset = np.zeros(3, dtype=np.float32)
         self._runtime_context: dict[str, Any] = {}
+        self._runtime_start_time_s: float | None = None
+        self._source_start_time_s: float | None = None
+        self._last_source_time_s: float | None = None
         self.reset(0, seed=seed)
 
     @property
@@ -232,6 +261,8 @@ class HumanEncounterReplay:
             phase_match=self.phase_match,
             event_match=self.event_match,
             severity_mix=dict(self.severity_mix),
+            playback_timebase=self.playback_timebase,
+            playback_speed=self.playback_speed,
         )
 
     @property
@@ -241,6 +272,18 @@ class HumanEncounterReplay:
     @property
     def current_scenario(self) -> dict[str, Any]:
         return dict(self._scenario)
+
+    def source_restoration(
+        self,
+        *,
+        screening_seed: int,
+        allow_legacy_fallback: bool = False,
+    ) -> dict[str, Any]:
+        return resolve_source_restoration(
+            self._scenario,
+            screening_seed=screening_seed,
+            allow_legacy_fallback=allow_legacy_fallback,
+        )
 
     def reset(self, episode_index: int = 0, *, seed: int | None = None) -> dict[str, Any]:
         if seed is not None:
@@ -252,12 +295,29 @@ class HumanEncounterReplay:
             h5_file = h5py.File(source_path, "r")
             self._files[source_path] = h5_file
         episode_name = str(self._scenario["episode_name"])
-        self._episode = _load_episode_group(h5_file["episodes"][episode_name])
+        episode_group = h5_file["episodes"][episode_name]
+        if not isinstance(self._scenario.get("source_configuration"), dict):
+            self._scenario["source_configuration"] = (
+                extract_episode_source_configuration(
+                    episode_group,
+                    active_cube_index=int(self._scenario.get("cube_index", -1)),
+                    source_anchor_step=int(
+                        self._scenario.get(
+                            "source_anchor_step",
+                            self._scenario.get("start_step", 0),
+                        )
+                    ),
+                )
+            )
+        self._episode = _load_episode_group(episode_group)
         self._cursor = int(self._scenario["start_step"])
         self._started = False
         self._finished = False
         self._anchor_offset = np.zeros(3, dtype=np.float32)
         self._runtime_context = {}
+        self._runtime_start_time_s = None
+        self._source_start_time_s = None
+        self._last_source_time_s = None
         return self.peek()
 
     def set_runtime_context(
@@ -268,6 +328,7 @@ class HumanEncounterReplay:
         controller_event: int,
         controller_t: int,
         ee_pos: np.ndarray | None,
+        playback_time_s: float | None = None,
     ) -> None:
         self._runtime_context = {
             "step": int(step),
@@ -279,12 +340,19 @@ class HumanEncounterReplay:
                 if ee_pos is None
                 else np.asarray(ee_pos, dtype=np.float32).reshape(-1)[:3]
             ),
+            "playback_time_s": (
+                None
+                if playback_time_s is None
+                else float(playback_time_s)
+            ),
         }
 
     def peek(self) -> dict[str, Any]:
         if not self._started:
             return self._inactive_state()
-        return self._state_at(self._cursor, advance=False)
+        if self._use_recorded_timebase():
+            return self._state_at_recorded_time()
+        return self._state_at_step(self._cursor, advance=False)
 
     def __call__(self) -> dict[str, Any]:
         if self._finished:
@@ -293,7 +361,9 @@ class HumanEncounterReplay:
             if not self._phase_is_ready():
                 return self._inactive_state()
             self._start_playback()
-        return self._state_at(self._cursor, advance=True)
+        if self._use_recorded_timebase():
+            return self._state_at_recorded_time()
+        return self._state_at_step(self._cursor, advance=True)
 
     def close(self) -> None:
         for h5_file in self._files.values():
@@ -339,8 +409,6 @@ class HumanEncounterReplay:
                 self._scenario.get("task_phase", ""),
             )
         )
-        if current_phase != expected_phase:
-            return False
         expected_event = int(
             self._scenario.get(
                 "trigger_controller_event",
@@ -349,11 +417,22 @@ class HumanEncounterReplay:
         )
         current_event = int(self._runtime_context.get("controller_event", -1))
         if self.event_match and expected_event >= 0 and current_event >= 0:
-            return current_event == expected_event
-        return True
+            runtime_trigger_event = _runtime_trigger_event(
+                expected_phase,
+                expected_event,
+            )
+            return current_event == runtime_trigger_event
+        return current_phase == expected_phase
 
     def _start_playback(self) -> None:
         self._started = True
+        runtime_time = self._runtime_context.get("playback_time_s")
+        if runtime_time is not None and np.isfinite(float(runtime_time)):
+            self._runtime_start_time_s = float(runtime_time)
+        source_times = self._episode.get("sample_time_s")
+        if source_times is not None and len(source_times) > self._cursor:
+            self._source_start_time_s = float(source_times[self._cursor])
+            self._last_source_time_s = self._source_start_time_s
         if self.anchor_mode == "world":
             return
         if self.anchor_mode != "ee":
@@ -372,7 +451,53 @@ class HumanEncounterReplay:
         ):
             self._anchor_offset = current[:3] - source[:3]
 
-    def _state_at(self, source_idx: int, *, advance: bool) -> dict[str, Any]:
+    def _use_recorded_timebase(self) -> bool:
+        if self.playback_timebase != "recorded":
+            return False
+        runtime_time = self._runtime_context.get("playback_time_s")
+        source_times = self._episode.get("sample_time_s")
+        return bool(
+            runtime_time is not None
+            and np.isfinite(float(runtime_time))
+            and self._runtime_start_time_s is not None
+            and self._source_start_time_s is not None
+            and source_times is not None
+            and len(source_times) == int(self._episode["length"])
+        )
+
+    def _state_at_recorded_time(self) -> dict[str, Any]:
+        end_step = min(
+            int(self._scenario["end_step"]),
+            int(self._episode["length"]),
+        )
+        if self._cursor >= end_step or end_step <= 0:
+            self._finished = True
+            return self._inactive_state()
+        runtime_time = float(self._runtime_context["playback_time_s"])
+        elapsed_s = max(0.0, runtime_time - float(self._runtime_start_time_s))
+        source_time_s = float(self._source_start_time_s) + (
+            elapsed_s * self.playback_speed
+        )
+        source_times = np.asarray(self._episode["sample_time_s"], dtype=np.float64)
+        end_time_s = float(source_times[end_step - 1])
+        if source_time_s > end_time_s + 1e-9:
+            self._finished = True
+            return self._inactive_state()
+        source_time_s = min(source_time_s, end_time_s)
+        state, source_idx = _human_state_at_time(
+            self._episode,
+            source_time_s,
+            start_step=int(self._scenario["start_step"]),
+            end_step=end_step,
+        )
+        self._cursor = int(source_idx)
+        self._last_source_time_s = float(source_time_s)
+        state = self._apply_anchor(state)
+        state.update(self._metadata_state(active=True, source_step=source_idx))
+        state["encounter_source_time_s"] = float(source_time_s)
+        return state
+
+    def _state_at_step(self, source_idx: int, *, advance: bool) -> dict[str, Any]:
         end_step = min(
             int(self._scenario["end_step"]),
             int(self._episode["length"]),
@@ -381,6 +506,15 @@ class HumanEncounterReplay:
             self._finished = True
             return self._inactive_state()
         state = _human_state_at(self._episode, source_idx)
+        state = self._apply_anchor(state)
+        state.update(self._metadata_state(active=True, source_step=source_idx))
+        if advance:
+            self._cursor += 1
+            if self._cursor >= end_step:
+                self._finished = True
+        return state
+
+    def _apply_anchor(self, state: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "human_head_pos",
             "human_left_hand_pos",
@@ -390,11 +524,6 @@ class HumanEncounterReplay:
                 state[key] = (
                     np.asarray(state[key], dtype=np.float32) + self._anchor_offset
                 )
-        state.update(self._metadata_state(active=True, source_step=source_idx))
-        if advance:
-            self._cursor += 1
-            if self._cursor >= end_step:
-                self._finished = True
         return state
 
     def _inactive_state(self) -> dict[str, Any]:
@@ -423,14 +552,29 @@ class HumanEncounterReplay:
             "encounter_started": float(self._started),
             "encounter_finished": float(self._finished),
             "encounter_anchor_offset_m": self._anchor_offset.copy(),
+            "encounter_playback_timebase": self.playback_timebase,
+            "encounter_playback_speed": float(self.playback_speed),
+            "encounter_source_time_s": (
+                -1.0
+                if self._last_source_time_s is None
+                else float(self._last_source_time_s)
+            ),
         }
 
 
 def _load_episode_group(group: h5py.Group) -> dict[str, Any]:
-    sim_time = _dataset_or_none(group, "sim_time")
-    pose_monotonic_ns = _dataset_or_none(group, "pose_monotonic_time_ns")
+    sim_time = _dataset_or_none(group, "sim_time", dtype=np.float64)
+    pose_monotonic_ns = _dataset_or_none(
+        group,
+        "pose_monotonic_time_ns",
+        dtype=np.int64,
+    )
     if pose_monotonic_ns is None:
-        pose_monotonic_ns = _dataset_or_none(group, "monotonic_time_ns")
+        pose_monotonic_ns = _dataset_or_none(
+            group,
+            "monotonic_time_ns",
+            dtype=np.int64,
+        )
     velocity_time = (
         np.asarray(pose_monotonic_ns, dtype=np.float64) * 1e-9
         if pose_monotonic_ns is not None
@@ -469,6 +613,11 @@ def _load_episode_group(group: h5py.Group) -> dict[str, Any]:
     length = int(head_pos.shape[0])
     return {
         "length": length,
+        "sample_time_s": _preferred_sample_time_s(
+            pose_monotonic_ns,
+            sim_time,
+            length,
+        ),
         "head_pos": head_pos,
         "left_hand_pos": left_hand_pos,
         "right_hand_pos": right_hand_pos,
@@ -537,6 +686,112 @@ def _human_state_at(episode: dict[str, Any], sample_idx: int) -> dict[str, Any]:
     return state
 
 
+def _human_state_at_time(
+    episode: dict[str, Any],
+    source_time_s: float,
+    *,
+    start_step: int,
+    end_step: int,
+) -> tuple[dict[str, Any], int]:
+    times = np.asarray(episode["sample_time_s"], dtype=np.float64).reshape(-1)
+    start = max(0, int(start_step))
+    end = min(int(end_step), int(episode["length"]), times.size)
+    if end <= start:
+        return _human_state_at(episode, start), start
+
+    clipped_time = float(np.clip(source_time_s, times[start], times[end - 1]))
+    upper = int(np.searchsorted(times[start:end], clipped_time, side="right")) + start
+    upper = min(max(upper, start + 1), end - 1)
+    lower = max(start, upper - 1)
+    t0 = float(times[lower])
+    t1 = float(times[upper])
+    alpha = 0.0 if t1 <= t0 else float(np.clip((clipped_time - t0) / (t1 - t0), 0.0, 1.0))
+    nearest = lower if alpha < 0.5 else upper
+
+    valid0 = np.asarray(episode["valid_mask"][lower], dtype=np.float32)
+    valid1 = np.asarray(episode["valid_mask"][upper], dtype=np.float32)
+    valid_mask = np.minimum(valid0, valid1)
+    state: dict[str, Any] = {
+        "human_left_hand_vel": _lerp(
+            episode["left_hand_vel"][lower], episode["left_hand_vel"][upper], alpha
+        ),
+        "human_right_hand_vel": _lerp(
+            episode["right_hand_vel"][lower], episode["right_hand_vel"][upper], alpha
+        ),
+        "human_valid_mask": valid_mask,
+    }
+    for valid_index, state_name, episode_name in (
+        (0, "human_head_pos", "head_pos"),
+        (1, "human_left_hand_pos", "left_hand_pos"),
+        (2, "human_right_hand_pos", "right_hand_pos"),
+    ):
+        if valid_mask[valid_index] > 0.5:
+            state[state_name] = _lerp(
+                episode[episode_name][lower],
+                episode[episode_name][upper],
+                alpha,
+            )
+    if episode["human_robot_collision"] is not None:
+        state["recorded_human_robot_collision"] = bool(
+            episode["human_robot_collision"][nearest] > 0.5
+        )
+    if episode["near_human"] is not None:
+        state["recorded_near_human"] = bool(
+            episode["near_human"][nearest] > 0.5
+        )
+    if episode["min_hand_gripper_dist_m"] is not None:
+        state["recorded_min_hand_gripper_dist_m"] = float(
+            (1.0 - alpha) * episode["min_hand_gripper_dist_m"][lower]
+            + alpha * episode["min_hand_gripper_dist_m"][upper]
+        )
+    if episode["gripper_camera_occluded"] is not None:
+        state["gripper_camera_occluded"] = float(
+            np.clip(episode["gripper_camera_occluded"][nearest], 0.0, 1.0)
+        )
+    return state, lower
+
+
+def _preferred_sample_time_s(
+    pose_monotonic_ns: np.ndarray | None,
+    sim_time: np.ndarray | None,
+    length: int,
+) -> np.ndarray:
+    if pose_monotonic_ns is not None and len(pose_monotonic_ns) == length:
+        values = np.asarray(pose_monotonic_ns, dtype=np.float64).reshape(-1)
+        if _valid_time_series(values):
+            values = (values - values[0]) * 1e-9
+            if _valid_time_series(values):
+                return values
+    if sim_time is not None and len(sim_time) == length:
+        values = np.asarray(sim_time, dtype=np.float64).reshape(-1)
+        if _valid_time_series(values):
+            return values - values[0]
+    return np.arange(length, dtype=np.float64) / 60.0
+
+
+def _runtime_trigger_event(expected_phase: str, expected_event: int) -> int:
+    latest_event = _LATEST_PRE_SUCCESS_TRIGGER_EVENT.get(str(expected_phase))
+    if latest_event is None:
+        return int(expected_event)
+    return min(int(expected_event), int(latest_event))
+
+
+def _valid_time_series(values: np.ndarray) -> bool:
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    return bool(
+        values.size > 0
+        and np.all(np.isfinite(values))
+        and np.all(np.diff(values) >= 0.0)
+        and (values.size == 1 or values[-1] > values[0])
+    )
+
+
+def _lerp(start, end, alpha: float) -> np.ndarray:
+    start_arr = np.asarray(start, dtype=np.float32)
+    end_arr = np.asarray(end, dtype=np.float32)
+    return ((1.0 - alpha) * start_arr + alpha * end_arr).astype(np.float32)
+
+
 def _dataset_or_zeros(group, name: str, item_shape: tuple[int, ...]) -> np.ndarray:
     if name in group:
         arr = np.asarray(group[name], dtype=np.float32)
@@ -545,10 +800,15 @@ def _dataset_or_zeros(group, name: str, item_shape: tuple[int, ...]) -> np.ndarr
     return np.zeros((length,) + item_shape, dtype=np.float32)
 
 
-def _dataset_or_none(group, name: str) -> np.ndarray | None:
+def _dataset_or_none(
+    group,
+    name: str,
+    *,
+    dtype=np.float32,
+) -> np.ndarray | None:
     if name not in group:
         return None
-    return np.asarray(group[name], dtype=np.float32).reshape(-1)
+    return np.asarray(group[name], dtype=dtype).reshape(-1)
 
 
 def _dataset_or_derived_valid_mask(

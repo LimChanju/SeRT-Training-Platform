@@ -128,6 +128,66 @@ AUXILIARY_OBSERVATION_FIELDS: tuple[ObservationField, ...] = (
         "At least one tracked hand was evaluated against valid Panda colliders.",
     ),
 )
+
+# Runtime-only dynamic features used by the safety residual. They are kept out
+# of RECORDED_OBSERVATION_FIELDS so the established 83-D collection schema and
+# existing HDF5 files remain unchanged.
+DYNAMIC_HRI_OBSERVATION_FIELDS: tuple[ObservationField, ...] = (
+    ObservationField(
+        "left_hand_vel_filtered_mps",
+        (3,),
+        "Filtered left-hand world velocity in meters per second.",
+    ),
+    ObservationField(
+        "right_hand_vel_filtered_mps",
+        (3,),
+        "Filtered right-hand world velocity in meters per second.",
+    ),
+    ObservationField(
+        "left_closest_robot_velocity_world_mps",
+        (3,),
+        "Velocity of the closest left-hand-facing robot surface point.",
+    ),
+    ObservationField(
+        "right_closest_robot_velocity_world_mps",
+        (3,),
+        "Velocity of the closest right-hand-facing robot surface point.",
+    ),
+    ObservationField(
+        "left_relative_velocity_world_mps",
+        (3,),
+        "Left hand velocity relative to its closest robot surface point.",
+    ),
+    ObservationField(
+        "right_relative_velocity_world_mps",
+        (3,),
+        "Right hand velocity relative to its closest robot surface point.",
+    ),
+    ObservationField(
+        "left_closing_speed_mps",
+        (1,),
+        "Non-negative left-hand surface-gap closing speed.",
+    ),
+    ObservationField(
+        "right_closing_speed_mps",
+        (1,),
+        "Non-negative right-hand surface-gap closing speed.",
+    ),
+    ObservationField("left_ttc_s", (1,), "Left-hand time to contact in seconds."),
+    ObservationField("right_ttc_s", (1,), "Right-hand time to contact in seconds."),
+    ObservationField(
+        "left_dynamic_measurement_valid",
+        (1,),
+        "Left dynamic velocity measurement validity flag.",
+    ),
+    ObservationField(
+        "right_dynamic_measurement_valid",
+        (1,),
+        "Right dynamic velocity measurement validity flag.",
+    ),
+    ObservationField("left_ttc_valid", (1,), "Left TTC validity flag."),
+    ObservationField("right_ttc_valid", (1,), "Right TTC validity flag."),
+)
 RECORDED_OBSERVATION_FIELDS = OBSERVATION_FIELDS + AUXILIARY_OBSERVATION_FIELDS
 
 OBSERVATION_DIM = sum(field.dim for field in OBSERVATION_FIELDS)
@@ -171,6 +231,20 @@ HRI_OBS_FIELD_NAMES = (
 HRI_OBS_DIM = int(sum(_FIELD_MAP[name].dim for name in HRI_OBS_FIELD_NAMES))
 HRI_OBSERVATION_VERSION = "hri_policy_obs_v1_83d_surface_gap"
 
+DYNAMIC_HRI_OBS_FIELD_NAMES = HRI_OBS_FIELD_NAMES + tuple(
+    field.name for field in DYNAMIC_HRI_OBSERVATION_FIELDS
+)
+DYNAMIC_HRI_OBS_DIM = int(
+    HRI_OBS_DIM + sum(field.dim for field in DYNAMIC_HRI_OBSERVATION_FIELDS)
+)
+DYNAMIC_HRI_OBSERVATION_VERSION = (
+    "hri_policy_obs_v2_109d_surface_gap_dynamics"
+)
+_DYNAMIC_FIELD_MAP = {
+    field.name: field for field in DYNAMIC_HRI_OBSERVATION_FIELDS
+}
+_POLICY_FIELD_MAP = {**_FIELD_MAP, **_DYNAMIC_FIELD_MAP}
+
 
 def observation_slices() -> dict[str, slice]:
     slices = {}
@@ -191,6 +265,10 @@ def empty_observation(dtype=np.float32) -> dict[str, np.ndarray]:
     obs["left_hand_end_effector_surface_gap"][:] = MISSING_DISTANCE_M
     obs["right_hand_end_effector_surface_gap"][:] = MISSING_DISTANCE_M
     obs["min_hand_end_effector_surface_gap"][:] = MISSING_DISTANCE_M
+    for field in DYNAMIC_HRI_OBSERVATION_FIELDS:
+        obs[field.name] = np.zeros(field.shape, dtype=dtype)
+    obs["left_ttc_s"][:] = 10.0
+    obs["right_ttc_s"][:] = 10.0
     return obs
 
 
@@ -202,13 +280,46 @@ def flatten_observation(obs: Mapping[str, np.ndarray], dtype=np.float32) -> np.n
 
 
 def flatten_hri_observation(
-    obs: Mapping[str, np.ndarray], dtype=np.float32
+    obs: Mapping[str, np.ndarray],
+    dtype=np.float32,
+    *,
+    field_names: tuple[str, ...] | list[str] | None = None,
 ) -> np.ndarray:
     validate_observation(obs)
     validate_auxiliary_observation(obs)
+    names = HRI_OBS_FIELD_NAMES if field_names is None else tuple(field_names)
+    _validate_policy_fields(obs, names)
     return np.concatenate(
-        [np.asarray(obs[name], dtype=dtype).reshape(-1) for name in HRI_OBS_FIELD_NAMES]
+        [np.asarray(obs[name], dtype=dtype).reshape(-1) for name in names]
     ).astype(dtype, copy=False)
+
+
+def flatten_dynamic_hri_observation(
+    obs: Mapping[str, np.ndarray], dtype=np.float32
+) -> np.ndarray:
+    return flatten_hri_observation(
+        obs,
+        dtype=dtype,
+        field_names=DYNAMIC_HRI_OBS_FIELD_NAMES,
+    )
+
+
+def apply_dynamic_hri_observation(
+    obs: dict[str, np.ndarray],
+    dynamic_payload: Mapping[str, object] | None,
+) -> dict[str, np.ndarray]:
+    payload = dynamic_payload or {}
+    for field in DYNAMIC_HRI_OBSERVATION_FIELDS:
+        if field.name not in payload:
+            continue
+        value = np.asarray(payload[field.name], dtype=np.float32)
+        if value.size != field.dim:
+            raise ValueError(
+                f"Dynamic observation field '{field.name}' has {value.size} values, "
+                f"expected {field.dim}"
+            )
+        obs[field.name] = value.reshape(field.shape)
+    return obs
 
 
 def validate_observation(obs: Mapping[str, np.ndarray]) -> None:
@@ -234,6 +345,25 @@ def validate_auxiliary_observation(obs: Mapping[str, np.ndarray]) -> None:
             raise ValueError(
                 f"Auxiliary observation field '{field.name}' has shape {value.shape}, "
                 f"expected {field.shape}"
+            )
+
+
+def _validate_policy_fields(
+    obs: Mapping[str, np.ndarray], field_names: tuple[str, ...]
+) -> None:
+    unknown = [name for name in field_names if name not in _POLICY_FIELD_MAP]
+    if unknown:
+        raise ValueError(f"Unknown safety observation fields: {unknown}")
+    missing = [name for name in field_names if name not in obs]
+    if missing:
+        raise ValueError(f"Observation is missing safety fields: {missing}")
+    for name in field_names:
+        value = np.asarray(obs[name])
+        expected = _POLICY_FIELD_MAP[name].shape
+        if value.shape != expected:
+            raise ValueError(
+                f"Safety observation field '{name}' has shape {value.shape}, "
+                f"expected {expected}"
             )
 
 

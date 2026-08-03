@@ -30,6 +30,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--encounter-policy", choices=("cycle", "random"), default="random")
     parser.add_argument("--encounter-severity-mix", default="safe=0.40,gate_only=0.25,near=0.20,near_miss=0.10,collision=0.05")
     parser.add_argument("--encounter-anchor-mode", choices=("ee", "world"), default="ee")
+    parser.add_argument("--encounter-timebase", choices=("recorded", "step"), default="recorded")
+    parser.add_argument("--encounter-playback-speed", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-legacy-source-configuration",
+        action="store_true",
+        help="Explicitly allow random-layout fallback for legacy encounter sources.",
+    )
     parser.add_argument("--no-encounter-phase-match", dest="encounter_phase_match", action="store_false")
     parser.add_argument("--no-encounter-event-match", dest="encounter_event_match", action="store_false")
     parser.set_defaults(encounter_phase_match=True, encounter_event_match=True)
@@ -48,6 +55,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--updates-per-step", type=int, default=1)
     parser.add_argument("--target-entropy", type=float, default=-5.0)
     parser.add_argument("--init-temperature", type=float, default=0.01)
+    parser.add_argument(
+        "--fixed-temperature",
+        action="store_true",
+        help="Keep entropy temperature fixed at --init-temperature.",
+    )
+    parser.add_argument(
+        "--target-q-clip",
+        type=float,
+        default=0.0,
+        help="Symmetric critic-target clip; non-positive disables clipping.",
+    )
+    parser.add_argument(
+        "--critic-loss",
+        choices=("mse", "huber"),
+        default="mse",
+    )
     parser.add_argument("--log-std-min", type=float, default=-5.0)
     parser.add_argument("--log-std-max", type=float, default=-1.5)
     parser.add_argument("--reward-scale", type=float, default=0.05)
@@ -93,17 +116,61 @@ def _ensure_torch() -> None:
 _ensure_torch()
 from omni.isaac.kit import SimulationApp
 
-simulation_app = SimulationApp({"headless": not args.render, "width": 1280, "height": 720, "active_gpu": 0, "physics_gpu": 0, "multi_gpu": False, "max_gpu_count": 1})
+simulation_app = SimulationApp(
+    {
+        "headless": not args.render,
+        "width": 1280,
+        "height": 720,
+        "active_gpu": 0,
+        "physics_gpu": 0,
+        "multi_gpu": False,
+        "max_gpu_count": 1,
+    },
+    experience=os.environ.get("ISAAC_SIM_EXPERIENCE", ""),
+)
 print(f"[TrainSafetySAC] SimulationApp headless={not args.render}", flush=True)
 
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from torch import nn  # noqa: E402
 
-from rl import ACTION_DIM, HRI_OBS_DIM, HRI_OBS_FIELD_NAMES, HumanEncounterReplay, HumanTrajectoryReplay, IsaacPickPlaceEnv, PickPlaceEnvConfig, flatten_hri_observation, parse_pseudo_errp_sources  # noqa: E402
+from rl import (  # noqa: E402
+    ACTION_DIM,
+    DYNAMIC_HRI_OBS_DIM as HRI_OBS_DIM,
+    DYNAMIC_HRI_OBS_FIELD_NAMES as HRI_OBS_FIELD_NAMES,
+    DYNAMIC_HRI_OBSERVATION_VERSION as HRI_OBSERVATION_VERSION,
+    HumanEncounterReplay,
+    HumanTrajectoryReplay,
+    IsaacPickPlaceEnv,
+    PickPlaceEnvConfig,
+    flatten_dynamic_hri_observation as flatten_hri_observation,
+    parse_pseudo_errp_sources,
+)
 from rl.actions import clip_action  # noqa: E402
 from rl.observations import MISSING_DISTANCE_M, observation_slices  # noqa: E402
 from rl.policies import MLPPolicy  # noqa: E402
+
+
+def _reset_training_episode(
+    env: IsaacPickPlaceEnv,
+    human_replay: HumanTrajectoryReplay | HumanEncounterReplay | None,
+    episode_index: int,
+    seed: int,
+):
+    source_restoration = None
+    if human_replay is not None:
+        human_replay.reset(episode_index, seed=seed)
+    if isinstance(human_replay, HumanEncounterReplay):
+        source_restoration = human_replay.source_restoration(
+            screening_seed=seed,
+            allow_legacy_fallback=args.allow_legacy_source_configuration,
+        )
+        if not bool(source_restoration.get("source_configuration_available", False)):
+            raise ValueError(
+                "source_configuration_unavailable: "
+                f"{source_restoration.get('restoration_reason', 'unknown')}"
+            )
+    return env.reset(seed=seed, source_restoration=source_restoration)
 
 
 def _mlp(input_dim: int, output_dim: int, hidden_dims: tuple[int, ...]) -> nn.Sequential:
@@ -263,8 +330,15 @@ def _run() -> None:
     tq1.load_state_dict(q1.state_dict()); tq2.load_state_dict(q2.state_dict())
     actor_opt = torch.optim.Adam(actor.parameters(), lr=args.lr)
     critic_opt = torch.optim.Adam(list(q1.parameters()) + list(q2.parameters()), lr=args.lr)
-    log_alpha = torch.tensor(np.log(args.init_temperature), dtype=torch.float32, device=device, requires_grad=True)
-    alpha_opt = torch.optim.Adam([log_alpha], lr=args.lr)
+    log_alpha = torch.tensor(
+        np.log(args.init_temperature),
+        dtype=torch.float32,
+        device=device,
+        requires_grad=not args.fixed_temperature,
+    )
+    alpha_opt = (
+        None if args.fixed_temperature else torch.optim.Adam([log_alpha], lr=args.lr)
+    )
     replay = ReplayBuffer(args.replay_size)
     human_replay = _load_human_replay()
     release_dist = None if args.release_gate_dist < 0 else args.release_gate_dist
@@ -277,8 +351,7 @@ def _run() -> None:
     best = {"success_rate": -1.0, "return": -float("inf"), "step": 0}
     metrics: dict[str, float] = {}
     started = time.time()
-    if human_replay is not None: human_replay.reset(0, seed=args.seed)
-    obs, info = env.reset(seed=args.seed)
+    obs, info = _reset_training_episode(env, human_replay, 0, args.seed)
     ep_return = ep_len = ep_gate = ep_errp = 0.0
     print(f"[TrainSafetySAC] task={task_policy.path} human_replay={human_replay.path if human_replay else 'off'} alpha={args.residual_alpha} gate=({args.safety_gate_start_dist},{args.safety_gate_full_dist})", flush=True)
     try:
@@ -320,14 +393,18 @@ def _run() -> None:
                 encounter = human_replay.current_scenario if isinstance(human_replay, HumanEncounterReplay) else {}
                 episodes.append({"episode": len(episodes), "return": float(ep_return), "length": int(ep_len), "success": bool(terminated), "truncated": bool(truncated), "cube_target_dist": float(info["cube_target_dist"]), "grasped": bool(info["has_grasped_cube"]), "errp_feedback_sum": float(ep_errp), "gate_active_count": int(ep_gate), "encounter_id": str(encounter.get("id", "")), "encounter_target_severity": str(encounter.get("target_severity", "")), "encounter_target_phase": str(encounter.get("task_phase", "")), "encounter_source_session": str(encounter.get("session_id", ""))})
                 episode_index = len(episodes); seed = args.seed + episode_index
-                if human_replay is not None: human_replay.reset(episode_index, seed=seed)
-                obs, info = env.reset(seed=seed)
+                obs, info = _reset_training_episode(
+                    env,
+                    human_replay,
+                    episode_index,
+                    seed,
+                )
                 ep_return = ep_len = ep_gate = ep_errp = 0.0
             if step % args.log_every_steps == 0 or step == args.total_steps:
                 recent = episodes[-20:]
                 record = {"step": step, "episodes": len(episodes), "recent_success_rate": float(np.mean([e["success"] for e in recent])) if recent else 0.0, "recent_return": float(np.mean([e["return"] for e in recent])) if recent else 0.0, "recent_errp_feedback": float(np.mean([e["errp_feedback_sum"] for e in recent])) if recent else 0.0, "replay_size": replay.size, "gate_fraction": float(np.mean(replay.gates[:replay.size, 0] > 0)) if replay.size else 0.0, **metrics}
                 history.append(record)
-                print(f"[TrainSafetySAC] step={step:06d} episodes={len(episodes)} success={record['recent_success_rate']:.3f} return={record['recent_return']:.2f} errp={record['recent_errp_feedback']:.2f} actor={record.get('actor_loss', 0):.4f} critic={record.get('critic_loss', 0):.4f} alpha={record.get('alpha', args.init_temperature):.4f}", flush=True)
+                print(f"[TrainSafetySAC] step={step:06d} episodes={len(episodes)} success={record['recent_success_rate']:.3f} return={record['recent_return']:.2f} errp={record['recent_errp_feedback']:.2f} actor={record.get('actor_loss', 0):.4f} critic={record.get('critic_loss', 0):.4f} alpha={record.get('alpha', args.init_temperature):.4f} q={record.get('mean_q', 0):.3f} residual={record.get('mean_residual_norm', 0):.4f} gate={record.get('gate_fraction', 0):.3f}", flush=True)
                 if len(episodes) >= args.best_min_episodes and (record["recent_success_rate"], record["recent_return"]) > (best["success_rate"], best["return"]):
                     best = {"success_rate": record["recent_success_rate"], "return": record["recent_return"], "step": step}
                     _save(best_output, actor, q1, q2, tq1, tq2, log_alpha, obs_mean, obs_std, hidden, history, episodes, best)
@@ -353,11 +430,26 @@ def _sac_update(actor, q1, q2, tq1, tq2, actor_opt, critic_opt, log_alpha, alpha
         next_action, next_logp = actor.sample(next_obs)
         next_action = next_action * (next_gate > 0.0)
         target_q = torch.minimum(tq1(torch.cat((next_obs, next_action), 1)), tq2(torch.cat((next_obs, next_action), 1)))
+        if args.target_q_clip > 0.0:
+            target_q = torch.clamp(
+                target_q,
+                -args.target_q_clip,
+                args.target_q_clip,
+            )
         target = reward + args.gamma * (1.0 - done) * (
             target_q - (next_gate > 0.0) * log_alpha.exp() * next_logp
         )
+        if args.target_q_clip > 0.0:
+            target = torch.clamp(
+                target,
+                -args.target_q_clip,
+                args.target_q_clip,
+            )
     q1_value, q2_value = q1(torch.cat((obs, action), 1)), q2(torch.cat((obs, action), 1))
-    critic_loss = F.mse_loss(q1_value, target) + F.mse_loss(q2_value, target)
+    loss_fn = F.smooth_l1_loss if args.critic_loss == "huber" else F.mse_loss
+    critic_loss = loss_fn(q1_value, target) + loss_fn(q2_value, target)
+    if not torch.isfinite(critic_loss):
+        raise FloatingPointError("SAC critic loss became non-finite")
     critic_opt.zero_grad(set_to_none=True)
     critic_loss.backward()
     nn.utils.clip_grad_norm_(list(q1.parameters()) + list(q2.parameters()), args.max_grad_norm)
@@ -373,15 +465,22 @@ def _sac_update(actor, q1, q2, tq1, tq2, actor_opt, critic_opt, log_alpha, alpha
         + args.residual_actor_penalty * residual_penalty
     )
     actor_loss = (active_weight * actor_terms).sum() / weight_sum
+    if not torch.isfinite(actor_loss):
+        raise FloatingPointError("SAC actor loss became non-finite")
     actor_opt.zero_grad(set_to_none=True)
     actor_loss.backward()
     nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
     actor_opt.step()
-    alpha_terms = -(log_alpha * (logp.detach() + args.target_entropy))
-    alpha_loss = (active_weight * alpha_terms).sum() / weight_sum
-    alpha_opt.zero_grad(set_to_none=True)
-    alpha_loss.backward()
-    alpha_opt.step()
+    if alpha_opt is None:
+        alpha_loss = torch.zeros((), dtype=torch.float32, device=device)
+    else:
+        alpha_terms = -(log_alpha * (logp.detach() + args.target_entropy))
+        alpha_loss = (active_weight * alpha_terms).sum() / weight_sum
+        if not torch.isfinite(alpha_loss):
+            raise FloatingPointError("SAC temperature loss became non-finite")
+        alpha_opt.zero_grad(set_to_none=True)
+        alpha_loss.backward()
+        alpha_opt.step()
     with torch.no_grad():
         for target_param, param in zip(tq1.parameters(), q1.parameters()): target_param.mul_(1 - args.tau).add_(param, alpha=args.tau)
         for target_param, param in zip(tq2.parameters(), q2.parameters()): target_param.mul_(1 - args.tau).add_(param, alpha=args.tau)
@@ -390,7 +489,7 @@ def _sac_update(actor, q1, q2, tq1, tq2, actor_opt, critic_opt, log_alpha, alpha
 
 def _save(path, actor, q1, q2, tq1, tq2, log_alpha, obs_mean, obs_std, hidden, history, episodes, best) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    torch.save({"algo": "sac_safety_residual_v2", "model_state_dict": {k: v.detach().cpu() for k, v in actor.mean.state_dict().items()}, "sac_actor_state_dict": {k: v.detach().cpu() for k, v in actor.state_dict().items()}, "q1_state_dict": q1.state_dict(), "q2_state_dict": q2.state_dict(), "target_q1_state_dict": tq1.state_dict(), "target_q2_state_dict": tq2.state_dict(), "log_alpha": log_alpha.detach().cpu(), "obs_mean": torch.from_numpy(obs_mean), "obs_std": torch.from_numpy(obs_std), "obs_dim": HRI_OBS_DIM, "observation_fields": list(HRI_OBS_FIELD_NAMES), "action_dim": ACTION_DIM, "hidden_dims": hidden, "observation_version": "hri_obs_v4_distal_surface_safety_83d", "policy_mode": "direct", "output_activation": "tanh", "residual_alpha": args.residual_alpha, "xyz_only_residual": args.xyz_only_residual, "safety_gate_start_dist": args.safety_gate_start_dist, "safety_gate_full_dist": args.safety_gate_full_dist, "task_checkpoint": _resolve_project_path(args.task_checkpoint), "human_replay_data": _resolve_project_path(args.human_replay_data), "encounter_manifest": _resolve_project_path(args.encounter_manifest) if args.encounter_manifest else "", "pseudo_errp_enabled": args.pseudo_errp_enabled, "pseudo_errp_sources": parse_pseudo_errp_sources(args.pseudo_errp_sources), "train_args": vars(args), "history": history, "episode_stats": episodes, "best_metric": best}, path)
+    torch.save({"algo": "sac_safety_residual_v2", "model_state_dict": {k: v.detach().cpu() for k, v in actor.mean.state_dict().items()}, "sac_actor_state_dict": {k: v.detach().cpu() for k, v in actor.state_dict().items()}, "q1_state_dict": q1.state_dict(), "q2_state_dict": q2.state_dict(), "target_q1_state_dict": tq1.state_dict(), "target_q2_state_dict": tq2.state_dict(), "log_alpha": log_alpha.detach().cpu(), "obs_mean": torch.from_numpy(obs_mean), "obs_std": torch.from_numpy(obs_std), "obs_dim": HRI_OBS_DIM, "observation_fields": list(HRI_OBS_FIELD_NAMES), "action_dim": ACTION_DIM, "hidden_dims": hidden, "observation_version": HRI_OBSERVATION_VERSION, "policy_mode": "direct", "output_activation": "tanh", "residual_alpha": args.residual_alpha, "xyz_only_residual": args.xyz_only_residual, "safety_gate_start_dist": args.safety_gate_start_dist, "safety_gate_full_dist": args.safety_gate_full_dist, "task_checkpoint": _resolve_project_path(args.task_checkpoint), "human_replay_data": _resolve_project_path(args.human_replay_data), "encounter_manifest": _resolve_project_path(args.encounter_manifest) if args.encounter_manifest else "", "pseudo_errp_enabled": args.pseudo_errp_enabled, "pseudo_errp_sources": parse_pseudo_errp_sources(args.pseudo_errp_sources), "train_args": vars(args), "history": history, "episode_stats": episodes, "best_metric": best}, path)
 
 
 def _actor_action(actor, obs, device, stochastic: bool) -> np.ndarray:
@@ -457,7 +556,7 @@ def _load_human_replay() -> HumanTrajectoryReplay | HumanEncounterReplay | None:
     if args.encounter_manifest:
         path = _resolve_project_path(args.encounter_manifest)
         if not os.path.exists(path): raise FileNotFoundError(f"--encounter-manifest not found: {path}")
-        return HumanEncounterReplay(path, episode_policy=args.encounter_policy, severity_mix=args.encounter_severity_mix, anchor_mode=args.encounter_anchor_mode, phase_match=args.encounter_phase_match, event_match=args.encounter_event_match, seed=args.seed)
+        return HumanEncounterReplay(path, episode_policy=args.encounter_policy, severity_mix=args.encounter_severity_mix, anchor_mode=args.encounter_anchor_mode, phase_match=args.encounter_phase_match, event_match=args.encounter_event_match, playback_timebase=args.encounter_timebase, playback_speed=args.encounter_playback_speed, seed=args.seed)
     if not args.human_replay_data: return None
     path = _resolve_project_path(args.human_replay_data)
     if not os.path.exists(path): raise FileNotFoundError(f"--human-replay-data not found: {path}")

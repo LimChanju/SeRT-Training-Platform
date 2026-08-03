@@ -9,6 +9,12 @@ from v3_chan.hri_obs_recorder import (
     build_observation,
     flatten_observation,
 )
+from v3_chan.rl.observations import (
+    DYNAMIC_HRI_OBS_DIM,
+    DYNAMIC_HRI_OBS_FIELD_NAMES,
+    apply_dynamic_hri_observation,
+    flatten_dynamic_hri_observation,
+)
 from v3_chan.pose_tracking import PoseSample, TRACKING_TRACKED
 
 
@@ -81,6 +87,34 @@ def test_surface_gap_flags_and_policy_compatibility():
     assert _scalar(collision_obs, "near_human") == 1.0
     assert _scalar(collision_obs, "near_miss") == 0.0
     assert _scalar(collision_obs, "human_robot_collision") == 1.0
+
+
+def test_dynamic_safety_policy_observation_extends_static_schema():
+    obs = _observation(surface_gap_override=0.04)
+    apply_dynamic_hri_observation(
+        obs,
+        {
+            "left_hand_vel_filtered_mps": [0.2, 0.0, 0.0],
+            "left_closest_robot_velocity_world_mps": [0.05, 0.0, 0.0],
+            "left_relative_velocity_world_mps": [0.15, 0.0, 0.0],
+            "left_closing_speed_mps": 0.15,
+            "left_ttc_s": 0.25,
+            "left_dynamic_measurement_valid": 1.0,
+            "left_ttc_valid": 1.0,
+        },
+    )
+    dynamic = flatten_dynamic_hri_observation(obs)
+
+    assert HRI_OBS_DIM == 83
+    assert DYNAMIC_HRI_OBS_DIM == 109
+    assert dynamic.shape == (109,)
+    assert DYNAMIC_HRI_OBS_FIELD_NAMES[: len(HRI_OBS_FIELD_NAMES)] == (
+        HRI_OBS_FIELD_NAMES
+    )
+    assert np.isclose(_scalar(obs, "left_closing_speed_mps"), 0.15)
+    assert np.isclose(_scalar(obs, "left_ttc_s"), 0.25)
+    assert _scalar(obs, "left_ttc_valid") == 1.0
+    assert np.isclose(_scalar(obs, "right_ttc_s"), 10.0)
 
 
 def test_hri_recorder_writes_surface_schema(tmp_path):

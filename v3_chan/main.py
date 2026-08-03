@@ -336,6 +336,7 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
 def _capture_initial_scene(
     cubes,
     place_target,
+    robot,
     *,
     session_seed: int,
     layout_seed: int,
@@ -356,7 +357,7 @@ def _capture_initial_scene(
         target_position,
         target_orientation,
     )
-    return {
+    initial_scene = {
         "session_seed": np.asarray(int(session_seed), dtype=np.int64),
         "layout_seed": np.asarray(int(layout_seed), dtype=np.int64),
         "layout_id": str(fixed_layout_id or measured_layout_id),
@@ -372,6 +373,23 @@ def _capture_initial_scene(
             target_orientation, dtype=np.float64
         ),
     }
+    try:
+        joint_positions = np.asarray(
+            robot.get_joint_positions(), dtype=np.float64
+        ).reshape(-1)
+        if joint_positions.size > 0 and np.all(np.isfinite(joint_positions)):
+            initial_scene["robot_joint_positions"] = joint_positions
+    except Exception:
+        pass
+    try:
+        joint_velocities = np.asarray(
+            robot.get_joint_velocities(), dtype=np.float64
+        ).reshape(-1)
+        if joint_velocities.size > 0 and np.all(np.isfinite(joint_velocities)):
+            initial_scene["robot_joint_velocities"] = joint_velocities
+    except Exception:
+        pass
+    return initial_scene
 
 
 def _enable_vr_extensions() -> None:
@@ -844,6 +862,7 @@ def main():
     session_initial_scene = _capture_initial_scene(
         cubes,
         place_target,
+        panda,
         session_seed=HRI_SESSION_SEED,
         layout_seed=session_layout_seed,
     )
@@ -957,6 +976,7 @@ def main():
         return _capture_initial_scene(
             cubes,
             place_target,
+            panda,
             session_seed=HRI_SESSION_SEED,
             layout_seed=session_layout_seed,
             fixed_layout_id=session_layout_id,

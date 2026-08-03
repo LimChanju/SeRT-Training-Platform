@@ -126,7 +126,12 @@ def setup_scene(
     table_center_z = table_height + (table_size[2] / 2.0)
     table_center = np.array([table_xy[0], table_xy[1], table_center_z])
     viewer_eye = np.array([1.1, 0.0, 1.5])
-    set_camera_view(eye=viewer_eye, target=table_center)
+    if os.environ.get("ISAAC_DISABLE_VIEWPORT", "0").lower() not in (
+        "1",
+        "true",
+        "yes",
+    ):
+        set_camera_view(eye=viewer_eye, target=table_center)
     stack_base_xy = np.array([0.6, -0.25])
     cube_xy_positions = _sample_positions(
         table_xy,

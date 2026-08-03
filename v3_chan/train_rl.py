@@ -1193,7 +1193,7 @@ def _resolve_project_path(path: str) -> str:
     project_path = os.path.abspath(os.path.join(PROJECT_DIR, path))
     if os.path.exists(project_path):
         return project_path
-    return os.path.abspath(path)
+    return project_path
 
 
 def _resolve_output_path(path: str) -> str:

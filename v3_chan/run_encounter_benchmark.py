@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
@@ -44,6 +45,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--total-steps", type=int, default=30000)
     parser.add_argument("--rollout-steps", type=int, default=1024)
     parser.add_argument("--eval-seeds", default="11,1011,2011")
+    parser.add_argument(
+        "--checkpoint-selection",
+        choices=("final", "best"),
+        default="final",
+        help="Safety checkpoint evaluated after training.",
+    )
+    parser.add_argument("--eval-log-every", type=int, default=25)
+    parser.add_argument(
+        "--eval-workers",
+        type=int,
+        default=1,
+        help="Independent model/seed evaluation processes to run concurrently.",
+    )
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="cuda")
     parser.add_argument("--seed", type=int, default=23)
     parser.add_argument("--residual-alpha", type=float, default=0.1)
@@ -51,10 +65,47 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--safety-gate-full-dist", type=float, default=0.05)
     parser.add_argument("--distance-progress-weight", type=float, default=2.0)
     parser.add_argument("--distance-progress-clip-m", type=float, default=0.03)
+    parser.add_argument("--ppo-lr", type=float, default=1e-4)
+    parser.add_argument("--ppo-clip-ratio", type=float, default=0.1)
+    parser.add_argument("--ppo-update-epochs", type=int, default=4)
+    parser.add_argument("--ppo-entropy-coef", type=float, default=0.001)
+    parser.add_argument("--sac-lr", type=float, default=3e-5)
+    parser.add_argument("--sac-gamma", type=float, default=0.97)
+    parser.add_argument("--sac-reward-scale", type=float, default=0.02)
+    parser.add_argument("--sac-init-temperature", type=float, default=0.005)
+    parser.add_argument("--sac-target-q-clip", type=float, default=20.0)
+    parser.add_argument(
+        "--sac-critic-loss",
+        choices=("mse", "huber"),
+        default="huber",
+    )
+    parser.add_argument("--sac-residual-actor-penalty", type=float, default=1.0)
+    parser.add_argument(
+        "--sac-fixed-temperature",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--td3-actor-lr", type=float, default=1e-4)
+    parser.add_argument("--td3-critic-lr", type=float, default=1e-4)
+    parser.add_argument("--td3-gamma", type=float, default=0.97)
+    parser.add_argument("--td3-reward-scale", type=float, default=0.02)
+    parser.add_argument("--td3-target-q-clip", type=float, default=20.0)
+    parser.add_argument(
+        "--td3-critic-loss",
+        choices=("mse", "huber"),
+        default="huber",
+    )
+    parser.add_argument("--td3-residual-actor-penalty", type=float, default=1.0)
     parser.add_argument(
         "--encounter-severity-mix",
         default="safe=0.40,gate_only=0.25,near=0.20,near_miss=0.10,collision=0.05",
     )
+    parser.add_argument(
+        "--encounter-timebase",
+        choices=("recorded", "step"),
+        default="recorded",
+    )
+    parser.add_argument("--encounter-playback-speed", type=float, default=1.0)
     parser.add_argument(
         "--xyz-only-residual",
         action=argparse.BooleanOptionalAction,
@@ -66,6 +117,11 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    if (
+        not np.isfinite(args.encounter_playback_speed)
+        or args.encounter_playback_speed <= 0.0
+    ):
+        raise ValueError("--encounter-playback-speed must be finite and positive.")
     algorithms = _parse_algorithms(args.algorithms)
     train_manifest = Path(args.train_manifest).expanduser().resolve()
     eval_manifest = Path(args.eval_manifest).expanduser().resolve()
@@ -81,6 +137,8 @@ def main() -> None:
     )
     if not eval_seeds:
         raise ValueError("--eval-seeds must contain at least one seed.")
+    if args.eval_workers < 1:
+        raise ValueError("--eval-workers must be at least 1.")
     tag = args.experiment_tag.strip()
     if not tag or any(character in tag for character in "/\\"):
         raise ValueError("--experiment-tag must be one directory name.")
@@ -138,6 +196,10 @@ def _train(
             "random",
             "--encounter-severity-mix",
             args.encounter_severity_mix,
+            "--encounter-timebase",
+            args.encounter_timebase,
+            "--encounter-playback-speed",
+            str(args.encounter_playback_speed),
             "--output",
             str(output),
             "--best-output",
@@ -167,11 +229,59 @@ def _train(
                 (
                     "--rollout-steps",
                     str(args.rollout_steps),
+                    "--lr",
+                    str(args.ppo_lr),
+                    "--clip-ratio",
+                    str(args.ppo_clip_ratio),
+                    "--update-epochs",
+                    str(args.ppo_update_epochs),
+                    "--entropy-coef",
+                    str(args.ppo_entropy_coef),
                     "--gate-active-only",
                 )
             )
         if algorithm == "sac" and args.xyz_only_residual:
             command.extend(("--target-entropy", "-3.0"))
+        if algorithm == "sac":
+            command.extend(
+                (
+                    "--lr",
+                    str(args.sac_lr),
+                    "--gamma",
+                    str(args.sac_gamma),
+                    "--reward-scale",
+                    str(args.sac_reward_scale),
+                    "--init-temperature",
+                    str(args.sac_init_temperature),
+                    "--target-q-clip",
+                    str(args.sac_target_q_clip),
+                    "--critic-loss",
+                    args.sac_critic_loss,
+                    "--residual-actor-penalty",
+                    str(args.sac_residual_actor_penalty),
+                )
+            )
+            if args.sac_fixed_temperature:
+                command.append("--fixed-temperature")
+        if algorithm == "td3":
+            command.extend(
+                (
+                    "--actor-lr",
+                    str(args.td3_actor_lr),
+                    "--critic-lr",
+                    str(args.td3_critic_lr),
+                    "--gamma",
+                    str(args.td3_gamma),
+                    "--reward-scale",
+                    str(args.td3_reward_scale),
+                    "--target-q-clip",
+                    str(args.td3_target_q_clip),
+                    "--critic-loss",
+                    args.td3_critic_loss,
+                    "--residual-actor-penalty",
+                    str(args.td3_residual_actor_penalty),
+                )
+            )
         print(
             f"[EncounterBenchmark] train algorithm={algorithm} "
             f"steps={args.total_steps}",
@@ -190,11 +300,21 @@ def _evaluate(
     args: argparse.Namespace,
 ) -> None:
     models = ("task_only", *algorithms)
+    with eval_manifest.open("r", encoding="utf-8") as handle:
+        expected_episodes = len(json.load(handle)["scenarios"])
+    jobs: list[
+        tuple[str, int, list[str], Path, Path, Path]
+    ] = []
     for model in models:
         safety_checkpoint = (
             None
             if model == "task_only"
-            else policy_dir / f"{model}_safety_best.pt"
+            else policy_dir
+            / (
+                f"{model}_safety_best.pt"
+                if args.checkpoint_selection == "best"
+                else f"{model}_safety.pt"
+            )
         )
         if safety_checkpoint is not None and not safety_checkpoint.exists():
             raise FileNotFoundError(safety_checkpoint)
@@ -214,6 +334,9 @@ def _evaluate(
                     flush=True,
                 )
                 continue
+            if args.force:
+                for output_path in (output_json, output_csv, output_steps):
+                    output_path.unlink(missing_ok=True)
             output_dir.mkdir(parents=True, exist_ok=True)
             command = _isaac_command(
                 SCRIPT_DIR / "evaluate_rollout_policy.py",
@@ -223,6 +346,10 @@ def _evaluate(
                 str(eval_manifest),
                 "--encounter-policy",
                 "cycle",
+                "--encounter-timebase",
+                args.encounter_timebase,
+                "--encounter-playback-speed",
+                str(args.encounter_playback_speed),
                 "--episodes",
                 "0",
                 "--seed",
@@ -240,6 +367,8 @@ def _evaluate(
                 str(output_csv),
                 "--output-step-csv",
                 str(output_steps),
+                "--log-every",
+                str(args.eval_log_every),
                 "--no-pseudo-errp",
             )
             if safety_checkpoint is not None:
@@ -252,10 +381,71 @@ def _evaluate(
                     )
                 )
             print(
+                f"[EncounterBenchmark] queue eval model={model} seed={seed}",
+                flush=True,
+            )
+            jobs.append(
+                (
+                    model,
+                    seed,
+                    command,
+                    output_json,
+                    output_csv,
+                    output_steps,
+                )
+            )
+
+    if not jobs:
+        return
+    worker_count = min(args.eval_workers, len(jobs))
+    if worker_count == 1:
+        for model, seed, command, output_json, output_csv, output_steps in jobs:
+            print(
                 f"[EncounterBenchmark] eval model={model} seed={seed}",
                 flush=True,
             )
-            _run(command)
+            _run_evaluation(
+                command,
+                output_json,
+                output_csv,
+                output_steps,
+                expected_episodes,
+            )
+        return
+
+    print(
+        f"[EncounterBenchmark] parallel eval workers={worker_count} "
+        f"jobs={len(jobs)}",
+        flush=True,
+    )
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=worker_count
+    ) as executor:
+        future_to_job = {
+            executor.submit(
+                _run_evaluation,
+                command,
+                output_json,
+                output_csv,
+                output_steps,
+                expected_episodes,
+            ): (model, seed)
+            for (
+                model,
+                seed,
+                command,
+                output_json,
+                output_csv,
+                output_steps,
+            ) in jobs
+        }
+        for future in concurrent.futures.as_completed(future_to_job):
+            model, seed = future_to_job[future]
+            future.result()
+            print(
+                f"[EncounterBenchmark] completed eval model={model} seed={seed}",
+                flush=True,
+            )
 
 
 def _summarize(
@@ -278,6 +468,7 @@ def _summarize(
                         "eval_seed": seed,
                         "episode": int(episode["episode"]),
                         "encounter_id": episode.get("encounter_id", ""),
+                        "scene_layout_id": episode.get("scene_layout_id", ""),
                         "target_severity": episode.get(
                             "encounter_target_severity",
                             "",
@@ -432,6 +623,31 @@ def _run(command: list[str]) -> None:
         env=environment,
         check=True,
     )
+
+
+def _run_evaluation(
+    command: list[str],
+    output_json: Path,
+    output_csv: Path,
+    output_steps: Path,
+    expected_episodes: int,
+) -> None:
+    _run(command)
+    missing = [
+        str(path)
+        for path in (output_json, output_csv, output_steps)
+        if not path.exists()
+    ]
+    if missing:
+        raise RuntimeError(f"Evaluation did not produce outputs: {missing}")
+    with output_json.open("r", encoding="utf-8") as handle:
+        result = json.load(handle)
+    episode_count = len(result.get("episodes", ()))
+    if episode_count != expected_episodes:
+        raise RuntimeError(
+            f"Incomplete evaluation {output_json}: "
+            f"episodes={episode_count}, expected={expected_episodes}"
+        )
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:

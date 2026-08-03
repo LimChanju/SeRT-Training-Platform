@@ -73,6 +73,18 @@ def _parse_args() -> argparse.Namespace:
         default="ee",
     )
     parser.add_argument(
+        "--encounter-timebase",
+        choices=("recorded", "step"),
+        default="recorded",
+        help="recorded preserves monotonic collection time; step preserves legacy one-frame-per-step replay.",
+    )
+    parser.add_argument("--encounter-playback-speed", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-legacy-source-configuration",
+        action="store_true",
+        help="Explicitly allow random-layout fallback for legacy encounter sources.",
+    )
+    parser.add_argument(
         "--no-encounter-phase-match",
         dest="encounter_phase_match",
         action="store_false",
@@ -85,6 +97,17 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(
         encounter_phase_match=True,
         encounter_event_match=True,
+    )
+    parser.add_argument(
+        "--visualize-human-replay",
+        action="store_true",
+        help="Show replayed head/hand positions as spheres when rendering.",
+    )
+    parser.add_argument(
+        "--human-replay-visual-z-offset",
+        type=float,
+        default=0.0,
+        help="Visualization-only z offset in meters for replayed head/hand spheres.",
     )
     parser.add_argument("--total-steps", type=int, default=20000)
     parser.add_argument("--rollout-steps", type=int, default=1024)
@@ -194,7 +217,8 @@ simulation_app = SimulationApp(
         "physics_gpu": 0,
         "multi_gpu": False,
         "max_gpu_count": 1,
-    }
+    },
+    experience=os.environ.get("ISAAC_SIM_EXPERIENCE", ""),
 )
 print(f"[TrainSafetyResidual] SimulationApp headless={not args.render}", flush=True)
 
@@ -203,18 +227,41 @@ from torch import nn  # noqa: E402
 
 from rl import (  # noqa: E402
     ACTION_DIM,
-    HRI_OBS_DIM,
-    HRI_OBS_FIELD_NAMES,
+    DYNAMIC_HRI_OBS_DIM as HRI_OBS_DIM,
+    DYNAMIC_HRI_OBS_FIELD_NAMES as HRI_OBS_FIELD_NAMES,
+    DYNAMIC_HRI_OBSERVATION_VERSION as HRI_OBSERVATION_VERSION,
     HumanEncounterReplay,
     HumanTrajectoryReplay,
     IsaacPickPlaceEnv,
     PickPlaceEnvConfig,
-    flatten_hri_observation,
+    flatten_dynamic_hri_observation as flatten_hri_observation,
     parse_pseudo_errp_sources,
 )
 from rl.actions import clip_action  # noqa: E402
 from rl.observations import MISSING_DISTANCE_M, observation_slices  # noqa: E402
 from rl.policies import MLPPolicy  # noqa: E402
+
+
+def _reset_training_episode(
+    env: IsaacPickPlaceEnv,
+    human_replay: HumanTrajectoryReplay | HumanEncounterReplay | None,
+    episode_index: int,
+    seed: int,
+):
+    source_restoration = None
+    if human_replay is not None:
+        human_replay.reset(episode_index, seed=seed)
+    if isinstance(human_replay, HumanEncounterReplay):
+        source_restoration = human_replay.source_restoration(
+            screening_seed=seed,
+            allow_legacy_fallback=args.allow_legacy_source_configuration,
+        )
+        if not bool(source_restoration.get("source_configuration_available", False)):
+            raise ValueError(
+                "source_configuration_unavailable: "
+                f"{source_restoration.get('restoration_reason', 'unknown')}"
+            )
+    return env.reset(seed=seed, source_restoration=source_restoration)
 
 
 class ActorCritic(nn.Module):
@@ -393,6 +440,8 @@ def _run() -> None:
             render=args.render,
             pseudo_errp_enabled=args.pseudo_errp_enabled,
             pseudo_errp_sources=parse_pseudo_errp_sources(args.pseudo_errp_sources),
+            visualize_human_replay=args.visualize_human_replay,
+            human_replay_visual_z_offset=args.human_replay_visual_z_offset,
         ),
         human_state_fn=human_replay,
     )
@@ -404,9 +453,7 @@ def _run() -> None:
     episode_stats: list[dict[str, Any]] = []
     started_at = time.time()
 
-    if human_replay is not None:
-        human_replay.reset(0, seed=args.seed)
-    obs, info = env.reset(seed=args.seed)
+    obs, info = _reset_training_episode(env, human_replay, 0, args.seed)
     episode_return = 0.0
     episode_length = 0
     total_steps = 0
@@ -715,9 +762,12 @@ def _collect_rollout(
             )
             next_episode_index = len(episode_stats)
             next_seed = int(args.seed + next_episode_index)
-            if human_replay is not None:
-                human_replay.reset(next_episode_index, seed=next_seed)
-            obs, info = env.reset(seed=next_seed)
+            obs, info = _reset_training_episode(
+                env,
+                human_replay,
+                next_episode_index,
+                next_seed,
+            )
             obs = np.asarray(obs, dtype=np.float32)
             episode_return = 0.0
             episode_length = 0
@@ -915,7 +965,7 @@ def _save_checkpoint(
         "observation_fields": list(HRI_OBS_FIELD_NAMES),
         "action_dim": ACTION_DIM,
         "hidden_dims": hidden_dims,
-        "observation_version": "hri_obs_v4_distal_surface_safety_83d",
+        "observation_version": HRI_OBSERVATION_VERSION,
         "policy_mode": "direct",
         "residual_alpha": float(args.residual_alpha),
         "safety_gate_start_dist": float(args.safety_gate_start_dist),
@@ -975,6 +1025,8 @@ def _load_human_replay() -> HumanTrajectoryReplay | HumanEncounterReplay | None:
             anchor_mode=args.encounter_anchor_mode,
             phase_match=args.encounter_phase_match,
             event_match=args.encounter_event_match,
+            playback_timebase=args.encounter_timebase,
+            playback_speed=args.encounter_playback_speed,
             seed=args.seed,
         )
     if not args.human_replay_data:

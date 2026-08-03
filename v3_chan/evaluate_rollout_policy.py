@@ -28,6 +28,9 @@ from end_effector_safety_geometry import (  # noqa: E402
     SafetyThresholds,
     distance_gate,
 )
+from scene_randomization import scene_layout_id  # noqa: E402
+from physical_safety_controllers import PHYSICAL_SAFETY_MODES  # noqa: E402
+from trajectory_metrics import CartesianMotionTracker  # noqa: E402
 
 
 SAFETY_THRESHOLDS = SafetyThresholds.from_env()
@@ -147,6 +150,33 @@ def _parse_args() -> argparse.Namespace:
             "The value is the requested position offset at a fully open gate."
         ),
     )
+    parser.add_argument(
+        "--physical-safety-controller",
+        choices=PHYSICAL_SAFETY_MODES,
+        default="none",
+        help=(
+            "Physical safety backend applied after the frozen task policy. "
+            "rmpflow registers tracked hands as dynamic obstacles; cbf filters "
+            "the nominal joint command; curobo uses optional MPPI/MPC."
+        ),
+    )
+    parser.add_argument(
+        "--rmpflow-human-safety-margin-m",
+        type=float,
+        default=0.05,
+        help="Inflation added to each tracked hand radius for RMPflow/cuRobo.",
+    )
+    parser.add_argument(
+        "--visualize-physical-safety",
+        action="store_true",
+        help="Show the inflated RMPflow hand obstacle spheres while rendering.",
+    )
+    parser.add_argument("--cbf-safe-gap-m", type=float, default=0.05)
+    parser.add_argument("--cbf-activation-gap-m", type=float, default=0.13)
+    parser.add_argument("--cbf-gamma-per-s", type=float, default=8.0)
+    parser.add_argument("--cbf-prediction-horizon-s", type=float, default=0.15)
+    parser.add_argument("--cbf-max-prediction-buffer-m", type=float, default=0.08)
+    parser.add_argument("--cbf-max-joint-speed-rad-s", type=float, default=2.0)
     parser.add_argument("--phase-gate-close-dist", type=float, default=0.075)
     parser.add_argument("--phase-gate-max-hold", type=int, default=320)
     pseudo_errp_group = parser.add_mutually_exclusive_group()
@@ -211,6 +241,21 @@ def _parse_args() -> argparse.Namespace:
         "--encounter-anchor-mode",
         choices=("ee", "world"),
         default="ee",
+    )
+    parser.add_argument(
+        "--encounter-timebase",
+        choices=("recorded", "step"),
+        default="recorded",
+    )
+    parser.add_argument("--encounter-playback-speed", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-legacy-source-configuration",
+        action="store_true",
+        help=(
+            "Explicitly allow encounter screening with a new random layout when "
+            "the source HDF5 has neither exact poses nor a layout seed. Disabled "
+            "by default because such results are not source-aligned."
+        ),
     )
     parser.add_argument(
         "--no-encounter-phase-match",
@@ -357,7 +402,10 @@ if args.live_vr:
         raise FileNotFoundError(f"Live VR experience not found: {experience_path}")
     _simulation_config["experience"] = experience_path
 
-simulation_app = SimulationApp(_simulation_config)
+simulation_app = SimulationApp(
+    _simulation_config,
+    experience=os.environ.get("ISAAC_SIM_EXPERIENCE", ""),
+)
 print(
     f"[EvalRollout] SimulationApp headless={_simulation_config['headless']} live_vr={args.live_vr}",
     flush=True,
@@ -380,6 +428,9 @@ from rl.actions import (
     clip_action,
 )  # noqa: E402
 from rl.observations import (  # noqa: E402
+    DYNAMIC_HRI_OBS_DIM,
+    DYNAMIC_HRI_OBS_FIELD_NAMES,
+    DYNAMIC_HRI_OBSERVATION_VERSION,
     HRI_OBS_DIM,
     HRI_OBS_FIELD_NAMES,
     MISSING_DISTANCE_M,
@@ -814,6 +865,8 @@ def _maybe_load_human_replay() -> HumanTrajectoryReplay | HumanEncounterReplay |
             anchor_mode=args.encounter_anchor_mode,
             phase_match=args.encounter_phase_match,
             event_match=args.encounter_event_match,
+            playback_timebase=args.encounter_timebase,
+            playback_speed=args.encounter_playback_speed,
             seed=args.seed,
         )
     if not args.human_replay_data:
@@ -829,6 +882,28 @@ def _maybe_load_human_replay() -> HumanTrajectoryReplay | HumanEncounterReplay |
     )
 
 
+def _safety_observation_fields(runner: PolicyRunner) -> tuple[str, ...]:
+    static_fields = tuple(HRI_OBS_FIELD_NAMES)
+    dynamic_fields = tuple(DYNAMIC_HRI_OBS_FIELD_NAMES)
+    fields = tuple(runner.observation_fields)
+    if not fields:
+        if int(runner.obs_dim) == int(HRI_OBS_DIM):
+            return static_fields
+        if int(runner.obs_dim) == int(DYNAMIC_HRI_OBS_DIM):
+            return dynamic_fields
+        raise ValueError(
+            f"Safety checkpoint obs_dim={runner.obs_dim} has no observation_fields metadata."
+        )
+    if fields == static_fields and int(runner.obs_dim) == int(HRI_OBS_DIM):
+        return fields
+    if fields == dynamic_fields and int(runner.obs_dim) == int(DYNAMIC_HRI_OBS_DIM):
+        return fields
+    raise ValueError(
+        "Safety checkpoint observation_fields do not match the supported "
+        "83-D static or 109-D dynamic safety schema."
+    )
+
+
 def _run() -> None:
     if args.analytic_avoidance_offset_m < 0.0:
         raise ValueError("--analytic-avoidance-offset-m must be non-negative")
@@ -838,6 +913,8 @@ def _run() -> None:
         )
     if args.live_vr and args.synthetic_human:
         raise ValueError("--live-vr and --synthetic-human cannot be used together.")
+    if args.rmpflow_human_safety_margin_m < 0.0:
+        raise ValueError("--rmpflow-human-safety-margin-m must be non-negative")
     np.random.seed(args.seed)
     started_at = time.time()
     runner = PolicyRunner(
@@ -854,16 +931,21 @@ def _run() -> None:
         if args.safety_residual_checkpoint
         else None
     )
-    if safety_runner is not None and int(safety_runner.obs_dim) != int(HRI_OBS_DIM):
-        raise ValueError(
-            f"Safety checkpoint obs_dim={safety_runner.obs_dim} is incompatible with "
-            f"the v4 safety observation dim={HRI_OBS_DIM}. Retrain the safety policy."
-        )
-    if safety_runner is not None and safety_runner.observation_fields:
-        if safety_runner.observation_fields != tuple(HRI_OBS_FIELD_NAMES):
-            raise ValueError(
-                "Safety checkpoint observation_fields do not match the v4 safety schema."
-            )
+    safety_observation_fields = (
+        _safety_observation_fields(safety_runner)
+        if safety_runner is not None
+        else tuple(DYNAMIC_HRI_OBS_FIELD_NAMES)
+    )
+    safety_observation_dim = (
+        int(safety_runner.obs_dim)
+        if safety_runner is not None
+        else int(DYNAMIC_HRI_OBS_DIM)
+    )
+    safety_observation_version = (
+        str(safety_runner.metadata.get("observation_version", ""))
+        if safety_runner is not None
+        else DYNAMIC_HRI_OBSERVATION_VERSION
+    )
     blend_events = _parse_event_set(args.blend_bc_events)
     blend_runner = (
         PolicyRunner(
@@ -918,6 +1000,15 @@ def _run() -> None:
             synthetic_human_duration_steps=args.synthetic_human_duration_steps,
             synthetic_human_near_dist=args.synthetic_human_near_dist,
             synthetic_human_collision_dist=args.synthetic_human_collision_dist,
+            physical_safety_controller=args.physical_safety_controller,
+            rmpflow_human_safety_margin_m=args.rmpflow_human_safety_margin_m,
+            visualize_physical_safety=args.visualize_physical_safety,
+            cbf_safe_gap_m=args.cbf_safe_gap_m,
+            cbf_activation_gap_m=args.cbf_activation_gap_m,
+            cbf_gamma_per_s=args.cbf_gamma_per_s,
+            cbf_prediction_horizon_s=args.cbf_prediction_horizon_s,
+            cbf_max_prediction_buffer_m=args.cbf_max_prediction_buffer_m,
+            cbf_max_joint_speed_rad_s=args.cbf_max_joint_speed_rad_s,
         ),
         human_state_fn=live_vr if live_vr is not None else human_replay,
     )
@@ -934,24 +1025,16 @@ def _run() -> None:
         f"[EvalRollout] checkpoint={args.checkpoint} episodes={evaluation_episodes} "
         f"max_steps={args.max_steps} render={args.render} gripper_mode={args.gripper_mode} "
         f"human_replay={human_replay.path if human_replay is not None else 'off'} "
-        f"live_vr={args.live_vr} synthetic_human={args.synthetic_human}",
+        f"live_vr={args.live_vr} synthetic_human={args.synthetic_human} "
+        f"physical_safety={args.physical_safety_controller}",
         flush=True,
     )
     try:
         for episode_idx in range(evaluation_episodes):
             episode_seed = int(args.seed + episode_idx)
+            source_restoration: dict[str, Any] | None = None
             if human_replay is not None:
                 human_replay.reset(episode_idx, seed=episode_seed)
-            if live_vr is not None:
-                live_vr.wait_until_ready(float(args.vr_tracking_timeout_sec))
-            obs, info = env.reset(seed=episode_seed)
-            initial_obs_dict = info.get("obs_dict", {})
-            initial_cube_position = _obs_vector3(initial_obs_dict, "cube_pos")
-            if initial_cube_position is None:
-                initial_cube_position = np.full(3, np.nan, dtype=float)
-            place_target_position = _obs_vector3(initial_obs_dict, "place_target_pos")
-            if place_target_position is None:
-                place_target_position = np.full(3, np.nan, dtype=float)
             human_replay_episode = (
                 human_replay.episode_name if human_replay is not None else ""
             )
@@ -959,6 +1042,100 @@ def _run() -> None:
                 human_replay.current_scenario
                 if isinstance(human_replay, HumanEncounterReplay)
                 else {}
+            )
+            if isinstance(human_replay, HumanEncounterReplay):
+                source_restoration = human_replay.source_restoration(
+                    screening_seed=episode_seed,
+                    allow_legacy_fallback=args.allow_legacy_source_configuration,
+                )
+                if not bool(
+                    source_restoration.get(
+                        "source_configuration_available",
+                        False,
+                    )
+                ):
+                    rows.append(
+                        _unavailable_source_episode_row(
+                            episode_idx=episode_idx,
+                            episode_seed=episode_seed,
+                            human_replay_episode=human_replay_episode,
+                            encounter=encounter,
+                            restoration=source_restoration,
+                        )
+                    )
+                    print(
+                        f"[EvalRollout] episode={episode_idx:04d} "
+                        "skipped=source_configuration_unavailable "
+                        f"reason={source_restoration.get('restoration_reason', '')}",
+                        flush=True,
+                    )
+                    continue
+            if live_vr is not None:
+                live_vr.wait_until_ready(float(args.vr_tracking_timeout_sec))
+            try:
+                obs, info = env.reset(
+                    seed=episode_seed,
+                    source_restoration=source_restoration,
+                )
+            except ValueError as exc:
+                if source_restoration is None or not str(exc).startswith(
+                    ("source_configuration_unavailable", "source_configuration_pose_mismatch")
+                ):
+                    raise
+                failed_restoration = dict(source_restoration)
+                failed_restoration["source_configuration_available"] = False
+                failed_restoration["restoration_reason"] = str(exc)
+                failed_restoration["pose_mismatch"] = (
+                    "pose_mismatch" in str(exc)
+                )
+                failed_restoration["pose_mismatch_reason"] = str(exc)
+                rows.append(
+                    _unavailable_source_episode_row(
+                        episode_idx=episode_idx,
+                        episode_seed=episode_seed,
+                        human_replay_episode=human_replay_episode,
+                        encounter=encounter,
+                        restoration=failed_restoration,
+                    )
+                )
+                print(
+                    f"[EvalRollout] episode={episode_idx:04d} "
+                    f"skipped={exc}",
+                    flush=True,
+                )
+                continue
+            cube_poses = [cube.get_world_pose() for cube in env.cubes]
+            initial_cube_positions = np.asarray(
+                [pose[0] for pose in cube_poses],
+                dtype=float,
+            )
+            initial_cube_orientations = np.asarray(
+                [pose[1] for pose in cube_poses],
+                dtype=float,
+            )
+            target_position, target_orientation = env.place_target.get_world_pose()
+            initial_scene_layout_id = scene_layout_id(
+                initial_cube_positions,
+                initial_cube_orientations,
+                target_position,
+                target_orientation,
+            )
+            initial_obs_dict = info.get("obs_dict", {})
+            initial_cube_position = _obs_vector3(initial_obs_dict, "cube_pos")
+            if initial_cube_position is None:
+                initial_cube_position = np.full(3, np.nan, dtype=float)
+            place_target_position = _obs_vector3(initial_obs_dict, "place_target_pos")
+            if place_target_position is None:
+                place_target_position = np.full(3, np.nan, dtype=float)
+            motion_tracker = CartesianMotionTracker(
+                _obs_vector3(initial_obs_dict, "ee_pos"),
+                float(info.get("sim_time", 0.0)),
+            )
+            restoration_diagnostics = dict(
+                info.get(
+                    "source_restoration",
+                    source_restoration or {},
+                )
             )
             total_reward = 0.0
             min_cube_target_dist = float(info["cube_target_dist"])
@@ -1005,6 +1182,16 @@ def _run() -> None:
             safety_query_time_ms_sum = 0.0
             closest_link_counts: dict[str, int] = {}
             collision_link_counts: dict[str, int] = {}
+            physical_safety_active_count = 0
+            physical_safety_feasible_count = 0
+            physical_safety_intervention_count = 0
+            physical_safety_intervention_norm_sum = 0.0
+            physical_safety_intervention_norm_max = 0.0
+            physical_safety_slack_sum = 0.0
+            physical_safety_slack_max = 0.0
+            physical_safety_solve_time_ms_sum = 0.0
+            gate_ee_acceleration_norms: list[float] = []
+            gate_ee_jerk_norms: list[float] = []
 
             for _ in range(args.max_steps):
                 if live_vr is not None:
@@ -1038,7 +1225,10 @@ def _run() -> None:
                 raw_residual = np.zeros(ACTION_DIM, dtype=np.float32)
                 applied_residual = np.zeros(ACTION_DIM, dtype=np.float32)
                 if safety_runner is not None:
-                    hri_obs = flatten_hri_observation(current_obs_dict)
+                    hri_obs = flatten_hri_observation(
+                        current_obs_dict,
+                        field_names=safety_observation_fields,
+                    )
                     safety_residual = safety_runner.predict(hri_obs)
                 elif args.analytic_avoidance_offset_m > 0.0:
                     safety_residual = _analytic_avoidance_residual(
@@ -1192,12 +1382,68 @@ def _run() -> None:
                     post_left_hand_position = np.full(3, np.nan, dtype=float)
                 if post_right_hand_position is None:
                     post_right_hand_position = np.full(3, np.nan, dtype=float)
+                motion_sample = motion_tracker.update(
+                    post_ee_position,
+                    float(info.get("sim_time", 0.0)),
+                )
                 reward_components = info.get("reward_components", {})
+                physical_safety = info.get("physical_safety", {})
+                physical_active = bool(physical_safety.get("active", False))
+                physical_feasible = bool(physical_safety.get("feasible", True))
+                intervention_available = bool(
+                    physical_safety.get("intervention_available", False)
+                )
+                intervention_norm = float(
+                    physical_safety.get("intervention_norm_radps", 0.0)
+                )
+                physical_slack = float(physical_safety.get("slack_radps", 0.0))
+                physical_solve_time_ms = float(
+                    physical_safety.get("solve_time_ms", 0.0)
+                )
+                physical_safety_active_count += int(physical_active)
+                physical_safety_feasible_count += int(physical_feasible)
+                physical_safety_intervention_count += int(
+                    intervention_available and intervention_norm > 1e-8
+                )
+                physical_safety_intervention_norm_sum += intervention_norm
+                physical_safety_intervention_norm_max = max(
+                    physical_safety_intervention_norm_max, intervention_norm
+                )
+                physical_safety_slack_sum += physical_slack
+                physical_safety_slack_max = max(
+                    physical_safety_slack_max, physical_slack
+                )
+                physical_safety_solve_time_ms_sum += physical_solve_time_ms
                 encounter_aux = info.get("human_replay_aux_state", {})
                 encounter_active = int(
                     float(encounter_aux.get("encounter_active", 0.0)) > 0.5
                 )
                 encounter_active_count += encounter_active
+                if current_safety_gate > 0.0 and motion_sample.acceleration_valid:
+                    gate_ee_acceleration_norms.append(
+                        motion_sample.acceleration_norm_mps2
+                    )
+                if current_safety_gate > 0.0 and motion_sample.jerk_valid:
+                    gate_ee_jerk_norms.append(motion_sample.jerk_norm_mps3)
+                left_hand_velocity = _obs_vector3(
+                    obs_dict, "left_hand_vel_filtered_mps"
+                )
+                right_hand_velocity = _obs_vector3(
+                    obs_dict, "right_hand_vel_filtered_mps"
+                )
+                left_robot_velocity = _obs_vector3(
+                    obs_dict, "left_closest_robot_velocity_world_mps"
+                )
+                right_robot_velocity = _obs_vector3(
+                    obs_dict, "right_closest_robot_velocity_world_mps"
+                )
+                left_relative_velocity = _obs_vector3(
+                    obs_dict, "left_relative_velocity_world_mps"
+                )
+                right_relative_velocity = _obs_vector3(
+                    obs_dict, "right_relative_velocity_world_mps"
+                )
+
                 step_rows.append(
                     {
                         "episode": int(episode_idx),
@@ -1211,6 +1457,9 @@ def _run() -> None:
                         "encounter_active": encounter_active,
                         "encounter_source_step": int(
                             encounter_aux.get("encounter_source_step", -1)
+                        ),
+                        "encounter_source_time_s": float(
+                            encounter_aux.get("encounter_source_time_s", -1.0)
                         ),
                         "pre_surface_gap_m": float(pre_surface_gap),
                         "post_surface_gap_m": float(post_surface_gap),
@@ -1239,6 +1488,91 @@ def _run() -> None:
                         "near_miss": int(_obs_flag(obs_dict, "near_miss")),
                         "human_collision": int(human_collision),
                         "geometry_valid": int(geometry_valid),
+                        "physical_safety_controller": str(
+                            info.get("physical_safety_controller", "none")
+                        ),
+                        "physical_safety_active": int(physical_active),
+                        "physical_safety_intervention_available": int(
+                            intervention_available
+                        ),
+                        "physical_safety_constraint_count": int(
+                            physical_safety.get("constraint_count", 0)
+                        ),
+                        "physical_safety_intervention_norm_radps": intervention_norm,
+                        "physical_safety_nominal_velocity_norm_radps": float(
+                            physical_safety.get(
+                                "nominal_velocity_norm_radps", 0.0
+                            )
+                        ),
+                        "physical_safety_filtered_velocity_norm_radps": float(
+                            physical_safety.get(
+                                "filtered_velocity_norm_radps", 0.0
+                            )
+                        ),
+                        "physical_safety_constraint_violation_before": float(
+                            physical_safety.get(
+                                "max_constraint_violation_before", 0.0
+                            )
+                        ),
+                        "physical_safety_constraint_violation_after": float(
+                            physical_safety.get(
+                                "max_constraint_violation_after", 0.0
+                            )
+                        ),
+                        "physical_safety_slack_radps": physical_slack,
+                        "physical_safety_min_predicted_gap_m": float(
+                            physical_safety.get("min_predicted_gap_m", 10.0)
+                        ),
+                        "physical_safety_feasible": int(physical_feasible),
+                        "physical_safety_status": str(
+                            physical_safety.get("status", "")
+                        ),
+                        "physical_safety_solve_time_ms": physical_solve_time_ms,
+                        "rmpflow_valid_hand_obstacles": int(
+                            info.get("rmpflow_valid_hand_obstacles", 0)
+                        ),
+                        "left_hand_speed_mps": _vector_norm_or_nan(
+                            left_hand_velocity
+                        ),
+                        "right_hand_speed_mps": _vector_norm_or_nan(
+                            right_hand_velocity
+                        ),
+                        "left_robot_surface_speed_mps": _vector_norm_or_nan(
+                            left_robot_velocity
+                        ),
+                        "right_robot_surface_speed_mps": _vector_norm_or_nan(
+                            right_robot_velocity
+                        ),
+                        "left_relative_speed_mps": _vector_norm_or_nan(
+                            left_relative_velocity
+                        ),
+                        "right_relative_speed_mps": _vector_norm_or_nan(
+                            right_relative_velocity
+                        ),
+                        "left_closing_speed_mps": _obs_scalar(
+                            obs_dict, "left_closing_speed_mps", default=0.0
+                        ),
+                        "right_closing_speed_mps": _obs_scalar(
+                            obs_dict, "right_closing_speed_mps", default=0.0
+                        ),
+                        "left_ttc_s": _obs_scalar(
+                            obs_dict, "left_ttc_s", default=10.0
+                        ),
+                        "right_ttc_s": _obs_scalar(
+                            obs_dict, "right_ttc_s", default=10.0
+                        ),
+                        "left_dynamic_measurement_valid": int(
+                            _obs_flag(obs_dict, "left_dynamic_measurement_valid")
+                        ),
+                        "right_dynamic_measurement_valid": int(
+                            _obs_flag(obs_dict, "right_dynamic_measurement_valid")
+                        ),
+                        "left_ttc_valid": int(
+                            _obs_flag(obs_dict, "left_ttc_valid")
+                        ),
+                        "right_ttc_valid": int(
+                            _obs_flag(obs_dict, "right_ttc_valid")
+                        ),
                         "closest_human_hand": str(
                             info.get("closest_human_hand", "")
                         ),
@@ -1260,6 +1594,31 @@ def _run() -> None:
                         "post_ee_x": float(post_ee_position[0]),
                         "post_ee_y": float(post_ee_position[1]),
                         "post_ee_z": float(post_ee_position[2]),
+                        "ee_velocity_x_mps": float(motion_sample.velocity_mps[0]),
+                        "ee_velocity_y_mps": float(motion_sample.velocity_mps[1]),
+                        "ee_velocity_z_mps": float(motion_sample.velocity_mps[2]),
+                        "ee_speed_mps": float(motion_sample.speed_mps),
+                        "ee_velocity_valid": int(motion_sample.velocity_valid),
+                        "ee_acceleration_x_mps2": float(
+                            motion_sample.acceleration_mps2[0]
+                        ),
+                        "ee_acceleration_y_mps2": float(
+                            motion_sample.acceleration_mps2[1]
+                        ),
+                        "ee_acceleration_z_mps2": float(
+                            motion_sample.acceleration_mps2[2]
+                        ),
+                        "ee_acceleration_norm_mps2": float(
+                            motion_sample.acceleration_norm_mps2
+                        ),
+                        "ee_acceleration_valid": int(
+                            motion_sample.acceleration_valid
+                        ),
+                        "ee_jerk_x_mps3": float(motion_sample.jerk_mps3[0]),
+                        "ee_jerk_y_mps3": float(motion_sample.jerk_mps3[1]),
+                        "ee_jerk_z_mps3": float(motion_sample.jerk_mps3[2]),
+                        "ee_jerk_norm_mps3": float(motion_sample.jerk_norm_mps3),
+                        "ee_jerk_valid": int(motion_sample.jerk_valid),
                         "post_left_hand_x": float(post_left_hand_position[0]),
                         "post_left_hand_y": float(post_left_hand_position[1]),
                         "post_left_hand_z": float(post_left_hand_position[2]),
@@ -1306,6 +1665,10 @@ def _run() -> None:
                     encounter.get("session_id", "")
                 ),
                 "encounter_active_count": int(encounter_active_count),
+                **_source_restoration_row_fields(restoration_diagnostics),
+                "scene_layout_id": initial_scene_layout_id,
+                "screening_layout_id": initial_scene_layout_id,
+                "initial_cube_positions": initial_cube_positions.tolist(),
                 "initial_active_cube_position": [
                     float(value) for value in initial_cube_position
                 ],
@@ -1388,6 +1751,50 @@ def _run() -> None:
                 ),
                 "closest_link_counts": closest_link_counts,
                 "collision_link_counts": collision_link_counts,
+                "physical_safety_controller": args.physical_safety_controller,
+                "physical_safety_active_count": int(
+                    physical_safety_active_count
+                ),
+                "physical_safety_active_rate": float(
+                    physical_safety_active_count / episode_steps
+                ),
+                "physical_safety_feasible_rate": float(
+                    physical_safety_feasible_count / episode_steps
+                ),
+                "physical_safety_intervention_count": int(
+                    physical_safety_intervention_count
+                ),
+                "physical_safety_intervention_rate": float(
+                    physical_safety_intervention_count / episode_steps
+                ),
+                "mean_physical_safety_intervention_norm_radps": float(
+                    physical_safety_intervention_norm_sum / episode_steps
+                ),
+                "max_physical_safety_intervention_norm_radps": float(
+                    physical_safety_intervention_norm_max
+                ),
+                "mean_physical_safety_slack_radps": float(
+                    physical_safety_slack_sum / episode_steps
+                ),
+                "max_physical_safety_slack_radps": float(
+                    physical_safety_slack_max
+                ),
+                "mean_physical_safety_solve_time_ms": float(
+                    physical_safety_solve_time_ms_sum / episode_steps
+                ),
+                **motion_tracker.summary(),
+                "rms_gate_ee_acceleration_mps2": _rms_or_zero(
+                    gate_ee_acceleration_norms
+                ),
+                "p95_gate_ee_acceleration_mps2": _percentile_or_zero(
+                    gate_ee_acceleration_norms, 95.0
+                ),
+                "rms_gate_ee_jerk_mps3": _rms_or_zero(gate_ee_jerk_norms),
+                "p95_gate_ee_jerk_mps3": _percentile_or_zero(
+                    gate_ee_jerk_norms, 95.0
+                ),
+                "max_gate_ee_jerk_mps3": _max_or_zero(gate_ee_jerk_norms),
+                "gate_ee_jerk_sample_count": len(gate_ee_jerk_norms),
                 "reward_components_total": reward_components_total,
             }
             rows.append(row)
@@ -1437,9 +1844,19 @@ def _run() -> None:
                 else ""
             ),
             "safety_residual_alpha": args.safety_residual_alpha,
-            "safety_observation_dim": HRI_OBS_DIM,
-            "safety_observation_version": "hri_obs_v4_builtin_panda_collision_geometry",
+            "safety_observation_dim": safety_observation_dim,
+            "safety_observation_version": safety_observation_version,
+            "safety_observation_fields": list(safety_observation_fields),
             "analytic_avoidance_offset_m": args.analytic_avoidance_offset_m,
+            "physical_safety_controller": args.physical_safety_controller,
+            "rmpflow_human_safety_margin_m": args.rmpflow_human_safety_margin_m,
+            "visualize_physical_safety": args.visualize_physical_safety,
+            "cbf_safe_gap_m": args.cbf_safe_gap_m,
+            "cbf_activation_gap_m": args.cbf_activation_gap_m,
+            "cbf_gamma_per_s": args.cbf_gamma_per_s,
+            "cbf_prediction_horizon_s": args.cbf_prediction_horizon_s,
+            "cbf_max_prediction_buffer_m": args.cbf_max_prediction_buffer_m,
+            "cbf_max_joint_speed_rad_s": args.cbf_max_joint_speed_rad_s,
             "phase_gate_close_dist": args.phase_gate_close_dist,
             "phase_gate_max_hold": args.phase_gate_max_hold,
             "pseudo_errp_enabled": args.pseudo_errp_enabled,
@@ -1455,6 +1872,11 @@ def _run() -> None:
             "encounter_policy": args.encounter_policy,
             "encounter_severity_mix": args.encounter_severity_mix,
             "encounter_anchor_mode": args.encounter_anchor_mode,
+            "encounter_timebase": args.encounter_timebase,
+            "encounter_playback_speed": args.encounter_playback_speed,
+            "allow_legacy_source_configuration": (
+                args.allow_legacy_source_configuration
+            ),
             "encounter_phase_match": args.encounter_phase_match,
             "encounter_event_match": args.encounter_event_match,
             "visualize_human_replay": args.visualize_human_replay,
@@ -1602,6 +2024,37 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     collision_event_count = int(
         sum(row.get("collision_event_count", 0) for row in rows)
     )
+    physical_active_steps = int(
+        sum(row.get("physical_safety_active_count", 0) for row in rows)
+    )
+    physical_intervention_steps = int(
+        sum(row.get("physical_safety_intervention_count", 0) for row in rows)
+    )
+    physical_feasible_steps = float(
+        sum(
+            row.get("physical_safety_feasible_rate", 1.0) * row["steps"]
+            for row in rows
+        )
+    )
+    physical_intervention_norm_sum = float(
+        sum(
+            row.get("mean_physical_safety_intervention_norm_radps", 0.0)
+            * row["steps"]
+            for row in rows
+        )
+    )
+    physical_solve_time_ms_sum = float(
+        sum(
+            row.get("mean_physical_safety_solve_time_ms", 0.0) * row["steps"]
+            for row in rows
+        )
+    )
+    physical_slack_sum = float(
+        sum(
+            row.get("mean_physical_safety_slack_radps", 0.0) * row["steps"]
+            for row in rows
+        )
+    )
     closest_link_counts: dict[str, int] = {}
     collision_link_counts: dict[str, int] = {}
     for row in rows:
@@ -1611,8 +2064,27 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             collision_link_counts[name] = collision_link_counts.get(name, 0) + int(
                 count
             )
+    restoration_mode_counts: dict[str, int] = {}
+    source_cube_matches = []
+    for row in rows:
+        mode = str(row.get("restoration_mode", "not_requested"))
+        restoration_mode_counts[mode] = restoration_mode_counts.get(mode, 0) + 1
+        source_cube = row.get("source_cube_index")
+        screening_cube = row.get("screening_cube_index")
+        if source_cube is not None and screening_cube is not None:
+            source_cube_matches.append(int(source_cube) == int(screening_cube))
     return {
         "episodes": int(len(rows)),
+        "restoration_mode_counts": restoration_mode_counts,
+        "source_configuration_unavailable_count": int(
+            sum(
+                not bool(row.get("source_configuration_available", True))
+                for row in rows
+            )
+        ),
+        "source_cube_match_rate": (
+            float(np.mean(source_cube_matches)) if source_cube_matches else None
+        ),
         "successes": int(np.sum(success)),
         "success_rate": float(np.mean(success)),
         "truncated_rate": float(np.mean(truncated)),
@@ -1665,6 +2137,65 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "near_miss_rate": float(near_miss_steps / total_steps),
         "gate_activation_rate": float(gate_active_steps / total_steps),
         "geometry_valid_rate": float(geometry_valid_steps / total_steps),
+        "physical_safety_active_steps": physical_active_steps,
+        "physical_safety_active_rate": float(physical_active_steps / total_steps),
+        "physical_safety_intervention_steps": physical_intervention_steps,
+        "physical_safety_intervention_rate": float(
+            physical_intervention_steps / total_steps
+        ),
+        "physical_safety_feasible_rate": float(
+            physical_feasible_steps / total_steps
+        ),
+        "mean_physical_safety_intervention_norm_radps": float(
+            physical_intervention_norm_sum / total_steps
+        ),
+        "max_physical_safety_intervention_norm_radps": float(
+            max(
+                row.get("max_physical_safety_intervention_norm_radps", 0.0)
+                for row in rows
+            )
+        ),
+        "mean_physical_safety_slack_radps": float(
+            physical_slack_sum / total_steps
+        ),
+        "max_physical_safety_slack_radps": float(
+            max(row.get("max_physical_safety_slack_radps", 0.0) for row in rows)
+        ),
+        "mean_physical_safety_solve_time_ms": float(
+            physical_solve_time_ms_sum / total_steps
+        ),
+        "mean_ee_path_length_m": float(
+            np.mean([row.get("ee_path_length_m", 0.0) for row in rows])
+        ),
+        "mean_rms_ee_acceleration_mps2": float(
+            np.mean([row.get("rms_ee_acceleration_mps2", 0.0) for row in rows])
+        ),
+        "mean_rms_ee_jerk_mps3": float(
+            np.mean([row.get("rms_ee_jerk_mps3", 0.0) for row in rows])
+        ),
+        "mean_p95_ee_jerk_mps3": float(
+            np.mean([row.get("p95_ee_jerk_mps3", 0.0) for row in rows])
+        ),
+        "max_ee_jerk_mps3": float(
+            max(row.get("max_ee_jerk_mps3", 0.0) for row in rows)
+        ),
+        "mean_integrated_squared_ee_jerk_m2ps5": float(
+            np.mean(
+                [
+                    row.get("integrated_squared_ee_jerk_m2ps5", 0.0)
+                    for row in rows
+                ]
+            )
+        ),
+        "mean_rms_gate_ee_acceleration_mps2": float(
+            np.mean([row.get("rms_gate_ee_acceleration_mps2", 0.0) for row in rows])
+        ),
+        "mean_p95_gate_ee_jerk_mps3": float(
+            np.mean([row.get("p95_gate_ee_jerk_mps3", 0.0) for row in rows])
+        ),
+        "mean_rms_gate_ee_jerk_mps3": float(
+            np.mean([row.get("rms_gate_ee_jerk_mps3", 0.0) for row in rows])
+        ),
         "min_surface_gap": float(
             min(row.get("min_surface_gap", MISSING_DISTANCE_M) for row in rows)
         ),
@@ -1793,6 +2324,25 @@ def _obs_vector3(obs: Any, field_name: str) -> np.ndarray | None:
     return value[:3].copy()
 
 
+def _vector_norm_or_nan(value) -> float:
+    return float(np.linalg.norm(value)) if value is not None else float("nan")
+
+
+def _rms_or_zero(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    array = np.asarray(values, dtype=float)
+    return float(np.sqrt(np.mean(np.square(array))))
+
+
+def _percentile_or_zero(values: list[float], percentile: float) -> float:
+    return float(np.percentile(values, percentile)) if values else 0.0
+
+
+def _max_or_zero(values: list[float]) -> float:
+    return float(max(values)) if values else 0.0
+
+
 def _obs_scalar(obs: Any, field_name: str, *, default: float = 0.0) -> float:
     if not isinstance(obs, dict) or field_name not in obs:
         return float(default)
@@ -1804,6 +2354,93 @@ def _obs_scalar(obs: Any, field_name: str, *, default: float = 0.0) -> float:
 
 def _obs_flag(obs: Any, field_name: str) -> bool:
     return _obs_scalar(obs, field_name, default=0.0) > 0.5
+
+
+def _source_restoration_row_fields(restoration: dict[str, Any]) -> dict[str, Any]:
+    missing = restoration.get("missing_fields", [])
+    if not isinstance(missing, list):
+        missing = list(missing) if missing else []
+    return {
+        "source_configuration_available": bool(
+            restoration.get("source_configuration_available", False)
+        ),
+        "restoration_mode": str(restoration.get("restoration_mode", "unavailable")),
+        "restoration_reason": str(restoration.get("restoration_reason", "")),
+        "source_cube_index": restoration.get("source_cube_index"),
+        "screening_cube_index": restoration.get("screening_cube_index"),
+        "source_cube_name": restoration.get("source_cube_name"),
+        "screening_cube_name": restoration.get("screening_cube_name"),
+        "collection_seed": restoration.get("collection_seed"),
+        "source_layout_seed": restoration.get("layout_seed"),
+        "screening_seed": restoration.get("screening_seed"),
+        "source_layout_id": restoration.get("source_layout_id"),
+        "cube_pose_restored": bool(restoration.get("cube_pose_restored", False)),
+        "target_pose_restored": bool(restoration.get("target_pose_restored", False)),
+        "robot_initial_state_restored": bool(
+            restoration.get("robot_initial_state_restored", False)
+        ),
+        "pose_mismatch": bool(restoration.get("pose_mismatch", False)),
+        "pose_mismatch_reason": str(
+            restoration.get("pose_mismatch_reason", "")
+        ),
+        "source_configuration_missing_fields": missing,
+        "max_cube_position_error_m": restoration.get(
+            "max_cube_position_error_m"
+        ),
+        "max_cube_orientation_error_rad": restoration.get(
+            "max_cube_orientation_error_rad"
+        ),
+        "target_position_error_m": restoration.get("target_position_error_m"),
+        "target_orientation_error_rad": restoration.get(
+            "target_orientation_error_rad"
+        ),
+    }
+
+
+def _unavailable_source_episode_row(
+    *,
+    episode_idx: int,
+    episode_seed: int,
+    human_replay_episode: str,
+    encounter: dict[str, Any],
+    restoration: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "episode": int(episode_idx),
+        "seed": int(episode_seed),
+        "active_cube": "",
+        "human_replay_episode": human_replay_episode,
+        "encounter_id": str(encounter.get("id", "")),
+        "encounter_target_severity": str(encounter.get("target_severity", "")),
+        "encounter_target_phase": str(encounter.get("task_phase", "")),
+        "encounter_target_event": int(encounter.get("controller_event", -1)),
+        "encounter_source_session": str(encounter.get("session_id", "")),
+        "encounter_active_count": 0,
+        "encounter_realized_severity": "unknown",
+        **_source_restoration_row_fields(restoration),
+        "scene_layout_id": "",
+        "screening_layout_id": "",
+        "initial_active_cube_position": [],
+        "place_target_position": [],
+        "success": False,
+        "truncated": True,
+        "steps": 0,
+        "total_reward": 0.0,
+        "final_cube_target_dist": 10.0,
+        "min_cube_target_dist": 10.0,
+        "grasped_any": False,
+        "safety_gate_active_count": 0,
+        "geometry_valid_steps": 0,
+        "collision_steps": 0,
+        "near_steps": 0,
+        "near_miss_steps": 0,
+        "collision_rate": 0.0,
+        "near_rate": 0.0,
+        "near_miss_rate": 0.0,
+        "gate_activation_rate": 0.0,
+        "geometry_valid_rate": 0.0,
+        "min_surface_gap": 10.0,
+    }
 
 
 def _write_json(path: str, payload: dict[str, Any]) -> None:
@@ -1830,6 +2467,28 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "encounter_source_session",
         "encounter_active_count",
         "encounter_realized_severity",
+        "source_configuration_available",
+        "restoration_mode",
+        "restoration_reason",
+        "source_cube_index",
+        "screening_cube_index",
+        "source_cube_name",
+        "screening_cube_name",
+        "collection_seed",
+        "source_layout_seed",
+        "screening_seed",
+        "source_layout_id",
+        "screening_layout_id",
+        "cube_pose_restored",
+        "target_pose_restored",
+        "robot_initial_state_restored",
+        "pose_mismatch",
+        "pose_mismatch_reason",
+        "source_configuration_missing_fields",
+        "max_cube_position_error_m",
+        "max_cube_orientation_error_rad",
+        "target_position_error_m",
+        "target_orientation_error_rad",
         "initial_active_cube_position",
         "place_target_position",
         "success",
@@ -1887,18 +2546,52 @@ def _write_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "mean_safety_query_time_ms",
         "closest_link_counts",
         "collision_link_counts",
+        "physical_safety_controller",
+        "physical_safety_active_count",
+        "physical_safety_active_rate",
+        "physical_safety_feasible_rate",
+        "physical_safety_intervention_count",
+        "physical_safety_intervention_rate",
+        "mean_physical_safety_intervention_norm_radps",
+        "max_physical_safety_intervention_norm_radps",
+        "mean_physical_safety_slack_radps",
+        "max_physical_safety_slack_radps",
+        "mean_physical_safety_solve_time_ms",
+        "ee_path_length_m",
+        "ee_motion_duration_s",
+        "mean_ee_speed_mps",
+        "max_ee_speed_mps",
+        "rms_ee_acceleration_mps2",
+        "max_ee_acceleration_mps2",
+        "rms_ee_jerk_mps3",
+        "p95_ee_jerk_mps3",
+        "max_ee_jerk_mps3",
+        "integrated_squared_ee_jerk_m2ps5",
+        "ee_velocity_sample_count",
+        "ee_acceleration_sample_count",
+        "ee_jerk_sample_count",
+        "rms_gate_ee_acceleration_mps2",
+        "p95_gate_ee_acceleration_mps2",
+        "rms_gate_ee_jerk_mps3",
+        "p95_gate_ee_jerk_mps3",
+        "max_gate_ee_jerk_mps3",
+        "gate_ee_jerk_sample_count",
     ]
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for row in rows:
-            csv_row = {field: row[field] for field in fields}
+            csv_row = {field: row.get(field, "") for field in fields}
             csv_row["errp_sources"] = ",".join(row.get("errp_sources", []))
             csv_row["initial_active_cube_position"] = json.dumps(
-                row["initial_active_cube_position"], separators=(",", ":")
+                row.get("initial_active_cube_position", []), separators=(",", ":")
             )
             csv_row["place_target_position"] = json.dumps(
-                row["place_target_position"], separators=(",", ":")
+                row.get("place_target_position", []), separators=(",", ":")
+            )
+            csv_row["source_configuration_missing_fields"] = json.dumps(
+                row.get("source_configuration_missing_fields", []),
+                separators=(",", ":"),
             )
             csv_row["closest_link_counts"] = json.dumps(
                 row.get("closest_link_counts", {}), sort_keys=True
@@ -1922,6 +2615,7 @@ def _write_step_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "encounter_target_severity",
         "encounter_active",
         "encounter_source_step",
+        "encounter_source_time_s",
         "pre_surface_gap_m",
         "post_surface_gap_m",
         "surface_gap_delta_m",
@@ -1941,6 +2635,20 @@ def _write_step_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "near_miss",
         "human_collision",
         "geometry_valid",
+        "left_hand_speed_mps",
+        "right_hand_speed_mps",
+        "left_robot_surface_speed_mps",
+        "right_robot_surface_speed_mps",
+        "left_relative_speed_mps",
+        "right_relative_speed_mps",
+        "left_closing_speed_mps",
+        "right_closing_speed_mps",
+        "left_ttc_s",
+        "right_ttc_s",
+        "left_dynamic_measurement_valid",
+        "right_dynamic_measurement_valid",
+        "left_ttc_valid",
+        "right_ttc_valid",
         "closest_human_hand",
         "closest_robot_link",
         "closest_collider_prim",
@@ -1952,6 +2660,21 @@ def _write_step_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "post_ee_x",
         "post_ee_y",
         "post_ee_z",
+        "ee_velocity_x_mps",
+        "ee_velocity_y_mps",
+        "ee_velocity_z_mps",
+        "ee_speed_mps",
+        "ee_velocity_valid",
+        "ee_acceleration_x_mps2",
+        "ee_acceleration_y_mps2",
+        "ee_acceleration_z_mps2",
+        "ee_acceleration_norm_mps2",
+        "ee_acceleration_valid",
+        "ee_jerk_x_mps3",
+        "ee_jerk_y_mps3",
+        "ee_jerk_z_mps3",
+        "ee_jerk_norm_mps3",
+        "ee_jerk_valid",
         "post_left_hand_x",
         "post_left_hand_y",
         "post_left_hand_z",
@@ -1965,6 +2688,21 @@ def _write_step_csv(path: str, rows: list[dict[str, Any]]) -> None:
         "near_human_penalty",
         "human_collision_penalty",
         "errp_penalty",
+        "physical_safety_controller",
+        "physical_safety_active",
+        "physical_safety_intervention_available",
+        "physical_safety_constraint_count",
+        "physical_safety_intervention_norm_radps",
+        "physical_safety_nominal_velocity_norm_radps",
+        "physical_safety_filtered_velocity_norm_radps",
+        "physical_safety_constraint_violation_before",
+        "physical_safety_constraint_violation_after",
+        "physical_safety_slack_radps",
+        "physical_safety_min_predicted_gap_m",
+        "physical_safety_feasible",
+        "physical_safety_status",
+        "physical_safety_solve_time_ms",
+        "rmpflow_valid_hand_obstacles",
     ]
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
