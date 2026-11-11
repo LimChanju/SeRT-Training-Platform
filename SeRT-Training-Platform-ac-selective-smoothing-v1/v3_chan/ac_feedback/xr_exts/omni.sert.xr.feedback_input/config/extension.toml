@@ -1,0 +1,12 @@
+[package]
+version = "1.0.0"
+title = "SeRT feedback-only XR action map"
+description = "Disables stock XR tools while preserving controller pose and raw face-button input."
+category = "XR"
+
+[core]
+order = -1000
+reloadable = false
+
+[settings]
+xr.manifests."omni.sert.xr.feedback_input" = "xrmanifests"

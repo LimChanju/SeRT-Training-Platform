@@ -4,6 +4,7 @@ import pytest
 
 from v3_chan.collection_provenance import (
     resolve_code_version,
+    resolve_verified_code_provenance,
     source_tree_sha256,
     validate_production_metadata,
 )
@@ -44,6 +45,25 @@ def test_resolve_code_version_uses_explicit_or_source_hash(tmp_path):
     assert len(digest) == 64
     assert fallback == f"source-sha256:{fallback_digest}"
     assert fallback_source == "source_tree_sha256"
+
+
+def test_verified_provenance_does_not_trust_declared_sha_without_git(tmp_path):
+    root = _source_tree(tmp_path)
+
+    result = resolve_verified_code_provenance(root, "a" * 40)
+
+    assert result["code_commit_sha"] == ""
+    assert result["declared_code_commit_sha"] == "a" * 40
+    assert result["code_commit_verification"] == "git_metadata_unavailable"
+    assert result["code_version"] == (
+        "source-sha256:" + result["source_tree_sha256"]
+    )
+
+
+def test_verified_provenance_rejects_malformed_declared_sha(tmp_path):
+    root = _source_tree(tmp_path)
+    with pytest.raises(ValueError, match="40-hex"):
+        resolve_verified_code_provenance(root, "release-42")
 
 
 def test_production_validation_rejects_placeholders():

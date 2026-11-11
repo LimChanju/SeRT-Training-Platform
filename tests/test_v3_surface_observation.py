@@ -9,12 +9,6 @@ from v3_chan.hri_obs_recorder import (
     build_observation,
     flatten_observation,
 )
-from v3_chan.rl.observations import (
-    DYNAMIC_HRI_OBS_DIM,
-    DYNAMIC_HRI_OBS_FIELD_NAMES,
-    apply_dynamic_hri_observation,
-    flatten_dynamic_hri_observation,
-)
 from v3_chan.pose_tracking import PoseSample, TRACKING_TRACKED
 
 
@@ -89,34 +83,6 @@ def test_surface_gap_flags_and_policy_compatibility():
     assert _scalar(collision_obs, "human_robot_collision") == 1.0
 
 
-def test_dynamic_safety_policy_observation_extends_static_schema():
-    obs = _observation(surface_gap_override=0.04)
-    apply_dynamic_hri_observation(
-        obs,
-        {
-            "left_hand_vel_filtered_mps": [0.2, 0.0, 0.0],
-            "left_closest_robot_velocity_world_mps": [0.05, 0.0, 0.0],
-            "left_relative_velocity_world_mps": [0.15, 0.0, 0.0],
-            "left_closing_speed_mps": 0.15,
-            "left_ttc_s": 0.25,
-            "left_dynamic_measurement_valid": 1.0,
-            "left_ttc_valid": 1.0,
-        },
-    )
-    dynamic = flatten_dynamic_hri_observation(obs)
-
-    assert HRI_OBS_DIM == 83
-    assert DYNAMIC_HRI_OBS_DIM == 109
-    assert dynamic.shape == (109,)
-    assert DYNAMIC_HRI_OBS_FIELD_NAMES[: len(HRI_OBS_FIELD_NAMES)] == (
-        HRI_OBS_FIELD_NAMES
-    )
-    assert np.isclose(_scalar(obs, "left_closing_speed_mps"), 0.15)
-    assert np.isclose(_scalar(obs, "left_ttc_s"), 0.25)
-    assert _scalar(obs, "left_ttc_valid") == 1.0
-    assert np.isclose(_scalar(obs, "right_ttc_s"), 10.0)
-
-
 def test_hri_recorder_writes_surface_schema(tmp_path):
     class _Action:
         def __init__(self, value):
@@ -163,6 +129,29 @@ def test_hri_recorder_writes_surface_schema(tmp_path):
         obs=_observation(0.01),
         tracking={"left_hand": tracked_left},
         dynamic_sim={"left_ttc_s": 1.25},
+        controller={
+            "controller_event": 5,
+            "controller_speed_profile": "medium",
+            "nominal_phase_mode": "transport",
+            "speed_limit_mode": "near_human",
+            "distance_gate": 0.5,
+            "surface_gap_m": 0.09,
+            "geometry_valid": 1.0,
+            "phase_speed_limit_mps": 0.40,
+            "near_human_speed_limit_mps": 0.10,
+            "blended_speed_limit_mps": 0.25,
+            "active_speed_limit_mps": 0.20,
+            "sim_dt_s": 1.0 / 60.0,
+            "control_dt_valid": 1.0,
+            "ee_velocity_sim_world_mps": [0.1, 0.0, 0.0],
+            "ee_speed_sim_mps": 0.1,
+            "ee_speed_sim_valid": 1.0,
+            "ee_velocity_wall_world_mps": [0.05, 0.0, 0.0],
+            "ee_speed_wall_mps": 0.05,
+            "ee_speed_wall_valid": 1.0,
+            "command_cartesian_speed_mps": 0.19,
+            "command_limit_valid": 1.0,
+        },
         previous_action=_Action(1.0),
         next_action=_Action(2.0),
     )
@@ -174,7 +163,7 @@ def test_hri_recorder_writes_surface_schema(tmp_path):
     with h5py.File(path, "r") as data:
         episode = data["episodes/episode_000000"]
         assert data.attrs["schema_version"] == (
-            "hri_obs_v8_dual_clock_tracked_action_aligned"
+            "hri_obs_v9_cartesian_speed_aligned"
         )
         assert int(data.attrs["observation_dim"]) == 84
         assert int(data.attrs["hri_observation_dim"]) == 83
@@ -199,6 +188,17 @@ def test_hri_recorder_writes_surface_schema(tmp_path):
         assert int(episode["human/left_hand_position_tracked"][0]) == 1
         assert int(episode["human_valid_mask"][0, 1]) == 1
         assert np.isclose(episode["dynamic_sim/left_ttc_s"][0], 1.25)
+        assert episode["controller/active_speed_limit_mps"].shape == (1,)
+        assert np.isclose(
+            episode["controller/active_speed_limit_mps"][0], 0.20
+        )
+        assert np.isclose(episode["controller/ee_speed_sim_mps"][0], 0.10)
+        speed_mode = episode["controller/speed_limit_mode"][0]
+        if isinstance(speed_mode, bytes):
+            speed_mode = speed_mode.decode("utf-8")
+        assert speed_mode == "near_human"
+        for dataset in episode["controller"].values():
+            assert dataset.shape[0] == int(episode.attrs["episode_length"])
         np.testing.assert_allclose(
             episode["actions/previous_applied_joint_positions"][0], 1.0
         )
@@ -245,5 +245,5 @@ def test_hri_recorder_preserves_nonempty_legacy_schema(tmp_path):
         assert "episode_000000" in data["episodes"]
     with h5py.File(new_path, "r") as data:
         assert data.attrs["schema_version"] == (
-            "hri_obs_v8_dual_clock_tracked_action_aligned"
+            "hri_obs_v9_cartesian_speed_aligned"
         )

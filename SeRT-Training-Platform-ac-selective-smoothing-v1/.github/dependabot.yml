@@ -1,0 +1,49 @@
+version: 2
+
+updates:
+  # pip 패키지 업데이트
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    groups:
+      # 과학 계산 라이브러리 묶음 업데이트
+      scientific:
+        patterns:
+          - "numpy"
+          - "scipy"
+          - "pandas"
+      # 개발/테스트 도구 묶음
+      dev-tools:
+        patterns:
+          - "pytest*"
+          - "pip-audit"
+          - "build"
+    # 패치/마이너 버전은 자동 머지 (major 제외)
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    labels:
+      - "dependencies"
+      - "python"
+
+  # GitHub Actions 버전 업데이트
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    groups:
+      actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"

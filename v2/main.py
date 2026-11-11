@@ -10,7 +10,16 @@ import sys; print("[main.py] Python started:", sys.version, flush=True); del sys
 import os
 
 # SteamVR OpenXR 런타임 경로 자동 설정
-if "XR_RUNTIME_JSON" not in os.environ:
+_initial_xr_mode = os.environ.get("ISAAC_XR_MODE", "vr").strip().lower()
+_initial_xr_enabled = _initial_xr_mode not in (
+    "",
+    "0",
+    "false",
+    "none",
+    "off",
+    "disabled",
+)
+if _initial_xr_enabled and "XR_RUNTIME_JSON" not in os.environ:
     _known_paths = [
         os.path.expanduser("~/.steam/debian-installation/steamapps/common/SteamVR/steamxr_linux64.json"),
         os.path.expanduser("~/.steam/steam/steamapps/common/SteamVR/steamxr_linux64.json"),
@@ -26,14 +35,36 @@ if "XR_RUNTIME_JSON" not in os.environ:
 
 from omni.isaac.kit import SimulationApp
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        print(f"[Boot] Invalid {name}={value!r}; using {default}.", flush=True)
+        return default
+
+
 _isaac_root = os.environ.get("ISAACSIM_ROOT", os.getcwd())
-_xr_mode = os.environ.get("ISAAC_XR_MODE", "vr").strip().lower()
+_enable_vr_boot = _env_bool("ENABLE_VR", False)
+_xr_mode = _initial_xr_mode
+_xr_enabled = _initial_xr_enabled
 _xr_backend = os.environ.get("ISAAC_XR_BACKEND", "").strip()
 if not _xr_backend:
-    _xr_backend = "OpenXR" if _xr_mode == "openxr" else "SteamVR"
+    _xr_backend = "OpenXR"
 _xr_openxr_experience = os.path.join(_isaac_root, "apps", "isaacsim.exp.base.xr.openxr.kit")
 _xr_vr_experience = os.path.join(_isaac_root, "apps", "isaacsim.exp.base.xr.vr.kit")
-if _xr_mode == "openxr" and os.path.exists(_xr_openxr_experience):
+if not _xr_enabled:
+    _xr_experience = None
+elif _xr_mode == "openxr" and os.path.exists(_xr_openxr_experience):
     _xr_experience = _xr_openxr_experience
 elif os.path.exists(_xr_vr_experience):
     _xr_mode = "vr"
@@ -43,9 +74,9 @@ else:
 _use_xr_experience = _xr_experience is not None
 
 _sim_config = {
-    "headless": False,
-    "width": 1280,
-    "height": 720,
+    "headless": _env_bool("ISAAC_HEADLESS", False),
+    "width": _env_int("ISAAC_WIDTH", 1280),
+    "height": _env_int("ISAAC_HEIGHT", 720),
     "active_gpu": 0,
     "physics_gpu": 0,
     "multi_gpu": False,
@@ -65,7 +96,12 @@ import omni.kit.app
 import carb
 from omni.isaac.core.utils.extensions import enable_extension
 from omni.isaac.core.utils.viewports import set_camera_view
-from omni.kit.xr.core import XRCore
+XRCore = None
+if _xr_enabled:
+    try:
+        from omni.kit.xr.core import XRCore
+    except Exception as exc:
+        print(f"[VR] XRCore import failed: {exc}")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -89,7 +125,6 @@ from scene_setup import create_world, randomize_cubes, setup_scene
 from event_logger import EventLogger
 from gripper_camera import GripperCamera
 from hand_tracking import HandTrackingReceiver
-from human_avatar import HumanAvatar, HUMAN_AVATAR_TOUCH_DIST
 from haptics_udp import HapticsUdpClient
 from panda_robot import add_panda, print_robot_info
 from pick_controller import create_pick_controller, run_pick_place
@@ -104,20 +139,26 @@ from vr_avatar import (
 
 
 def _enable_vr_extensions() -> None:
+    global XRCore
+    if not _xr_enabled:
+        print("[VR] Disabled. Set ENABLE_VR=true or ISAAC_XR_MODE=vr/openxr to enable XR.")
+        return
     if _xr_mode == "openxr":
         candidates = [
             "omni.kit.xr.system.openxr",
             "omni.kit.xr.profile.ar",
             "isaacsim.xr.openxr",
         ]
+    elif _xr_backend.lower() == "openxr":
+        candidates = [
+            "omni.kit.xr.system.openxr",
+            "omni.kit.xr.profile.vr",
+        ]
     else:
         candidates = [
             "omni.kit.xr.system.steamvr",
             "omni.kit.xr.profile.vr",
         ]
-        if _xr_backend == "OpenXR":
-            candidates.insert(0, "omni.kit.xr.system.openxr")
-            candidates.append("isaacsim.xr.openxr")
     enabled = []
     for ext_id in candidates:
         try:
@@ -129,11 +170,23 @@ def _enable_vr_extensions() -> None:
         print(f"[VR] Enabled extensions: {', '.join(enabled)}")
         for _ in range(5):
             simulation_app.update()
+        if XRCore is None:
+            try:
+                from omni.kit.xr.core import XRCore as _XRCore
+
+                XRCore = _XRCore
+            except Exception as exc:
+                print(f"[VR] XRCore import after extension startup failed: {exc}")
     else:
         print("[VR] No VR extensions found/enabled. Check Extensions window.")
 
 
 def _request_vr_start(profile_name: str | None = None) -> None:
+    if not _xr_enabled:
+        return
+    if XRCore is None:
+        print("[VR] XRCore unavailable; skipping XR profile start.")
+        return
     try:
         if profile_name is None:
             profile_name = "ar" if _xr_mode == "openxr" else "vr"
@@ -236,6 +289,8 @@ def _schedule_xr_camera_view(eye: np.ndarray, target: np.ndarray) -> bool:
     set_camera_view()는 데스크톱 viewport만 만지고, VR HMD view는 이 API가 필요하다.
     """
     try:
+        if not _xr_enabled or XRCore is None:
+            return False
         from pxr import Gf
 
         core = XRCore.get_singleton()
@@ -336,12 +391,15 @@ def main():
     print("[Main] Entered main().", flush=True)
     if _use_xr_experience:
         print(f"[VR] Using XR experience ({_xr_mode}): {_xr_experience}")
+    else:
+        print("[VR] XR experience disabled; starting standard Isaac Sim app.")
     print(f"[VR] Backend={_xr_backend}")
     print(f"[VR] WAIT_FOR_VR_TRACKING={WAIT_FOR_VR_TRACKING}")
     print(f"[Main] ENABLE_PICK_PLACE={ENABLE_PICK_PLACE}")
     print(f"[XR] XR_CAMERA_TELEPORT={XR_CAMERA_TELEPORT}")
-    _enable_vr_extensions()
-    _request_vr_start()
+    if _xr_enabled:
+        _enable_vr_extensions()
+        _request_vr_start()
 
     # 1. 월드 생성
     print("[Main] Creating world...", flush=True)
@@ -374,10 +432,12 @@ def main():
     print("[Main] Panda added.", flush=True)
 
     # 4. VR 아바타 프림 생성 (world.reset() 전에 추가해야 함)
-    avatar = VRAvatar()
-    avatar.setup(world)
-    human_avatar = HumanAvatar(table_top_z=table_top_z)
-    human_avatar.setup(world)
+    avatar = None
+    if _xr_enabled:
+        avatar = VRAvatar()
+        avatar.setup(world)
+    else:
+        print("[VR] Avatar disabled for non-XR run.")
 
     # 5. 리셋 (물리 핸들 초기화 — 반드시 필요)
     print("[Main] Resetting world...", flush=True)
@@ -414,7 +474,7 @@ def main():
     gripper_camera.setup()
 
     # 9. VR 그랩 매니저 (avatar 전달 → XRCore 재사용)
-    grab_manager = VRGrabManager(cubes, avatar=avatar)
+    grab_manager = VRGrabManager(cubes, avatar=avatar) if _xr_enabled else None
 
     # 10. 시뮬레이션 루프
     xr_anchor_done = False   # xrAnchor 1회 이동 완료 플래그
@@ -445,7 +505,6 @@ def main():
 
     print("[Main] Entering simulation loop...", flush=True)
     waiting_for_vr_logged = False
-    human_task_started = False
     while simulation_app.is_running():
         world.step(render=True)
 
@@ -461,7 +520,6 @@ def main():
                 task_done = False
                 step = 0
                 cycle_reset_requested = False
-                human_task_started = False
 
             step += 1
             sim_time = _sim_time(world, step)
@@ -473,7 +531,7 @@ def main():
 
             # ── xrAnchor 1회 이동: HMD 첫 감지 시점에 눈 위치로 고정 ────────
             # VR HMD view는 데스크톱 viewport와 별개라 XRCore camera teleport가 필요함.
-            if not xr_anchor_done:
+            if _xr_enabled and avatar is not None and not xr_anchor_done:
                 p_hmd0 = avatar.capture_initial_hmd_pos()
                 if p_hmd0 is not None:
                     camera_ok = False
@@ -484,22 +542,10 @@ def main():
                     xr_anchor_done = True  # 성공 여부와 무관하게 재시도 금지
 
             # ── VR 아바타 갱신 (머리·손 프림 위치 + 팔 DebugDraw) ──────────
-            head_pos, left_pos, right_pos = avatar.update()
-            human_avatar.update(head_pos, left_pos, right_pos)
-            human_task = human_avatar.update_task(green_cubes, left_pos, right_pos)
-            if human_task and not human_task_started:
-                logger.log_event(
-                    "human_task_start",
-                    f"task=touch_green_cube,target={human_task.get('target', '')}",
-                )
-                human_task_started = True
-            if human_task:
-                logger.check_human_task_touch(
-                    human_task.get("target", ""),
-                    human_task.get("hand", ""),
-                    human_task.get("min_dist"),
-                    HUMAN_AVATAR_TOUCH_DIST,
-                )
+            if avatar is not None:
+                head_pos, left_pos, right_pos = avatar.update()
+            else:
+                head_pos, left_pos, right_pos = None, None, None
             if MIRROR_VIEW_TO_HMD and head_pos is not None and step % 2 == 0:
                 try:
                     hmd_forward = avatar.get_hmd_forward()
@@ -526,11 +572,10 @@ def main():
             # 팔↔로봇 충돌 → ErrP
             ee_pos, _ = panda.end_effector.get_world_pose()
             current_cube_pos_for_camera, _ = pick_targets[current_pick_idx].get_world_pose()
-            gripper_center = _gripper_center_from_fingers(panda)
             gripper_camera.update(
                 ee_pos,
                 target_pos=current_cube_pos_for_camera,
-                mount_pos=gripper_center,
+                mount_pos=_gripper_center_from_fingers(panda),
             )
             arm_robot_collision_active = False
             for hand, ctrl_pos in (("left", left_pos), ("right", right_pos)):
@@ -540,19 +585,8 @@ def main():
                     arm_robot_collision_active = True
                     haptics.pulse(100, hand=hand, event="gripper_robot_collision")
 
-            gripper_sample_pos = gripper_center if gripper_center is not None else ee_pos
-            left_hand_gripper_dist = _distance_or_none(left_pos, gripper_sample_pos)
-            right_hand_gripper_dist = _distance_or_none(right_pos, gripper_sample_pos)
-            human_avatar_hits = human_avatar.check_gripper_collision(gripper_sample_pos)
-            if human_avatar_hits:
-                hit_details = ",".join(
-                    f"{hit['part']}:{hit['dist']:.3f}"
-                    for hit in human_avatar_hits[:3]
-                )
-                logger.check_pseudo_errp(
-                    "human_robot_collision",
-                    f"robot=gripper,hits={hit_details}",
-                )
+            left_hand_gripper_dist = _distance_or_none(left_pos, ee_pos)
+            right_hand_gripper_dist = _distance_or_none(right_pos, ee_pos)
             logger.log_sample(
                 left_hand_gripper_dist=left_hand_gripper_dist,
                 right_hand_gripper_dist=right_hand_gripper_dist,
@@ -564,7 +598,8 @@ def main():
             )
 
             # VR 그랩 (hand tracking pinch 우선, 없으면 컨트롤러 grip 폴백)
-            grab_manager.update(left_pos, right_pos, pinch_points=pinch_points)
+            if grab_manager is not None:
+                grab_manager.update(left_pos, right_pos, pinch_points=pinch_points)
 
             # 아바타 위치 디버그 (처음 10초간, 1초마다)
             if step % 60 == 0 and step <= 600:
@@ -630,11 +665,11 @@ def main():
                         cycle_reset_requested = True
                         logger.reset_cycle()
                         logger.start_episode("reason=cubes_randomized")
-                        human_task_started = False
                         print(f"\n✅ [Step {step}] 3개 Pick-and-Place 완료! 새 배치로 재시작")
 
             if cycle_reset_requested:
-                grab_manager.release_all()
+                if grab_manager is not None:
+                    grab_manager.release_all()
                 world.reset()
                 if controller is not None:
                     controller.reset(end_effector_initial_height=approach_height)
@@ -644,7 +679,6 @@ def main():
                 task_done = False
                 step = 0
                 cycle_reset_requested = False
-                human_task_started = False
 
             # ── ErrP 후보 이벤트 감지 ─────────────────────────────────────────
             gripper_pos = panda.gripper.get_joint_positions()
@@ -655,7 +689,10 @@ def main():
             logger.check_pick_miss(gripper_closed, ee_pos, current_cube)
             logger.check_drop_throw(pick_targets)
             logger.check_collision_green(pick_targets, green_cubes)
-            logger.check_human_collision(ee_pos, avatar.get_avatar_prims())
+            logger.check_human_collision(
+                ee_pos,
+                avatar.get_avatar_prims() if avatar is not None else [],
+            )
             logger.check_stack_failure(pick_targets)
 
     hand_tracking.close()

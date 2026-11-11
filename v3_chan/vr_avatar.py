@@ -450,15 +450,62 @@ class VRAvatar:
 
     # ── XR 장치 위치 읽기 ──────────────────────────────────────────────────
     def _get_xr_device(self, xr_path: str):
-        if xr_path in self._devices:
-            return self._devices[xr_path]
+        # XRCore documents both methods below as current-frame queries.  Do not
+        # trust a wrapper cached in a prior frame: after a tracking/runtime
+        # dropout it can continue returning the last pose matrix.
+        try:
+            if not bool(self._xr_core.has_input_device(xr_path)):
+                self._devices.pop(xr_path, None)
+                return None
+        except Exception:
+            # Older backends may not expose has_input_device; get_input_device
+            # is still queried anew rather than falling back to our cache.
+            pass
         device = self._xr_core.get_input_device(xr_path)
         if device is not None:
             self._devices[xr_path] = device
+        else:
+            self._devices.pop(xr_path, None)
         return device
+
+    def _refresh_controller_devices(self) -> None:
+        """Refresh each physical controller wrapper once for this avatar frame.
+
+        Controller poses and face-button input must share the same current-frame
+        wrappers.  Refreshing here also keeps button input live when
+        ``XR_CONTROLLER_POSE_MODE=visual`` returns a stage prim without ever
+        consulting an XRInputDevice pose.
+        """
+
+        if self._xr_core is None:
+            self._init_xr()
+        paths = ("/user/hand/left", "/user/hand/right")
+        if self._xr_core is None:
+            for path in paths:
+                self._devices.pop(path, None)
+            return
+        for path in paths:
+            try:
+                self._get_xr_device(path)
+            except Exception:
+                # A runtime transition is an unavailable frame, never a reason
+                # to retain the preceding wrapper as if it were current.
+                self._devices.pop(path, None)
+
+    def _device_for_pose_read(self, xr_path: str):
+        """Use the frame cache for controllers; refresh non-controller devices."""
+
+        if xr_path.startswith("/user/hand/"):
+            return self._devices.get(xr_path)
+        return self._get_xr_device(xr_path)
 
     def get_cached_xr_device(self, xr_path: str):
         return self._devices.get(xr_path)
+
+    def get_cached_xr_device_for_logical_hand(self, hand: str):
+        """Return the cached controller using the avatar's logical-hand map."""
+
+        return self.get_cached_xr_device(xr_path_for_hand(hand))
 
     def _matrix_translation(self, mat) -> np.ndarray:
         p = mat.ExtractTranslation()
@@ -470,7 +517,7 @@ class VRAvatar:
         if self._xr_core is None:
             return None
         try:
-            device = self._get_xr_device(xr_path)
+            device = self._device_for_pose_read(xr_path)
             if device is None:
                 if xr_path not in self._missing_paths:
                     self._missing_paths.add(xr_path)
@@ -587,7 +634,7 @@ class VRAvatar:
         if self._xr_core is None:
             return None
         try:
-            device = self._get_xr_device(xr_path)
+            device = self._device_for_pose_read(xr_path)
             if device is None:
                 return None
             for pose_name in pose_names:
@@ -1233,6 +1280,11 @@ class VRAvatar:
 
     # ── 매 프레임 갱신 ─────────────────────────────────────────────────────
     def update_with_status(self) -> "tuple[PoseSample, PoseSample, PoseSample]":
+        # One current-frame wrapper refresh per *physical* controller.  Logical
+        # left/right pose readers below select from this cache through
+        # xr_path_for_hand(), which preserves XR_SWAP_HANDS without re-querying
+        # XRCore in physical/virtual fallback branches.
+        self._refresh_controller_devices()
         head_sample = self.get_hmd_pose_sample()
         left_sample = self.get_controller_pose_sample("left")
         right_sample = self.get_controller_pose_sample("right")

@@ -1,0 +1,25 @@
+{
+  "source_root": "/home/railab/Desktop/Isaac_HRC",
+  "source_root_was_git_repository": false,
+  "destination": "https://github.com/LimChanju/SeRT-Training-Platform.git",
+  "base_main": "c4ce195f4942dbbe21e0090b6b28bd379a022d11",
+  "variants": [
+    {
+      "path": "SeRT-Training-Platform",
+      "origin": "https://github.com/LimChanju/SeRT-Training-Platform.git",
+      "head": "3682056fd8888d2881290f1e1f65f3cce10270d9",
+      "branch": "handoff/bc-cbf-explicit-feedback-v1",
+      "local_changes_included": true
+    },
+    {
+      "path": "SeRT-Training-Platform-ac-selective-smoothing-v1",
+      "origin": "https://github.com/LimChanju/SeRT-Training-Platform.git",
+      "head": "a316de1d98e7ad6876b22bd936b4048666edbb5b",
+      "branch": "handoff/ac-selective-smoothing-feedback-collector-v1",
+      "local_changes_included": true
+    }
+  ],
+  "snapshot_date": "2026-11-11",
+  "isaac_runtime_code_modified": false,
+  "data_and_weights_uploaded": false
+}

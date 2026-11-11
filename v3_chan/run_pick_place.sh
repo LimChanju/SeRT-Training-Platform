@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="/home/railab/Desktop/Isaac_HRC"
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 HRI_SESSION_ID="$(date +%Y%m%d_%H%M%S_%N)_$$"
 export HRI_SESSION_ID
-export HRI_COLLECTION_LABEL="${HRI_COLLECTION_LABEL:-surface_twist_v8_dualclock_tracked_v1}"
+export HRI_COLLECTION_LABEL="${HRI_COLLECTION_LABEL:-surface_twist_v9_cartesian_speed_v1}"
 export HRI_PARTICIPANT_ID="${HRI_PARTICIPANT_ID:-P01}"
 export HRI_PARTICIPANT_SESSION_INDEX="${HRI_PARTICIPANT_SESSION_INDEX:-unspecified}"
 export HRI_PARTICIPANT_HANDEDNESS="${HRI_PARTICIPANT_HANDEDNESS:-unspecified}"
@@ -14,7 +14,7 @@ export HRI_IS_PRACTICE="${HRI_IS_PRACTICE:-unspecified}"
 export HRI_EXPERIMENT_CONDITION="${HRI_EXPERIMENT_CONDITION:-unspecified}"
 export HRI_EXPERIMENT_BLOCK_ID="${HRI_EXPERIMENT_BLOCK_ID:-unspecified}"
 export HRI_HAPTIC_CONDITION="${HRI_HAPTIC_CONDITION:-unspecified}"
-export HRI_PROTOCOL_VERSION="${HRI_PROTOCOL_VERSION:-surface_gap_dynamic_multispeed_dualclock_v4}"
+export HRI_PROTOCOL_VERSION="${HRI_PROTOCOL_VERSION:-surface_gap_cartesian_multispeed_v6}"
 export HRI_ROOM_CALIBRATION_ID="${HRI_ROOM_CALIBRATION_ID:-vr_room_to_isaac_world_v1}"
 export HRI_COLLECTION_TEST_MODE="${HRI_COLLECTION_TEST_MODE:-0}"
 if [[ "$HRI_COLLECTION_TEST_MODE" == "1" ]]; then
@@ -99,6 +99,13 @@ export HRI_DISTANCE_GATE_START_GAP_M=0.13
 export HRI_GEOMETRY_MAX_QUERY_GAP_M=2.0
 export HRI_GEOMETRY_QUERY_TOLERANCE_M=0.00025
 export HRI_GEOMETRY_QUERY_ITERATIONS=14
+export PICK_PLACE_EE_ACCELERATION_LIMIT_MPS2="${PICK_PLACE_EE_ACCELERATION_LIMIT_MPS2:-1.0}"
+export PICK_PLACE_EE_JERK_LIMIT_MPS3="${PICK_PLACE_EE_JERK_LIMIT_MPS3:-10.0}"
+export PICK_PLACE_EE_REACH_TOLERANCE_M="${PICK_PLACE_EE_REACH_TOLERANCE_M:-0.005}"
+export PICK_PLACE_EE_MIN_CONTROL_DT_S="${PICK_PLACE_EE_MIN_CONTROL_DT_S:-0.00001}"
+export PICK_PLACE_EE_MAX_CONTROL_DT_S="${PICK_PLACE_EE_MAX_CONTROL_DT_S:-0.1}"
+export PICK_PLACE_EE_FK_BINARY_SEARCH_ITERATIONS="${PICK_PLACE_EE_FK_BINARY_SEARCH_ITERATIONS:-24}"
+export PICK_PLACE_EE_FK_DISPLACEMENT_TOLERANCE_M="${PICK_PLACE_EE_FK_DISPLACEMENT_TOLERANCE_M:-0.000001}"
 if [[ "$HRI_COLLECTION_TEST_MODE" == "1" ]]; then
     HRI_COLLECTION_DEBUG_VISUALIZATION=1
 else
@@ -139,6 +146,11 @@ export XR_STAGE_VISUAL_FALLBACK=1
 export XR_STAGE_VISUAL_SEARCH_INTERVAL_STEPS=30
 
 export HAPTICS_CONTACT_MIN_STEPS="${HAPTICS_CONTACT_MIN_STEPS:-1}"
+export PICK_PLACE_GRASP_GATE_ENABLED="${PICK_PLACE_GRASP_GATE_ENABLED:-1}"
+export PICK_PLACE_GRASP_GATE_DISTANCE_M="${PICK_PLACE_GRASP_GATE_DISTANCE_M:-0.075}"
+export PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS="${PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS:-3}"
+export PICK_PLACE_GRASP_GATE_TIMEOUT_S="${PICK_PLACE_GRASP_GATE_TIMEOUT_S:-3.0}"
+export PICK_PLACE_MAX_ATTEMPTS_PER_CUBE="${PICK_PLACE_MAX_ATTEMPTS_PER_CUBE:-3}"
 export HRI_VALIDATOR_MIN_HAND_POSE_VALID_FRACTION="${HRI_VALIDATOR_MIN_HAND_POSE_VALID_FRACTION:-0.90}"
 export HRI_VALIDATOR_MIN_RTF_VALID_FRACTION="${HRI_VALIDATOR_MIN_RTF_VALID_FRACTION:-0.95}"
 
@@ -218,6 +230,10 @@ printf '[Collect] condition=%s block=%s haptic_condition=%s\n' \
 printf '[Collect] haptics enabled=%s intensity=%s min_interval_s=%s contact_steps=%s\n' \
     "$BHAPTICS_ENABLED" "$BHAPTICS_INTENSITY" "$BHAPTICS_MIN_INTERVAL" \
     "$HAPTICS_CONTACT_MIN_STEPS"
+printf '[Collect] pick grasp_gate=%s distance_m=%s stable_steps=%s timeout_s=%s max_attempts=%s\n' \
+    "$PICK_PLACE_GRASP_GATE_ENABLED" "$PICK_PLACE_GRASP_GATE_DISTANCE_M" \
+    "$PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS" "$PICK_PLACE_GRASP_GATE_TIMEOUT_S" \
+    "$PICK_PLACE_MAX_ATTEMPTS_PER_CUBE"
 printf '[Collect] quality_thresholds hand_pose_valid=%s rtf_valid=%s\n' \
     "$HRI_VALIDATOR_MIN_HAND_POSE_VALID_FRACTION" \
     "$HRI_VALIDATOR_MIN_RTF_VALID_FRACTION"
@@ -225,8 +241,13 @@ printf '[Collect] production=%s session_seed=%s code_version=%s\n' \
     "$HRI_PRODUCTION_MODE" \
     "${HRI_SESSION_SEED:-auto}" \
     "${HRI_CODE_VERSION:-auto-source-tree-sha256}"
-printf '[Collect] speed_order_index=%s episode_speed_schedule=%s motion_scale=slow:1.0,medium:1.5,fast:2.0\n' \
+printf '[Collect] speed_order_index=%s episode_speed_schedule=%s speed_control=cartesian_mps\n' \
     "$HRI_SPEED_ORDER_INDEX" "$HRI_SPEED_PROFILE_ORDER"
+printf '[Collect] speed_limits_mps transport=slow:0.30,medium:0.40,fast:0.50 approach_place=slow:0.10,medium:0.15,fast:0.20 near=slow:0.05,medium:0.10,fast:0.15\n'
+printf '[Collect] speed_ramp accel_mps2=%s jerk_mps3=%s reach_tolerance_m=%s\n' \
+    "$PICK_PLACE_EE_ACCELERATION_LIMIT_MPS2" \
+    "$PICK_PLACE_EE_JERK_LIMIT_MPS3" \
+    "$PICK_PLACE_EE_REACH_TOLERANCE_M"
 printf '[Collect] test_mode=%s episodes=%s recording=%s debug_visualization=%s\n' \
     "$HRI_COLLECTION_TEST_MODE" \
     "$HRI_TRAJECTORY_MAX_EPISODES" \

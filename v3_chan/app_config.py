@@ -72,10 +72,10 @@ HRI_HAPTIC_CONDITION = os.environ.get(
     "HRI_HAPTIC_CONDITION", "unspecified"
 ).strip()
 HRI_COLLECTION_LABEL = os.environ.get(
-    "HRI_COLLECTION_LABEL", "surface_twist_v8_dualclock_tracked_v1"
+    "HRI_COLLECTION_LABEL", "surface_twist_v8_dualclock_tracked_grasp_gate_v5"
 ).strip()
 HRI_PROTOCOL_VERSION = os.environ.get(
-    "HRI_PROTOCOL_VERSION", "surface_gap_dynamic_multispeed_dualclock_v4"
+    "HRI_PROTOCOL_VERSION", "surface_gap_dynamic_multispeed_grasp_stable_v5"
 ).strip()
 HRI_SPEED_ORDER_INDEX = max(0, _env_int("HRI_SPEED_ORDER_INDEX", 0))
 HRI_SPEED_PROFILE_ORDER = os.environ.get(
@@ -137,6 +137,19 @@ PICK_PLACE_SUCCESS_MIN_LIFT_M = float(
 )
 PICK_PLACE_MISS_RECENT_STEPS = int(
     os.environ.get("PICK_PLACE_MISS_RECENT_STEPS", "30")
+)
+PICK_PLACE_GRASP_GATE_ENABLED = _env_bool("PICK_PLACE_GRASP_GATE_ENABLED", True)
+PICK_PLACE_GRASP_GATE_DISTANCE_M = max(
+    0.001, _env_float("PICK_PLACE_GRASP_GATE_DISTANCE_M", 0.075)
+)
+PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS = max(
+    1, _env_int("PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS", 3)
+)
+PICK_PLACE_GRASP_GATE_TIMEOUT_S = max(
+    0.01, _env_float("PICK_PLACE_GRASP_GATE_TIMEOUT_S", 3.0)
+)
+PICK_PLACE_MAX_ATTEMPTS_PER_CUBE = max(
+    1, _env_int("PICK_PLACE_MAX_ATTEMPTS_PER_CUBE", 3)
 )
 ENABLE_GRIPPER_CAMERA = os.environ.get("ENABLE_GRIPPER_CAMERA", "1").lower() in (
     "1",

@@ -1,0 +1,146 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "requirements.txt"
+      - "pyproject.toml"
+  schedule:
+    # 매주 화요일 오전 9시 (KST) = UTC 월요일 00:00
+    - cron: "0 0 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Run pip-audit
+        id: audit
+        continue-on-error: true
+        run: |
+          pip-audit -r requirements.txt \
+            --format json \
+            --output audit_result.json
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Parse audit result
+        id: parse
+        shell: python
+        run: |
+          import json, os
+
+          try:
+              with open("audit_result.json") as f:
+                  data = json.load(f)
+          except Exception:
+              data = []
+
+          vulns = []
+          for dep in data:
+              for vuln in dep.get("vulns", []):
+                  vulns.append({
+                      "package": dep["name"],
+                      "version": dep["version"],
+                      "id": vuln["id"],
+                      "description": vuln.get("description", "")[:300],
+                      "fix": vuln.get("fix_versions", []),
+                  })
+
+          count = len(vulns)
+          summary = "\n".join(
+              f"- **{v['package']}** {v['version']}: [{v['id']}] {v['description']}"
+              for v in vulns
+          ) or "취약점 없음"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"vuln_count={count}\n")
+              fh.write(f"summary<<EOF\n{summary}\nEOF\n")
+
+          # Step summary 출력
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write(f"## pip-audit 보안 스캔 결과\n\n")
+              if count == 0:
+                  fh.write("취약점이 발견되지 않았습니다.\n")
+              else:
+                  fh.write(f"**{count}개 취약점 발견**\n\n")
+                  fh.write(summary + "\n")
+
+      - name: Upload audit report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: audit_result.json
+
+      - name: Create GitHub Issue if vulnerabilities found
+        if: steps.parse.outputs.vuln_count != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const count = ${{ steps.parse.outputs.vuln_count }};
+            const summary = `${{ steps.parse.outputs.summary }}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const today = new Date().toISOString().slice(0, 10);
+
+            // 동일 제목 이슈가 이미 열려있으면 새로 생성하지 않음
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "security",
+            });
+
+            const alreadyOpen = existing.data.some(i =>
+              i.title.startsWith("[Security] pip-audit")
+            );
+
+            if (alreadyOpen) {
+              console.log("Security issue already open, skipping creation.");
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Security] pip-audit — ${count}개 취약점 발견 (${today})`,
+              body: [
+                "## pip-audit 보안 스캔 결과",
+                "",
+                `스캔 일시: ${today}`,
+                `워크플로우: [실행 로그](${runUrl})`,
+                "",
+                "### 발견된 취약점",
+                "",
+                summary,
+                "",
+                "### 조치 방법",
+                "```bash",
+                "pip-audit -r requirements.txt --fix",
+                "```",
+                "",
+                "또는 `requirements.txt`의 해당 패키지 버전을 패치 버전으로 업그레이드하세요.",
+              ].join("\n"),
+              labels: ["security", "dependencies"],
+            });
+
+      - name: Fail if vulnerabilities found
+        if: steps.parse.outputs.vuln_count != '0'
+        run: |
+          echo "::error::pip-audit에서 ${{ steps.parse.outputs.vuln_count }}개 취약점을 발견했습니다. GitHub Issues를 확인하세요."
+          exit 1

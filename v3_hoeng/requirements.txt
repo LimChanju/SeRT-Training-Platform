@@ -1,0 +1,17 @@
+# Python dependencies for the non-Isaac parts of this project.
+# Install into the Isaac Sim Python environment with:
+#   ../isaacsim/python.sh -m pip install -r requirements.txt
+#
+# Provided by Isaac Sim 4.5, not installed from pip here:
+#   carb
+#   isaacsim
+#   omni
+#   pxr
+#
+# Torch is already provided by this Isaac Sim install as torch==2.7.0+cu128.
+# The training/evaluation scripts also fall back to Isaac's ML archive bundle.
+
+numpy==1.26.0
+h5py==3.15.1
+bhaptics-python==0.2.0
+tensorboard>=2.16,<3

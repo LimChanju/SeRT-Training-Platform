@@ -103,7 +103,7 @@ class HRIObsRecorder:
     directly into the existing policy/training readers.
     """
 
-    SCHEMA_VERSION = "hri_obs_v8_dual_clock_tracked_action_aligned"
+    SCHEMA_VERSION = "hri_obs_v9_cartesian_speed_aligned"
 
     def __init__(
         self,
@@ -410,6 +410,37 @@ class HRIObsRecorder:
                 "pose_source_switched_right": [],
             },
             "dynamic_sim": {},
+            "controller": {
+                "controller_event": [],
+                "controller_speed_profile": [],
+                "nominal_phase_mode": [],
+                "speed_limit_mode": [],
+                "distance_gate": [],
+                "surface_gap_m": [],
+                "geometry_valid": [],
+                "phase_speed_limit_mps": [],
+                "near_human_speed_limit_mps": [],
+                "blended_speed_limit_mps": [],
+                "active_speed_limit_mps": [],
+                "ramp_acceleration_mps2": [],
+                "sim_dt_s": [],
+                "control_dt_valid": [],
+                "ee_velocity_sim_world_mps": [],
+                "ee_speed_sim_mps": [],
+                "ee_speed_sim_valid": [],
+                "ee_velocity_wall_world_mps": [],
+                "ee_speed_wall_mps": [],
+                "ee_speed_wall_valid": [],
+                "wall_dt_s": [],
+                "command_scale": [],
+                "command_predicted_ee_displacement_m": [],
+                "command_full_target_ee_displacement_m": [],
+                "command_cartesian_speed_mps": [],
+                "command_limit_valid": [],
+                "command_was_limited": [],
+                "waypoint_distance_m": [],
+                "waypoint_reached": [],
+            },
             "errp": {
                 "label": [],
                 "feedback": [],
@@ -464,6 +495,7 @@ class HRIObsRecorder:
         safety: Mapping | None = None,
         dynamic: Mapping | None = None,
         dynamic_sim: Mapping | None = None,
+        controller: Mapping | None = None,
         tracking: Mapping | None = None,
         errp: Mapping | None = None,
         action=None,
@@ -519,6 +551,7 @@ class HRIObsRecorder:
         self._append_safety(obs, safety)
         self._append_dynamic(dynamic)
         self._append_dynamic_sim(dynamic_sim)
+        self._append_controller(controller)
         self._append_errp(errp, step)
         if previous_action is None and action is not None:
             previous_action = action
@@ -612,6 +645,7 @@ class HRIObsRecorder:
         for group_name in (
             "safety",
             "dynamic_sim",
+            "controller",
             "errp",
             "actions",
             "rewards",
@@ -727,6 +761,7 @@ class HRIObsRecorder:
         for group_name in (
             "safety",
             "dynamic_sim",
+            "controller",
             "errp",
             "actions",
             "rewards",
@@ -1092,6 +1127,58 @@ class HRIObsRecorder:
         for name in _DYNAMIC_SCALAR_FIELDS:
             self._buffers["dynamic_sim"].setdefault(name, []).append(
                 _finite_scalar(dynamic.get(name, 0.0), 0.0)
+            )
+
+    def _append_controller(self, controller: Mapping | None) -> None:
+        controller = dict(controller or {})
+        string_defaults = {
+            "controller_speed_profile": "unknown",
+            "nominal_phase_mode": "unknown",
+            "speed_limit_mode": "unknown",
+        }
+        vector_fields = (
+            "ee_velocity_sim_world_mps",
+            "ee_velocity_wall_world_mps",
+        )
+        scalar_defaults = {
+            "distance_gate": 0.0,
+            "surface_gap_m": 10.0,
+            "geometry_valid": 0.0,
+            "phase_speed_limit_mps": 0.0,
+            "near_human_speed_limit_mps": 0.0,
+            "blended_speed_limit_mps": 0.0,
+            "active_speed_limit_mps": 0.0,
+            "ramp_acceleration_mps2": 0.0,
+            "sim_dt_s": 0.0,
+            "control_dt_valid": 0.0,
+            "ee_speed_sim_mps": 0.0,
+            "ee_speed_sim_valid": 0.0,
+            "ee_speed_wall_mps": 0.0,
+            "ee_speed_wall_valid": 0.0,
+            "wall_dt_s": 0.0,
+            "command_scale": 0.0,
+            "command_predicted_ee_displacement_m": 0.0,
+            "command_full_target_ee_displacement_m": 0.0,
+            "command_cartesian_speed_mps": 0.0,
+            "command_limit_valid": 0.0,
+            "command_was_limited": 0.0,
+            "waypoint_distance_m": 0.0,
+            "waypoint_reached": 0.0,
+        }
+        self._buffers["controller"]["controller_event"].append(
+            int(controller.get("controller_event", -1))
+        )
+        for name, default in string_defaults.items():
+            self._buffers["controller"][name].append(
+                str(controller.get(name, default))
+            )
+        for name in vector_fields:
+            self._buffers["controller"][name].append(
+                _finite_array(controller.get(name), 3)
+            )
+        for name, default in scalar_defaults.items():
+            self._buffers["controller"][name].append(
+                _finite_scalar(controller.get(name, default), default)
             )
 
     def _append_errp(self, errp: Mapping | None, step: int) -> None:

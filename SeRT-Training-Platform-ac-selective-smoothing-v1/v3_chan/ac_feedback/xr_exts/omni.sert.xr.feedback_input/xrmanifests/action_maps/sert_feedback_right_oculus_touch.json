@@ -1,0 +1,19 @@
+{
+    "version": 1,
+    "priority": 1000,
+    "name": "SeRT Feedback Oculus (Right)",
+    "toolsLayout": "vr",
+    "dominantHand": "right",
+    "tags": [
+        {
+            "inputDevice": "/user/hand/left",
+            "tag": "left_oculus_touch_components"
+        },
+        {
+            "inputDevice": "/user/hand/right",
+            "tag": "right_oculus_touch_components"
+        }
+    ],
+    "tools": [],
+    "actions": {}
+}

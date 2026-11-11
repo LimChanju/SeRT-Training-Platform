@@ -45,7 +45,7 @@
 | `min_hand_gripper_dist_m` | 양손 중 gripper와 더 가까운 거리 |
 | `human_robot_collision` | 손 sphere와 distal Panda built-in collider의 overlap 기준 충돌 flag |
 
-## 3. `v3_chan/trajectories/hri_vr_sphere_surface_twist_v8_dualclock_tracked_v1_<session_id>.hdf5`
+## 3. `v3_chan/trajectories/hri_vr_sphere_surface_twist_v9_cartesian_speed_v1_<session_id>.hdf5`
 
 이 파일은 학습에 사용할 수 있는 HDF5 episode dataset이다. 기존 전체 observation인 `obs_policy`와, HRI cognitive safety 연구용 핵심 observation인 `hri_obs_policy`를 함께 저장한다.
 
@@ -64,7 +64,12 @@
 | `controller_speed_schedule` | 해당 session에 적용된 세 episode의 speed 순서 |
 | `controller_speed_counterbalance_order_index` | counterbalance 순서 번호. `0`, `1`, `2` |
 | `controller_speed_counterbalance_orders_json` | 전체 counterbalance 순서 정의 |
-| `controller_speed_profiles_json` | profile별 motion scale, 실제 `events_dt`, nominal cycle 길이 |
+| `controller_speed_profiles_json` | profile별 transport/approach/near-human m/s 상한과 FSM 설정 |
+| `controller_speed_schedule_version` | Cartesian speed schedule 버전 |
+| `controller_speed_step_schema_version` | step별 speed 기록 schema 버전 |
+| `controller_speed_gate_blending` | surface-gap distance gate 감속 공식 |
+| `controller_speed_acceleration_limit_mps2` | 상한 증가 ramp의 acceleration 제한 |
+| `controller_speed_jerk_limit_mps3` | 상한 증가 ramp의 jerk 제한 |
 | `participant_id` | 참가자 가명. 현재 본수집은 `P01` |
 | `participant_session_index` | 해당 참가자의 수집 세션 번호 |
 | `participant_handedness` | self-reported handedness |
@@ -103,11 +108,13 @@ production validator는 각 episode에서 왼손과 오른손의 `pose_valid` �
 
 새 수집 데이터에서 episode 길이는 고정값이 아니다. 실제 place 검증에 실패하면 같은 cube를 재시도하므로, 3회보다 많은 pick-and-place controller attempt가 포함될 수 있다.
 
-session별 episode 속도 순서는 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환한다. 한 session의 세 속도 조건은 동일한 초기 cube pose와 `layout_id`를 공유하며, session이 바뀔 때만 layout이 바뀐다. 각 episode attribute에는 해당 session schedule과 `controller_speed_profile`, `controller_motion_phase_scale`, `controller_events_dt_json`, `controller_nominal_cycle_steps`, `controller_nominal_cycle_duration_s`를 기록한다. 속도 변화는 이동 phase에만 적용하며 grasp/release와 안정화 phase timing은 바꾸지 않는다.
+session별 episode 속도 순서는 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환한다. 한 session의 세 속도 조건은 동일한 초기 cube pose와 `layout_id`를 공유하며, session이 바뀔 때만 layout이 바뀐다. 속도는 `events_dt` 배율이 아니라 Lula FK로 검증한 end-effector Cartesian 변위로 제한한다. episode attribute에는 `controller_speed_profile`, `transport_speed_limit_mps`, `approach_place_speed_limit_mps`, `near_human_speed_limit_mps`와 limiter metadata를 기록한다. grasp/release와 안정화 phase timing은 바꾸지 않는다.
 
-새 recorder schema는 `hri_obs_v8_dual_clock_tracked_action_aligned`이며, safety observation schema는 `hri_policy_obs_v1_83d_surface_gap`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원을 저장한다. v8은 policy 차원을 바꾸지 않고 pose provenance, dual-clock dynamics, action alignment, initial scene snapshot을 추가한다. 기존 v1-v7 파일은 과거 데이터로 그대로 유지된다.
+새 recorder schema는 `hri_obs_v9_cartesian_speed_aligned`이며, safety observation schema는 `hri_policy_obs_v1_83d_surface_gap`이다. `obs_policy`는 기존 robot-only policy와의 호환을 위해 84차원을 유지하고, `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원을 저장한다. v9은 v8의 pose provenance, dual-clock dynamics, action alignment, initial scene snapshot을 유지하고 별도 `controller/*` Cartesian speed 기록을 추가한다. 기존 v1-v8 파일은 과거 데이터로 그대로 유지된다.
 
 `human/*`에는 wall-time 기준 손 속도와 함께 pose valid, `position_tracked`(-1/0/1), tracking-status-known, source ID/name/path, source-switch, 획득 monotonic time을 저장한다. `safety/*`의 동적 값은 wall-time canonical이며, `dynamic_sim/*`에 simulation-time 진단값을 별도로 저장한다. validity는 tracking, gap measurement/rate, robot surface velocity, relative velocity, closing speed, TTC로 분리한다. 이 값들은 policy observation에 포함되지 않는다.
+
+`controller/*`에는 `controller_event`, `controller_speed_profile`, `nominal_phase_mode`, `speed_limit_mode`, `distance_gate`, `phase_speed_limit_mps`, `near_human_speed_limit_mps`, `blended_speed_limit_mps`, `active_speed_limit_mps`, sim/wall 기준 EE 속도, FK command displacement/speed와 validity를 저장한다. 제어에는 `sim_time`만 사용하고 wall-time 속도는 진단용이다.
 
 surface 기반 flag의 기본 기준은 다음과 같다.
 

@@ -60,7 +60,7 @@ async def main() -> None:
     parser.add_argument("--hand", choices=("left", "right"), default="right")
     parser.add_argument("--playtime", type=int, default=8, help="8 means 40 ms in bHaptics glove API.")
     parser.add_argument("--shape", type=int, default=2, help="0 constant, 1 falling, 2 rising.")
-    parser.add_argument("--burst-count", type=int, default=5, help="Repeat glove pulses per UDP packet.")
+    parser.add_argument("--burst-count", type=int, default=1, help="Repeat glove pulses per UDP packet.")
     parser.add_argument("--burst-interval", type=float, default=0.04, help="Seconds between repeated glove pulses.")
     args = parser.parse_args()
 
@@ -92,6 +92,7 @@ async def main() -> None:
     print(f"[bHapticsBridge] listening on UDP {args.host or '0.0.0.0'}:{args.port}")
 
     loop = asyncio.get_running_loop()
+    pulse_tasks: set[asyncio.Task] = set()
     try:
         while True:
             data, addr = await loop.sock_recvfrom(sock, 1024)
@@ -102,17 +103,25 @@ async def main() -> None:
                 continue
 
             print(f"[bHapticsBridge] {hand} intensity={intensity} from {addr}")
-            await play_glove(
-                bhaptics_python,
-                hand,
-                intensity,
-                args.playtime,
-                args.shape,
-                args.burst_count,
-                args.burst_interval,
+            task = asyncio.create_task(
+                play_glove(
+                    bhaptics_python,
+                    hand,
+                    intensity,
+                    args.playtime,
+                    args.shape,
+                    args.burst_count,
+                    args.burst_interval,
+                )
             )
+            pulse_tasks.add(task)
+            task.add_done_callback(pulse_tasks.discard)
     finally:
         sock.close()
+        for task in pulse_tasks:
+            task.cancel()
+        if pulse_tasks:
+            await asyncio.gather(*pulse_tasks, return_exceptions=True)
         await bhaptics_python.stop_all()
         await bhaptics_python.close()
 

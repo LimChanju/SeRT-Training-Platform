@@ -149,6 +149,11 @@ from app_config import (
     HRI_TRAJECTORY_MAX_EPISODES,
     HRI_TRAJECTORY_OVERWRITE,
     HRI_TRAJECTORY_PATH,
+    PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS,
+    PICK_PLACE_GRASP_GATE_DISTANCE_M,
+    PICK_PLACE_GRASP_GATE_ENABLED,
+    PICK_PLACE_GRASP_GATE_TIMEOUT_S,
+    PICK_PLACE_MAX_ATTEMPTS_PER_CUBE,
     PICK_PLACE_SUCCESS_MAX_SPEED_MPS,
     PICK_PLACE_SUCCESS_MIN_LIFT_M,
     PICK_PLACE_SUCCESS_XY_TOLERANCE_M,
@@ -170,8 +175,9 @@ from haptics_udp import HapticsUdpClient
 from hri_obs_recorder import HRIObsRecorder, build_observation
 from panda_robot import add_panda, print_robot_info
 from pick_controller import create_pick_controller, run_pick_place
+from pick_place_execution import GraspReadinessGate, failed_attempt_reaches_limit
 from pick_place_speed import (
-    events_dt_for_speed_profile,
+    CartesianSpeedConfig,
     normalize_speed_profile_order,
     speed_profile_for_episode,
     speed_profile_metadata,
@@ -329,6 +335,32 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
             _env_bool("XR_EXTERNAL_HAND_TRACKING", False)
         ),
         "xr_anchor_status": "pending" if _xr_enabled else "xr_disabled",
+        "pick_place_grasp_gate_enabled": int(PICK_PLACE_GRASP_GATE_ENABLED),
+        "pick_place_grasp_gate_distance_m": float(PICK_PLACE_GRASP_GATE_DISTANCE_M),
+        "pick_place_grasp_gate_consecutive_steps": int(
+            PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS
+        ),
+        "pick_place_grasp_gate_timeout_s": float(
+            PICK_PLACE_GRASP_GATE_TIMEOUT_S
+        ),
+        # Franka's Isaac PickPlaceController commands panda_rightfinger as its
+        # end-effector frame. The gate deliberately uses that same frame, not
+        # the midpoint of the two finger-link origins.
+        "pick_place_grasp_gate_reference": "controller_end_effector_panda_rightfinger",
+        "has_grasped_cube_estimator_version": "resolved_gripper_center_v1",
+        "has_grasped_cube_estimator": (
+            "cube_distance_to_resolved_gripper_center_and_gripper_width"
+        ),
+        "has_grasped_cube_gripper_center_fallback": "panda_end_effector",
+        "has_grasped_cube_max_distance_m": float(
+            os.environ.get("PICK_PLACE_GRASP_MAX_DISTANCE_M", "0.075")
+        ),
+        "has_grasped_cube_max_width_m": float(
+            os.environ.get("PICK_PLACE_GRASP_MAX_WIDTH_M", "0.065")
+        ),
+        "pick_place_max_attempts_per_cube": int(
+            PICK_PLACE_MAX_ATTEMPTS_PER_CUBE
+        ),
         **_git_collection_metadata(),
     }
 
@@ -336,7 +368,6 @@ def _collection_file_metadata(world) -> dict[str, str | int | float]:
 def _capture_initial_scene(
     cubes,
     place_target,
-    robot,
     *,
     session_seed: int,
     layout_seed: int,
@@ -357,7 +388,7 @@ def _capture_initial_scene(
         target_position,
         target_orientation,
     )
-    initial_scene = {
+    return {
         "session_seed": np.asarray(int(session_seed), dtype=np.int64),
         "layout_seed": np.asarray(int(layout_seed), dtype=np.int64),
         "layout_id": str(fixed_layout_id or measured_layout_id),
@@ -373,23 +404,6 @@ def _capture_initial_scene(
             target_orientation, dtype=np.float64
         ),
     }
-    try:
-        joint_positions = np.asarray(
-            robot.get_joint_positions(), dtype=np.float64
-        ).reshape(-1)
-        if joint_positions.size > 0 and np.all(np.isfinite(joint_positions)):
-            initial_scene["robot_joint_positions"] = joint_positions
-    except Exception:
-        pass
-    try:
-        joint_velocities = np.asarray(
-            robot.get_joint_velocities(), dtype=np.float64
-        ).reshape(-1)
-        if joint_velocities.size > 0 and np.all(np.isfinite(joint_velocities)):
-            initial_scene["robot_joint_velocities"] = joint_velocities
-    except Exception:
-        pass
-    return initial_scene
 
 
 def _enable_vr_extensions() -> None:
@@ -769,6 +783,26 @@ def main():
         f"session_seed={HRI_SESSION_SEED} code_version={HRI_CODE_VERSION}",
         flush=True,
     )
+
+    def _log_grasp_gate_decision(gate, cube_name: str) -> None:
+        if gate is None:
+            return
+        if gate.timed_out:
+            print(
+                "[PickPlace] grasp gate timeout "
+                f"cube={cube_name} "
+                f"wait_steps={gate.waited_steps} "
+                f"distance_m={gate.distance_m}",
+                flush=True,
+            )
+        elif gate.release:
+            print(
+                "[PickPlace] grasp gate released "
+                f"cube={cube_name} "
+                f"distance_m={gate.distance_m:.4f} "
+                f"wait_steps={gate.waited_steps}",
+                flush=True,
+            )
     if _use_xr_experience:
         print(f"[VR] Using XR experience ({_xr_mode}): {_xr_experience}")
     else:
@@ -845,6 +879,7 @@ def main():
     )
     session_layout_seed = episode_seed(HRI_SESSION_SEED, 0)
     physics_dt_s = float(world.get_physics_dt())
+    cartesian_speed_config = CartesianSpeedConfig.from_env()
     collection_file_metadata = {
         **_collection_file_metadata(world),
         **safety_geometry.metadata(),
@@ -853,6 +888,7 @@ def main():
             physics_dt_s=physics_dt_s,
             profile_order=session_speed_profile_order,
             counterbalance_order_index=HRI_SPEED_ORDER_INDEX,
+            config=cartesian_speed_config,
         ),
     }
 
@@ -862,7 +898,6 @@ def main():
     session_initial_scene = _capture_initial_scene(
         cubes,
         place_target,
-        panda,
         session_seed=HRI_SESSION_SEED,
         layout_seed=session_layout_seed,
     )
@@ -891,17 +926,66 @@ def main():
             panda,
             end_effector_initial_height=approach_height,
             speed_profile=current_speed_profile,
+            physics_dt_s=physics_dt_s,
+            speed_config=cartesian_speed_config,
+        )
+        collection_file_metadata.update(
+            {
+                "controller_speed_end_effector_frame_name": (
+                    controller.end_effector_frame_name
+                ),
+                "controller_speed_measured_pose_method": (
+                    "lula_fk_from_current_active_joint_positions"
+                ),
+                "controller_visual_end_effector_prim": "panda_rightfinger",
+            }
         )
         profile_info = speed_profile_metadata(
-            current_speed_profile, physics_dt_s=physics_dt_s
+            current_speed_profile,
+            physics_dt_s=physics_dt_s,
+            config=cartesian_speed_config,
         )
         print(
             "[Phase 2] Pick-and-Place controller enabled: "
             f"speed={current_speed_profile} "
-            f"nominal_cycle={profile_info['controller_nominal_cycle_duration_s']:.2f}s"
+            f"transport={profile_info['transport_speed_limit_mps']:.2f}m/s "
+            f"approach_place={profile_info['approach_place_speed_limit_mps']:.2f}m/s "
+            f"near={profile_info['near_human_speed_limit_mps']:.2f}m/s"
         )
     else:
         print("[Phase 1] 씬 확인 모드")
+
+    grasp_gate_timeout_steps = max(
+        1, int(round(PICK_PLACE_GRASP_GATE_TIMEOUT_S / physics_dt_s))
+    )
+    grasp_gate = (
+        GraspReadinessGate(
+            max_distance_m=PICK_PLACE_GRASP_GATE_DISTANCE_M,
+            required_consecutive_steps=PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS,
+            max_wait_steps=grasp_gate_timeout_steps,
+        )
+        if PICK_PLACE_GRASP_GATE_ENABLED
+        else None
+    )
+
+    def _reset_pick_controller(speed_profile: str | None = None) -> None:
+        if controller is not None:
+            reset_kwargs = {"end_effector_initial_height": approach_height}
+            if speed_profile is not None:
+                reset_kwargs["speed_profile"] = speed_profile
+            controller.reset(**reset_kwargs)
+        if grasp_gate is not None:
+            grasp_gate.reset()
+
+    print(
+        "[PickPlace] grasp gate "
+        f"enabled={int(grasp_gate is not None)} "
+        f"distance_m={PICK_PLACE_GRASP_GATE_DISTANCE_M:.3f} "
+        f"stable_steps={PICK_PLACE_GRASP_GATE_CONSECUTIVE_STEPS} "
+        f"timeout_steps={grasp_gate_timeout_steps} "
+        f"max_attempts={PICK_PLACE_MAX_ATTEMPTS_PER_CUBE}",
+        flush=True,
+    )
 
     # 8. 그리퍼 카메라 (가림 여부 판단 기반)
     gripper_camera = GripperCamera(
@@ -967,8 +1051,15 @@ def main():
             "layout_seed": int(session_layout_seed),
             "layout_shared_across_speed_conditions": True,
             "xr_anchor_status_at_episode_start": xr_anchor_method,
+            "controller_speed_end_effector_frame_name": (
+                controller.end_effector_frame_name
+                if controller is not None
+                else "disabled"
+            ),
             **speed_profile_metadata(
-                current_speed_profile, physics_dt_s=physics_dt_s
+                current_speed_profile,
+                physics_dt_s=physics_dt_s,
+                config=cartesian_speed_config,
             ),
         }
 
@@ -976,7 +1067,6 @@ def main():
         return _capture_initial_scene(
             cubes,
             place_target,
-            panda,
             session_seed=HRI_SESSION_SEED,
             layout_seed=session_layout_seed,
             fixed_layout_id=session_layout_id,
@@ -1015,13 +1105,7 @@ def main():
             current_speed_profile = speed_profile_for_episode(
                 collection_episode_index, session_speed_profile_order
             )
-            if controller is not None:
-                controller.reset(
-                    end_effector_initial_height=approach_height,
-                    events_dt=list(
-                        events_dt_for_speed_profile(current_speed_profile)
-                    ),
-                )
+            _reset_pick_controller(speed_profile=current_speed_profile)
             if (
                 HRI_TRAJECTORY_MAX_EPISODES <= 0
                 or hri_recorder.num_episodes < HRI_TRAJECTORY_MAX_EPISODES
@@ -1079,8 +1163,7 @@ def main():
                 world.reset()
                 safety_geometry.reset_link_origin_pose_cache()
                 dynamic_safety.reset()
-                if controller is not None:
-                    controller.reset(end_effector_initial_height=approach_height)
+                _reset_pick_controller()
                 place_target.set_world_pose(
                     position=np.array([stack_base_xy[0], stack_base_xy[1], table_top_z + cube_half])
                 )
@@ -1340,7 +1423,9 @@ def main():
             )
             previous_robot_action = last_robot_action
             next_robot_action = None
+            controller_speed_sample = None
             controller_advanced_this_step = False
+            attempt_failure_reason = None
             action_command_monotonic_ns = time.monotonic_ns()
             if hri_recorder is not None and hri_recorder.is_open:
                 stack_height = (
@@ -1358,19 +1443,37 @@ def main():
                     head_pos=head_pos,
                     left_pos=left_pos,
                     right_pos=right_pos,
-                    gripper_center=_gripper_center_from_fingers(panda),
+                    gripper_center=gripper_center_for_distance,
                     safety_result=safety_result,
                     controller=controller,
                 )
                 if ENABLE_PICK_PLACE and controller is not None and not task_done:
                     current_pick_pos, _ = pick_targets[current_pick_idx].get_world_pose()
                     action_command_monotonic_ns = time.monotonic_ns()
-                    task_done, next_robot_action = run_pick_place(
+                    controller_step = run_pick_place(
                         controller=controller,
                         robot=panda,
                         pick_position=current_pick_pos,
                         place_position=current_place_pos,
-                        return_action=True,
+                        grasp_gate=grasp_gate,
+                        grasp_reference_position=ee_pos,
+                        sim_time_s=sim_time,
+                        wall_time_s=sample_monotonic_time_ns * 1e-9,
+                        end_effector_position_world=ee_pos,
+                        distance_gate=safety_result.distance_gate,
+                        surface_gap_m=safety_result.min_surface_gap_m,
+                        geometry_valid=safety_result.geometry_valid,
+                        return_status=True,
+                    )
+                    task_done = bool(
+                        controller_step.done or controller_step.attempt_failed
+                    )
+                    next_robot_action = controller_step.action
+                    controller_speed_sample = controller_step.speed_control
+                    attempt_failure_reason = controller_step.failure_reason
+                    _log_grasp_gate_decision(
+                        controller_step.grasp_gate,
+                        pick_targets[current_pick_idx].name,
                     )
                     controller_advanced_this_step = True
                 hri_recorder.add_sample(
@@ -1474,6 +1577,11 @@ def main():
                         **dynamic_sample.safety_payload(),
                     },
                     dynamic_sim=dynamic_sample.simulation_payload(),
+                    controller=(
+                        controller_speed_sample.payload()
+                        if controller_speed_sample is not None
+                        else None
+                    ),
                     tracking={
                         "head": head_pose,
                         "left_hand": left_pose,
@@ -1526,12 +1634,30 @@ def main():
                 place_pos = np.array([stack_base_xy[0], stack_base_xy[1], stack_height])
                 if not task_done and not controller_advanced_this_step:
                     action_command_monotonic_ns = time.monotonic_ns()
-                    task_done, next_robot_action = run_pick_place(
+                    controller_step = run_pick_place(
                         controller=controller,
                         robot=panda,
                         pick_position=current_pick_pos,
                         place_position=place_pos,
-                        return_action=True,
+                        grasp_gate=grasp_gate,
+                        grasp_reference_position=ee_pos,
+                        sim_time_s=sim_time,
+                        wall_time_s=sample_monotonic_time_ns * 1e-9,
+                        end_effector_position_world=ee_pos,
+                        distance_gate=safety_result.distance_gate,
+                        surface_gap_m=safety_result.min_surface_gap_m,
+                        geometry_valid=safety_result.geometry_valid,
+                        return_status=True,
+                    )
+                    task_done = bool(
+                        controller_step.done or controller_step.attempt_failed
+                    )
+                    next_robot_action = controller_step.action
+                    controller_speed_sample = controller_step.speed_control
+                    attempt_failure_reason = controller_step.failure_reason
+                    _log_grasp_gate_decision(
+                        controller_step.grasp_gate,
+                        pick_targets[current_pick_idx].name,
                     )
                 if next_robot_action is not None:
                     last_robot_action = next_robot_action
@@ -1561,22 +1687,75 @@ def main():
                         f"lift_m={validation.cube_lift_m:.4f},"
                         f"grasp_observed={int(validation.grasp_observed)}"
                     )
+                    if attempt_failure_reason:
+                        result_details += f",failure_reason={attempt_failure_reason}"
                     attempt_index += 1
-                    controller.reset(end_effector_initial_height=approach_height)
                     task_done = False
                     logger.reset_pick_miss()
                     if not validation.success:
                         failed_attempts += 1
-                        current_cube_attempt += 1
                         current_cube_max_lift_m = 0.0
                         current_cube_grasp_observed = False
                         logger.log_event("pick_attempt_failed", result_details)
+                        if failed_attempt_reaches_limit(
+                            current_cube_attempt=current_cube_attempt,
+                            max_attempts_per_cube=PICK_PLACE_MAX_ATTEMPTS_PER_CUBE,
+                        ):
+                            limit_details = (
+                                f"{result_details},max_attempts="
+                                f"{PICK_PLACE_MAX_ATTEMPTS_PER_CUBE}"
+                            )
+                            logger.log_event(
+                                "pick_attempt_limit_reached", limit_details
+                            )
+                            logger.end_episode(
+                                "reason=pick_attempt_limit_reached,"
+                                f"cube={placed_cube.name},"
+                                f"attempts={current_cube_attempt},"
+                                f"speed_profile={current_speed_profile}"
+                            )
+                            if hri_recorder is not None and hri_recorder.is_open:
+                                episode_path = hri_recorder.end_episode(
+                                    success=False,
+                                    metadata={
+                                        "reason": "pick_attempt_limit_reached",
+                                        "failed_cube": placed_cube.name,
+                                        "failed_cube_attempts": current_cube_attempt,
+                                        "failed_attempts": failed_attempts,
+                                        "max_attempts_per_cube": (
+                                            PICK_PLACE_MAX_ATTEMPTS_PER_CUBE
+                                        ),
+                                        "last_attempt_failure_reason": (
+                                            attempt_failure_reason or "validation_failed"
+                                        ),
+                                        **speed_profile_metadata(
+                                            current_speed_profile,
+                                            physics_dt_s=physics_dt_s,
+                                            config=cartesian_speed_config,
+                                        ),
+                                    },
+                                )
+                                if episode_path:
+                                    print(
+                                        f"[HRI] saved failed episode {episode_path}",
+                                        flush=True,
+                                    )
+                            shutdown_reason = "pick_attempt_limit_reached"
+                            print(
+                                "[PickPlace] aborting session after failed grasp "
+                                f"attempt limit: {limit_details}",
+                                flush=True,
+                            )
+                            break
+                        current_cube_attempt += 1
+                        _reset_pick_controller()
                         print(
                             f"[PickPlace] retrying {placed_cube.name}: {result_details}",
                             flush=True,
                         )
                         continue
 
+                    _reset_pick_controller()
                     logger.log_event("pick_attempt_success", result_details)
                     logger.record_stack_expected(placed_cube.name, stack_height)
                     completed_picks += 1
@@ -1603,6 +1782,7 @@ def main():
                                     **speed_profile_metadata(
                                         current_speed_profile,
                                         physics_dt_s=physics_dt_s,
+                                        config=cartesian_speed_config,
                                     ),
                                 },
                             )
@@ -1625,23 +1805,20 @@ def main():
                         current_speed_profile = speed_profile_for_episode(
                             collection_episode_index, session_speed_profile_order
                         )
-                        if controller is not None:
-                            controller.reset(
-                                end_effector_initial_height=approach_height,
-                                events_dt=list(
-                                    events_dt_for_speed_profile(
-                                        current_speed_profile
-                                    )
-                                ),
-                            )
+                        _reset_pick_controller(speed_profile=current_speed_profile)
                         next_profile_info = speed_profile_metadata(
-                            current_speed_profile, physics_dt_s=physics_dt_s
+                            current_speed_profile,
+                            physics_dt_s=physics_dt_s,
+                            config=cartesian_speed_config,
                         )
                         print(
                             "[PickPlace] next episode speed profile: "
                             f"{current_speed_profile} "
-                            "nominal_cycle="
-                            f"{next_profile_info['controller_nominal_cycle_duration_s']:.2f}s",
+                            "limits="
+                            f"transport:{next_profile_info['transport_speed_limit_mps']:.2f},"
+                            "approach_place:"
+                            f"{next_profile_info['approach_place_speed_limit_mps']:.2f},"
+                            f"near:{next_profile_info['near_human_speed_limit_mps']:.2f}m/s",
                             flush=True,
                         )
                         randomize_cubes(
@@ -1656,12 +1833,7 @@ def main():
                         failed_attempts = 0
                         current_cube_max_lift_m = 0.0
                         current_cube_grasp_observed = False
-                        controller.reset(
-                            end_effector_initial_height=approach_height,
-                            events_dt=list(
-                                events_dt_for_speed_profile(current_speed_profile)
-                            ),
-                        )
+                        _reset_pick_controller(speed_profile=current_speed_profile)
                         cycle_reset_requested = True
                         logger.reset_cycle()
                         logger.start_episode(
@@ -1676,8 +1848,7 @@ def main():
                 world.reset()
                 safety_geometry.reset_link_origin_pose_cache()
                 dynamic_safety.reset()
-                if controller is not None:
-                    controller.reset(end_effector_initial_height=approach_height)
+                _reset_pick_controller()
                 place_target.set_world_pose(
                     position=np.array([stack_base_xy[0], stack_base_xy[1], table_top_z + cube_half])
                 )

@@ -3,6 +3,8 @@ import numpy as np
 import pytest
 
 from v3_chan.hri_obs_recorder import HRIObsRecorder
+from v3_chan.pick_place_speed import speed_profile_metadata, speed_schedule_metadata
+from v3_chan.trajectory_metrics import analyze_cartesian_speed
 from v3_chan.validate_hri_collection import validate_hri_collection
 
 
@@ -65,12 +67,19 @@ def _create_valid_file(path):
         data.attrs["session_seed"] = 42
         data.attrs["code_version"] = "source-sha256:test"
         data.attrs["source_tree_sha256"] = "a" * 64
+        for name, value in speed_schedule_metadata().items():
+            data.attrs[name] = value
+        data.attrs["controller_speed_end_effector_frame_name"] = "right_gripper"
+        data.attrs["controller_speed_measured_pose_method"] = (
+            "lula_fk_from_current_active_joint_positions"
+        )
         episodes = data.create_group("episodes")
         for index, speed in enumerate(("slow", "medium", "fast")):
             episode = episodes.create_group(f"episode_{index:06d}")
             episode.attrs["episode_length"] = 2
             episode.attrs["success"] = True
-            episode.attrs["controller_speed_profile"] = speed
+            for name, value in speed_profile_metadata(speed).items():
+                episode.attrs[name] = value
             initial = episode.create_group("initial_scene")
             initial.create_dataset("layout_id", data="layout-one")
             initial.create_dataset("cube_positions_world", data=np.zeros((6, 3)))
@@ -102,6 +111,53 @@ def _create_valid_file(path):
             episode["human"].create_dataset(
                 "head_position_tracked", data=np.full(2, -1, dtype=np.int8)
             )
+            speed_metadata = speed_profile_metadata(speed)
+            controller = episode.create_group("controller")
+            controller.create_dataset("controller_event", data=np.full(2, 5))
+            string_dtype = h5py.string_dtype(encoding="utf-8")
+            for name, value in (
+                ("controller_speed_profile", speed),
+                ("nominal_phase_mode", "transport"),
+                ("speed_limit_mode", "transport"),
+            ):
+                controller.create_dataset(
+                    name,
+                    data=np.asarray([value, value], dtype=string_dtype),
+                )
+            controller.create_dataset("distance_gate", data=np.zeros(2))
+            controller.create_dataset("surface_gap_m", data=np.full(2, 1.0))
+            controller.create_dataset("geometry_valid", data=np.ones(2))
+            controller.create_dataset(
+                "phase_speed_limit_mps",
+                data=np.full(2, speed_metadata["transport_speed_limit_mps"]),
+            )
+            controller.create_dataset(
+                "near_human_speed_limit_mps",
+                data=np.full(2, speed_metadata["near_human_speed_limit_mps"]),
+            )
+            controller.create_dataset(
+                "blended_speed_limit_mps",
+                data=np.full(2, speed_metadata["transport_speed_limit_mps"]),
+            )
+            controller.create_dataset(
+                "active_speed_limit_mps",
+                data=np.full(2, speed_metadata["transport_speed_limit_mps"]),
+            )
+            controller.create_dataset("control_dt_valid", data=np.ones(2))
+            controller.create_dataset(
+                "ee_velocity_sim_world_mps", data=np.zeros((2, 3))
+            )
+            controller.create_dataset("ee_speed_sim_mps", data=np.zeros(2))
+            controller.create_dataset("ee_speed_sim_valid", data=np.ones(2))
+            controller.create_dataset(
+                "ee_velocity_wall_world_mps", data=np.zeros((2, 3))
+            )
+            controller.create_dataset("ee_speed_wall_mps", data=np.zeros(2))
+            controller.create_dataset("ee_speed_wall_valid", data=np.ones(2))
+            controller.create_dataset(
+                "command_cartesian_speed_mps", data=np.zeros(2)
+            )
+            controller.create_dataset("command_limit_valid", data=np.ones(2))
 
 
 def test_collection_validator_accepts_three_speed_shared_layout(tmp_path):
@@ -114,6 +170,22 @@ def test_collection_validator_accepts_three_speed_shared_layout(tmp_path):
     assert report.left_hand_pose_valid_fraction == 1.0
     assert report.right_hand_pose_valid_fraction == 1.0
     assert report.real_time_factor_valid_fraction == 1.0
+
+
+def test_cartesian_speed_metrics_report_profile_event_and_success(tmp_path):
+    path = tmp_path / "metrics.hdf5"
+    _create_valid_file(path)
+    report = analyze_cartesian_speed(str(path))
+    assert report.episode_count == 3
+    assert report.successful_episodes == 3
+    fast_transport = next(
+        metric
+        for metric in report.metrics
+        if metric.profile == "fast" and metric.scope == "transport"
+    )
+    assert fast_transport.sample_count == 2
+    assert fast_transport.max_mps == 0.0
+    assert fast_transport.max_active_limit_mps == pytest.approx(0.50)
 
 
 def test_collection_validator_rejects_layout_confound(tmp_path):
@@ -192,3 +264,29 @@ def test_collection_validator_rejects_haptic_condition_mismatch(tmp_path):
         data.attrs["haptic_experiment_condition"] = "off"
     with pytest.raises(ValueError, match="does not match"):
         validate_hri_collection(str(path))
+
+
+def test_collection_validator_rejects_success_with_all_zero_grasp_signal(tmp_path):
+    path = tmp_path / "zero_grasp.hdf5"
+    _create_valid_file(path)
+    with h5py.File(path, "a") as data:
+        for episode in data["episodes"].values():
+            for group_name in ("obs", "hri_obs", "task"):
+                episode.require_group(group_name).create_dataset(
+                    "has_grasped_cube", data=np.zeros(2, dtype=np.float32)
+                )
+    with pytest.raises(ValueError, match="all-zero grasp signal"):
+        validate_hri_collection(str(path))
+
+
+def test_collection_validator_accepts_consistent_grasp_signal(tmp_path):
+    path = tmp_path / "valid_grasp.hdf5"
+    _create_valid_file(path)
+    with h5py.File(path, "a") as data:
+        for episode in data["episodes"].values():
+            for group_name in ("obs", "hri_obs", "task"):
+                episode.require_group(group_name).create_dataset(
+                    "has_grasped_cube", data=np.array([0.0, 1.0], dtype=np.float32)
+                )
+    report = validate_hri_collection(str(path))
+    assert report.episode_count == 3

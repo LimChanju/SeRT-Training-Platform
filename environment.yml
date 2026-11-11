@@ -1,0 +1,19 @@
+name: isaac_vr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.15
+  - pip
+  - numpy>=1.24
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - h5py
+  - pytest
+  - pytest-cov
+  - tensorboard
+  - tensorboardx
+  - pip:
+      - --index-url https://download.pytorch.org/whl/cu118
+      - torch==2.5.1+cu118

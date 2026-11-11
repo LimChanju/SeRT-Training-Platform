@@ -1,0 +1,66 @@
+name: Reusable Python CI
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        required: true
+        type: string
+      python-version:
+        required: true
+        type: string
+      use-cache:
+        required: false
+        type: boolean
+        default: true
+      run-tests:
+        required: false
+        type: boolean
+        default: true
+      artifact-prefix:
+        required: true
+        type: string
+
+jobs:
+  ci:
+    runs-on: ${{ inputs.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Python CI composite
+        id: python-ci
+        uses: ./.github/actions/python-ci
+        with:
+          python-version: ${{ inputs.python-version }}
+          use-cache: ${{ inputs.use-cache }}
+          run-tests: ${{ inputs.run-tests }}
+
+      - name: Write timing report
+        shell: bash
+        env:
+          DURATION: ${{ steps.python-ci.outputs.duration-seconds }}
+          CACHE_HIT: ${{ steps.python-ci.outputs.cache-hit }}
+          OS_NAME: ${{ inputs.os }}
+          PY_VERSION: ${{ inputs.python-version }}
+          PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          python - <<'PY'
+          import json, os
+          data = {
+              "os": os.environ.get("OS_NAME"),
+              "python": os.environ.get("PY_VERSION"),
+              "duration_seconds": float(os.environ.get("DURATION", "0")),
+              "cache_hit": os.environ.get("CACHE_HIT", "false"),
+              "run_type": os.environ.get("PREFIX"),
+          }
+          name = f"timing_{data['run_type']}_{data['os']}_{data['python']}.json"
+          with open(name, "w") as f:
+              json.dump(data, f, indent=2)
+          PY
+
+      - name: Upload timing artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-${{ inputs.artifact-prefix }}-${{ inputs.os }}-${{ inputs.python-version }}
+          path: timing_${{ inputs.artifact-prefix }}_${{ inputs.os }}_${{ inputs.python-version }}.json

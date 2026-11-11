@@ -1,0 +1,94 @@
+{
+  "schema_version": "bc_cbf_online_explicit_feedback_v1",
+  "protocol_version": "single_pick_controlled_crossing_explicit_feedback_v1",
+  "policy": {
+    "checkpoint": "v3_chan/policies/bc_pick_place_v1_100eps.pt",
+    "sha256": "fc4801dfdd7ae4e3edf8760277a1d87fd540c12bf27aeb0a06a3eefdbd5ba8c3",
+    "mode": "direct_bc",
+    "frozen": true,
+    "online_updates": false,
+    "human_observations_masked": true,
+    "feedback_is_policy_input": false
+  },
+  "task": {
+    "cube_count": 1,
+    "strict_semantics": "physical_event_driven_pick_place_v3",
+    "release_required": true,
+    "place_xy_tolerance_m": 0.05,
+    "pseudo_errp_enabled": false,
+    "phase_event_map": {
+      "reach_approach": [0, 1, 2],
+      "grasp_lift": [3, 4],
+      "transport": [5],
+      "place_release": [6, 7]
+    },
+    "crossing_trigger_event": {
+      "reach_approach": 0,
+      "grasp_lift": 4,
+      "transport": 5,
+      "place_release": 6
+    },
+    "phase_clock_latched_during_pre_crossing_cue": true,
+    "task_progression_during_crossing_and_recovery": true,
+    "task_progression_paused_during_query": true,
+    "complete_task_after_query": true
+  },
+  "cbf": {
+    "controller": "cbf",
+    "safe_gap_m": 0.05,
+    "activation_gap_m": 0.13,
+    "gamma_per_s": 8.0,
+    "prediction_horizon_s": 0.15,
+    "max_prediction_buffer_m": 0.08,
+    "max_joint_speed_rad_s": 2.0,
+    "frozen": true,
+    "feedback_adaptation": false,
+    "participant_activation_display": false
+  },
+  "feedback": {
+    "haptics_enabled": false,
+    "query_timeout_s": 90.0,
+    "stable_release_frames": 3,
+    "opposite_controller_buttons": {
+      "left": {
+        "controller": "right",
+        "realtime_safety_concern": "right.a",
+        "realtime_behavior_anomaly": "right.b"
+      },
+      "right": {
+        "controller": "left",
+        "realtime_safety_concern": "left.x",
+        "realtime_behavior_anomaly": "left.y"
+      }
+    },
+    "navigation": {
+      "previous": "left.x",
+      "next": "left.y",
+      "select": "right.a",
+      "submit": "right.b"
+    }
+  },
+  "encounter": {
+    "onset_confirmation_frames": 3,
+    "activation_gap_m": 0.13,
+    "ttc_onset_s": 0.75,
+    "intervention_onset_rad_s": 0.05,
+    "clear_gap_m": 0.15,
+    "ttc_clear_s": 1.0,
+    "intervention_clear_rad_s": 0.01,
+    "clear_duration_s": 0.5,
+    "merge_reentry_s": 1.0,
+    "timeout_s": 8.0,
+    "window_pre_s": 1.0,
+    "window_post_s": 2.0
+  },
+  "design": {
+    "practice_trials": 4,
+    "production_trials": 24,
+    "anchor_repeats": 4,
+    "pilot_evaluated_trials_default": 16,
+    "pilot_evaluated_trials_min": 12,
+    "pilot_evaluated_trials_max": 16,
+    "speed_counts_production": {"slow": 12, "fast": 12}
+  }
+}

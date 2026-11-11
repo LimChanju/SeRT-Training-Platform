@@ -1,0 +1,66 @@
+{
+  "schema_version": "bc_cbf_online_scenarios_v1",
+  "surface_gap_reference": "time_aligned_bc_only_nominal_cbf_protected_surface_to_hypothetical_hand_surface",
+  "actual_gap_reference": "actual_cbf_protected_robot_surface_to_tracked_hand_surface",
+  "severity": {
+    "control": {"minimum_gap_range_m": [0.16, 0.20], "target_gap_m": 0.18},
+    "shallow": {"minimum_gap_range_m": [0.08, 0.12], "target_gap_m": 0.10},
+    "threat": {"minimum_gap_range_m": [0.00, 0.04], "target_gap_m": 0.02}
+  },
+  "crossing": {
+    "corridor_length_m": 0.48,
+    "corridor_radius_m": 0.045,
+    "start_radius_m": 0.075,
+    "end_radius_m": 0.075,
+    "maximum_path_deviation_m": 0.08,
+    "minimum_progress_fraction": 0.90,
+    "maximum_reverse_progress_m": 0.06,
+    "speed_target_m_s": {"slow": 0.18, "fast": 0.36},
+    "speed_tolerance_fraction": 0.45,
+    "cue_lead_s": 1.0,
+    "crossing_timeout_s": 8.0,
+    "recovery_observation_s": 2.0
+  },
+  "nominal_bc_reference": {
+    "semantics": "bc_only_cue_latched_then_task_advancing_time_aligned_protected_surface_sweep_v1",
+    "trigger_state_semantics": "bc_only_phase_trigger_state_on_accepted_layout_v1",
+    "maximum_ee_position_error_m": 0.03,
+    "maximum_arm_joint_error_rad": 0.10,
+    "maximum_start_gap_error_m": 0.03,
+    "candidate_outward_offset_range_m": [-0.20, 0.30],
+    "candidate_outward_offset_step_m": 0.02,
+    "sweep_sample_interval_s": 0.03,
+    "maximum_sweep_sample_interval_s": 0.04,
+    "minimum_trajectory_samples": 16,
+    "minimum_pre_cue_start_gap_m": 0.15
+  },
+  "layout_precheck": {
+    "required": true,
+    "controller": "bc_only",
+    "maximum_candidate_attempts": 12,
+    "maximum_steps": 4500,
+    "hands_clear_gap_m": 0.15,
+    "hands_clear_confirmation_frames": 6,
+    "failed_group": "bc_infeasible_diagnostic",
+    "accepted_group": "bc_feasible_main"
+  },
+  "protected_crossing": {
+    "requested_distal_links": [
+      "panda_link6",
+      "panda_link7",
+      "panda_link8",
+      "panda_hand",
+      "panda_leftfinger",
+      "panda_rightfinger"
+    ],
+    "proximal_link_tokens": [
+      "panda_link0",
+      "panda_link1",
+      "panda_link2",
+      "panda_link3",
+      "panda_link4",
+      "panda_link5"
+    ],
+    "proximal_crossing_action": "mark_off_protocol_and_analysis_exclude"
+  }
+}

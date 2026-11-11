@@ -17,6 +17,12 @@ try:
         validate_experiment_metadata,
     )
     from v3_chan.hri_obs_recorder import HRIObsRecorder
+    from v3_chan.pick_place_speed import (
+        MOTION_EVENT_INDICES,
+        SPEED_LIMITS_MPS,
+        SPEED_SCHEDULE_VERSION,
+        SPEED_STEP_SCHEMA_VERSION,
+    )
 except ImportError:
     from collection_provenance import validate_production_metadata
     from experiment_metadata import (
@@ -24,11 +30,25 @@ except ImportError:
         validate_experiment_metadata,
     )
     from hri_obs_recorder import HRIObsRecorder
+    from pick_place_speed import (
+        MOTION_EVENT_INDICES,
+        SPEED_LIMITS_MPS,
+        SPEED_SCHEDULE_VERSION,
+        SPEED_STEP_SCHEMA_VERSION,
+    )
 
 
 DEFAULT_MIN_HAND_POSE_VALID_FRACTION = 0.90
 DEFAULT_MIN_RTF_VALID_FRACTION = 0.95
+COMMAND_SPEED_ABS_TOLERANCE_MPS = 0.005
+MEASURED_SPEED_ABS_TOLERANCE_MPS = 0.02
+MEASURED_SPEED_REL_TOLERANCE = 0.05
 APPLIED_XR_ANCHOR_STATUSES = {"xr_anchor", "xr_camera_teleport"}
+GRASP_DATASET_PATHS = (
+    "obs/has_grasped_cube",
+    "hri_obs/has_grasped_cube",
+    "task/has_grasped_cube",
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +98,152 @@ def _check_finite_and_monotonic(
         and np.any(np.diff(scalar_series) < 0)
     ):
         errors.append(f"{episode_name}: {dataset_name} is not monotonic")
+
+
+def _check_grasp_signal(
+    episode: h5py.Group,
+    *,
+    episode_name: str,
+    length: int,
+    require_success: bool,
+    errors: list[str],
+) -> None:
+    signals: list[tuple[str, np.ndarray]] = []
+    for dataset_name in GRASP_DATASET_PATHS:
+        if dataset_name not in episode:
+            continue
+        values = np.asarray(episode[dataset_name][()]).reshape(-1)
+        if values.size != length:
+            errors.append(
+                f"{episode_name}: {dataset_name} length={values.size}, expected {length}"
+            )
+            continue
+        if not np.all(np.isfinite(values)):
+            errors.append(f"{episode_name}: {dataset_name} contains non-finite values")
+            continue
+        if not np.all(np.isin(values, (0, 1, False, True))):
+            errors.append(f"{episode_name}: {dataset_name} must contain only 0 or 1")
+            continue
+        signals.append((dataset_name, values > 0.5))
+
+    if not signals:
+        return
+    if require_success and bool(episode.attrs.get("success", False)):
+        if not any(np.any(values) for _, values in signals):
+            errors.append(
+                f"{episode_name}: successful episode has an all-zero grasp signal"
+            )
+    reference_name, reference = signals[0]
+    for dataset_name, values in signals[1:]:
+        if not np.array_equal(reference, values):
+            errors.append(
+                f"{episode_name}: grasp signals disagree between "
+                f"{reference_name} and {dataset_name}"
+            )
+
+
+def _check_row_aligned_group(
+    group: h5py.Group,
+    *,
+    group_name: str,
+    episode_name: str,
+    length: int,
+    errors: list[str],
+) -> None:
+    def _visitor(name: str, item) -> None:
+        if isinstance(item, h5py.Dataset):
+            if item.ndim == 0 or item.shape[0] != length:
+                errors.append(
+                    f"{episode_name}: {group_name}/{name} length="
+                    f"{item.shape[0] if item.ndim else 'scalar'}, expected {length}"
+                )
+
+    group.visititems(_visitor)
+
+
+def _check_cartesian_speed_rows(
+    episode: h5py.Group,
+    *,
+    episode_name: str,
+    errors: list[str],
+) -> None:
+    required = (
+        "controller/controller_event",
+        "controller/nominal_phase_mode",
+        "controller/speed_limit_mode",
+        "controller/distance_gate",
+        "controller/phase_speed_limit_mps",
+        "controller/near_human_speed_limit_mps",
+        "controller/blended_speed_limit_mps",
+        "controller/active_speed_limit_mps",
+        "controller/control_dt_valid",
+        "controller/ee_speed_sim_mps",
+        "controller/ee_speed_sim_valid",
+        "controller/command_cartesian_speed_mps",
+        "controller/command_limit_valid",
+    )
+    if any(name not in episode for name in required):
+        return
+    event = np.asarray(episode["controller/controller_event"][()], dtype=int)
+    gate = np.asarray(episode["controller/distance_gate"][()], dtype=float)
+    phase_limit = np.asarray(
+        episode["controller/phase_speed_limit_mps"][()], dtype=float
+    )
+    near_limit = np.asarray(
+        episode["controller/near_human_speed_limit_mps"][()], dtype=float
+    )
+    blended = np.asarray(
+        episode["controller/blended_speed_limit_mps"][()], dtype=float
+    )
+    active = np.asarray(
+        episode["controller/active_speed_limit_mps"][()], dtype=float
+    )
+    expected_blended = (1.0 - gate) * phase_limit + gate * near_limit
+    motion = np.isin(event, MOTION_EVENT_INDICES)
+    if np.any(motion & ~np.isclose(blended, expected_blended, atol=1e-6, rtol=0.0)):
+        errors.append(
+            f"{episode_name}: blended speed limit does not match the distance-gate formula"
+        )
+    if np.any(active > blended + 1e-6):
+        errors.append(f"{episode_name}: active speed limit exceeds blended limit")
+
+    command_valid = (
+        np.asarray(episode["controller/control_dt_valid"][()], dtype=bool)
+        & np.asarray(episode["controller/command_limit_valid"][()], dtype=bool)
+        & motion
+    )
+    command_speed = np.asarray(
+        episode["controller/command_cartesian_speed_mps"][()], dtype=float
+    )
+    if np.any(
+        command_valid
+        & (command_speed > active + COMMAND_SPEED_ABS_TOLERANCE_MPS)
+    ):
+        worst = float(np.max(command_speed[command_valid] - active[command_valid]))
+        errors.append(
+            f"{episode_name}: FK-predicted command exceeds active speed limit; "
+            f"worst_excess_mps={worst:.6f}"
+        )
+
+    measured_valid = (
+        np.asarray(episode["controller/ee_speed_sim_valid"][()], dtype=bool)
+        & np.asarray(episode["controller/control_dt_valid"][()], dtype=bool)
+        & motion
+    )
+    measured_speed = np.asarray(
+        episode["controller/ee_speed_sim_mps"][()], dtype=float
+    )
+    tolerance = np.maximum(
+        MEASURED_SPEED_ABS_TOLERANCE_MPS,
+        MEASURED_SPEED_REL_TOLERANCE * active,
+    )
+    violation = measured_valid & (measured_speed > active + tolerance)
+    if np.any(violation):
+        worst = float(np.max(measured_speed[violation] - active[violation]))
+        errors.append(
+            f"{episode_name}: measured simulation-time EE speed exceeds active "
+            f"limit tolerance; worst_excess_mps={worst:.6f}"
+        )
 
 
 def validate_hri_collection(
@@ -174,6 +340,18 @@ def validate_hri_collection(
             "xr_hand_sphere_enabled",
             "xr_anchor_status",
             "session_seed",
+            "controller_speed_schedule_version",
+            "controller_speed_step_schema_version",
+            "controller_speed_profiles_json",
+            "controller_speed_gate_start_gap_m",
+            "controller_speed_gate_full_gap_m",
+            "controller_speed_gate_blending",
+            "controller_speed_acceleration_limit_mps2",
+            "controller_speed_jerk_limit_mps3",
+            "controller_speed_action_limit_method",
+            "controller_speed_end_effector_reference",
+            "controller_speed_end_effector_frame_name",
+            "controller_speed_measured_pose_method",
         )
         for attr_name in required_file_attrs:
             if attr_name not in data.attrs:
@@ -185,6 +363,28 @@ def validate_hri_collection(
             errors.append(
                 "experiment_metadata_schema_version="
                 f"{metadata_schema!r}, expected {EXPERIMENT_METADATA_SCHEMA_VERSION!r}"
+            )
+        speed_schedule_version = _text(
+            data.attrs.get("controller_speed_schedule_version", "")
+        )
+        if speed_schedule_version != SPEED_SCHEDULE_VERSION:
+            errors.append(
+                f"controller_speed_schedule_version={speed_schedule_version!r}, "
+                f"expected {SPEED_SCHEDULE_VERSION!r}"
+            )
+        speed_step_schema = _text(
+            data.attrs.get("controller_speed_step_schema_version", "")
+        )
+        if speed_step_schema != SPEED_STEP_SCHEMA_VERSION:
+            errors.append(
+                f"controller_speed_step_schema_version={speed_step_schema!r}, "
+                f"expected {SPEED_STEP_SCHEMA_VERSION!r}"
+            )
+        if production and _text(
+            data.attrs.get("controller_speed_end_effector_frame_name", "")
+        ) in ("", "unknown"):
+            errors.append(
+                "controller_speed_end_effector_frame_name must name the actual Lula frame"
             )
         haptics_enabled_value = _int(data.attrs.get("haptics_enabled", -1))
         if "haptics_intensity" in data.attrs:
@@ -250,6 +450,20 @@ def validate_hri_collection(
             "human/right_hand_vel_filtered_mps",
             "safety/haptic_pulse_left",
             "safety/haptic_pulse_right",
+            "controller/controller_event",
+            "controller/controller_speed_profile",
+            "controller/nominal_phase_mode",
+            "controller/speed_limit_mode",
+            "controller/distance_gate",
+            "controller/active_speed_limit_mps",
+            "controller/ee_velocity_sim_world_mps",
+            "controller/ee_speed_sim_mps",
+            "controller/ee_speed_sim_valid",
+            "controller/ee_velocity_wall_world_mps",
+            "controller/ee_speed_wall_mps",
+            "controller/ee_speed_wall_valid",
+            "controller/command_cartesian_speed_mps",
+            "controller/command_limit_valid",
         )
         for episode_name in episode_names:
             episode = episodes_group[episode_name]
@@ -259,7 +473,45 @@ def validate_hri_collection(
                 continue
             if require_success and not bool(episode.attrs.get("success", False)):
                 errors.append(f"{episode_name}: success is false")
-            speed_profiles.append(_text(episode.attrs.get("controller_speed_profile", "")))
+            _check_grasp_signal(
+                episode,
+                episode_name=episode_name,
+                length=length,
+                require_success=require_success,
+                errors=errors,
+            )
+            speed_profile = _text(
+                episode.attrs.get("controller_speed_profile", "")
+            )
+            speed_profiles.append(speed_profile)
+            expected_limits = SPEED_LIMITS_MPS.get(speed_profile)
+            if expected_limits is None:
+                errors.append(
+                    f"{episode_name}: unknown controller_speed_profile={speed_profile!r}"
+                )
+            else:
+                for attr_name, limit_name in (
+                    ("transport_speed_limit_mps", "transport"),
+                    ("approach_place_speed_limit_mps", "approach_place"),
+                    ("near_human_speed_limit_mps", "near_human"),
+                ):
+                    try:
+                        actual_limit = float(episode.attrs[attr_name])
+                    except (KeyError, TypeError, ValueError):
+                        errors.append(
+                            f"{episode_name}: missing or invalid {attr_name}"
+                        )
+                        continue
+                    if not np.isclose(
+                        actual_limit,
+                        expected_limits[limit_name],
+                        atol=1e-9,
+                        rtol=0.0,
+                    ):
+                        errors.append(
+                            f"{episode_name}: {attr_name}={actual_limit}, expected "
+                            f"{expected_limits[limit_name]} for {speed_profile}"
+                        )
             if "initial_scene/layout_id" not in episode:
                 errors.append(f"{episode_name}: missing initial_scene/layout_id")
             else:
@@ -309,6 +561,31 @@ def validate_hri_collection(
                         f"{episode_name}: {dataset_name} length="
                         f"{episode[dataset_name].shape[0]}, expected {length}"
                     )
+            for row_group_name in (
+                "obs",
+                "hri_obs",
+                "human",
+                "safety",
+                "dynamic_sim",
+                "controller",
+                "errp",
+                "actions",
+                "rewards",
+                "task",
+            ):
+                if row_group_name in episode:
+                    _check_row_aligned_group(
+                        episode[row_group_name],
+                        group_name=row_group_name,
+                        episode_name=episode_name,
+                        length=length,
+                        errors=errors,
+                    )
+            _check_cartesian_speed_rows(
+                episode,
+                episode_name=episode_name,
+                errors=errors,
+            )
             for dataset_name in (
                 "sim_time",
                 "monotonic_time_ns",
@@ -335,6 +612,13 @@ def validate_hri_collection(
                 "safety/right_ttc_s",
                 "dynamic_sim/left_ttc_s",
                 "dynamic_sim/right_ttc_s",
+                "controller/distance_gate",
+                "controller/active_speed_limit_mps",
+                "controller/ee_velocity_sim_world_mps",
+                "controller/ee_speed_sim_mps",
+                "controller/ee_velocity_wall_world_mps",
+                "controller/ee_speed_wall_mps",
+                "controller/command_cartesian_speed_mps",
             ):
                 if dataset_name in episode:
                     _check_finite_and_monotonic(

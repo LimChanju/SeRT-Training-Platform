@@ -1,155 +1,221 @@
+#!/usr/bin/env python3
+"""Report simulation-time Cartesian EE speed metrics from one HRI HDF5."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import argparse
+import json
+from dataclasses import asdict, dataclass
 
+import h5py
 import numpy as np
+
+try:
+    from v3_chan.pick_place_speed import controller_phase_mode
+    from v3_chan.validate_hri_collection import (
+        MEASURED_SPEED_ABS_TOLERANCE_MPS,
+        MEASURED_SPEED_REL_TOLERANCE,
+    )
+except ImportError:
+    from pick_place_speed import controller_phase_mode
+    from validate_hri_collection import (
+        MEASURED_SPEED_ABS_TOLERANCE_MPS,
+        MEASURED_SPEED_REL_TOLERANCE,
+    )
+
+
+EVENT_NAMES = {
+    0: "move_above_pick",
+    1: "descend_to_pick",
+    2: "settle_before_grasp",
+    3: "close_gripper",
+    4: "lift_grasped_cube",
+    5: "transport_to_place_xy",
+    6: "descend_to_place",
+    7: "open_gripper",
+    8: "retract_after_place",
+    9: "safe_return",
+}
 
 
 @dataclass(frozen=True)
-class CartesianMotionSample:
-    dt_s: float = 0.0
-    path_increment_m: float = 0.0
-    velocity_mps: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float))
-    acceleration_mps2: np.ndarray = field(
-        default_factory=lambda: np.zeros(3, dtype=float)
-    )
-    jerk_mps3: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=float))
-    velocity_valid: bool = False
-    acceleration_valid: bool = False
-    jerk_valid: bool = False
-
-    @property
-    def speed_mps(self) -> float:
-        return float(np.linalg.norm(self.velocity_mps))
-
-    @property
-    def acceleration_norm_mps2(self) -> float:
-        return float(np.linalg.norm(self.acceleration_mps2))
-
-    @property
-    def jerk_norm_mps3(self) -> float:
-        return float(np.linalg.norm(self.jerk_mps3))
+class SpeedMetric:
+    episode: str
+    profile: str
+    scope: str
+    sample_count: int
+    mean_mps: float
+    p95_mps: float
+    max_mps: float
+    mean_active_limit_mps: float
+    max_active_limit_mps: float
+    violation_count: int
 
 
-class CartesianMotionTracker:
-    """Track raw finite-difference Cartesian motion on simulation timestamps."""
+@dataclass(frozen=True)
+class TrajectorySpeedReport:
+    path: str
+    episode_count: int
+    successful_episodes: int
+    metrics: tuple[SpeedMetric, ...]
 
-    def __init__(self, position_m, time_s: float) -> None:
-        self._position = _vec3_or_none(position_m)
-        self._time_s = float(time_s)
-        self._velocity: np.ndarray | None = None
-        self._acceleration: np.ndarray | None = None
-        self._path_length_m = 0.0
-        self._elapsed_s = 0.0
-        self._speed_values: list[float] = []
-        self._acceleration_values: list[float] = []
-        self._jerk_values: list[float] = []
-        self._integrated_squared_jerk_m2ps5 = 0.0
 
-    def update(self, position_m, time_s: float) -> CartesianMotionSample:
-        position = _vec3_or_none(position_m)
-        timestamp = float(time_s)
-        if (
-            position is None
-            or self._position is None
-            or not np.isfinite(timestamp)
-            or not np.isfinite(self._time_s)
-        ):
-            self._reset_derivatives(position, timestamp)
-            return CartesianMotionSample()
+def _text(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
 
-        dt_s = timestamp - self._time_s
-        if not np.isfinite(dt_s) or dt_s <= 1e-9:
-            self._reset_derivatives(position, timestamp)
-            return CartesianMotionSample()
 
-        displacement = position - self._position
-        path_increment_m = float(np.linalg.norm(displacement))
-        velocity = displacement / dt_s
-        acceleration = np.zeros(3, dtype=float)
-        jerk = np.zeros(3, dtype=float)
-        acceleration_valid = self._velocity is not None
-        jerk_valid = acceleration_valid and self._acceleration is not None
-        if acceleration_valid:
-            acceleration = (velocity - self._velocity) / dt_s
-        if jerk_valid:
-            jerk = (acceleration - self._acceleration) / dt_s
-
-        sample = CartesianMotionSample(
-            dt_s=float(dt_s),
-            path_increment_m=path_increment_m,
-            velocity_mps=velocity,
-            acceleration_mps2=acceleration,
-            jerk_mps3=jerk,
-            velocity_valid=True,
-            acceleration_valid=acceleration_valid,
-            jerk_valid=jerk_valid,
+def _metric(
+    episode_name: str,
+    profile: str,
+    scope: str,
+    speed: np.ndarray,
+    active_limit: np.ndarray,
+    mask: np.ndarray,
+    *,
+    enforce_limit: bool = True,
+) -> SpeedMetric:
+    selected_speed = speed[mask]
+    selected_limit = active_limit[mask]
+    if selected_speed.size:
+        tolerance = np.maximum(
+            MEASURED_SPEED_ABS_TOLERANCE_MPS,
+            MEASURED_SPEED_REL_TOLERANCE * selected_limit,
         )
-        self._path_length_m += path_increment_m
-        self._elapsed_s += dt_s
-        self._speed_values.append(sample.speed_mps)
-        if acceleration_valid:
-            self._acceleration_values.append(sample.acceleration_norm_mps2)
-        if jerk_valid:
-            jerk_norm = sample.jerk_norm_mps3
-            self._jerk_values.append(jerk_norm)
-            self._integrated_squared_jerk_m2ps5 += jerk_norm**2 * dt_s
-
-        self._position = position
-        self._time_s = timestamp
-        self._velocity = velocity
-        self._acceleration = acceleration if acceleration_valid else None
-        return sample
-
-    def summary(self) -> dict[str, float | int]:
-        speeds = np.asarray(self._speed_values, dtype=float)
-        accelerations = np.asarray(self._acceleration_values, dtype=float)
-        jerks = np.asarray(self._jerk_values, dtype=float)
-        return {
-            "ee_path_length_m": float(self._path_length_m),
-            "ee_motion_duration_s": float(self._elapsed_s),
-            "mean_ee_speed_mps": _mean_or_zero(speeds),
-            "max_ee_speed_mps": _max_or_zero(speeds),
-            "rms_ee_acceleration_mps2": _rms_or_zero(accelerations),
-            "max_ee_acceleration_mps2": _max_or_zero(accelerations),
-            "rms_ee_jerk_mps3": _rms_or_zero(jerks),
-            "p95_ee_jerk_mps3": _percentile_or_zero(jerks, 95.0),
-            "max_ee_jerk_mps3": _max_or_zero(jerks),
-            "integrated_squared_ee_jerk_m2ps5": float(
-                self._integrated_squared_jerk_m2ps5
-            ),
-            "ee_velocity_sample_count": int(speeds.size),
-            "ee_acceleration_sample_count": int(accelerations.size),
-            "ee_jerk_sample_count": int(jerks.size),
-        }
-
-    def _reset_derivatives(self, position: np.ndarray | None, timestamp: float) -> None:
-        self._position = position
-        self._time_s = timestamp
-        self._velocity = None
-        self._acceleration = None
+        violations = (
+            int(np.count_nonzero(selected_speed > selected_limit + tolerance))
+            if enforce_limit
+            else 0
+        )
+        mean = float(np.mean(selected_speed))
+        p95 = float(np.percentile(selected_speed, 95))
+        maximum = float(np.max(selected_speed))
+        mean_limit = float(np.mean(selected_limit))
+        max_limit = float(np.max(selected_limit))
+    else:
+        violations = 0
+        mean = p95 = maximum = mean_limit = max_limit = 0.0
+    return SpeedMetric(
+        episode=episode_name,
+        profile=profile,
+        scope=scope,
+        sample_count=int(selected_speed.size),
+        mean_mps=mean,
+        p95_mps=p95,
+        max_mps=maximum,
+        mean_active_limit_mps=mean_limit,
+        max_active_limit_mps=max_limit,
+        violation_count=violations,
+    )
 
 
-def _vec3_or_none(value) -> np.ndarray | None:
-    if value is None:
-        return None
-    array = np.asarray(value, dtype=float).reshape(-1)
-    if array.size < 3 or not np.all(np.isfinite(array[:3])):
-        return None
-    return array[:3].copy()
+def analyze_cartesian_speed(path: str) -> TrajectorySpeedReport:
+    metrics: list[SpeedMetric] = []
+    successful = 0
+    with h5py.File(path, "r") as data:
+        episodes = data.get("episodes")
+        episode_names = tuple(sorted(episodes.keys())) if episodes else ()
+        for episode_name in episode_names:
+            episode = episodes[episode_name]
+            if "controller/ee_speed_sim_mps" not in episode:
+                continue
+            successful += int(bool(episode.attrs.get("success", False)))
+            profile = _text(episode.attrs.get("controller_speed_profile", "unknown"))
+            event = np.asarray(episode["controller/controller_event"][()], dtype=int)
+            gate = np.asarray(episode["controller/distance_gate"][()], dtype=float)
+            speed = np.asarray(episode["controller/ee_speed_sim_mps"][()], dtype=float)
+            active_limit = np.asarray(
+                episode["controller/active_speed_limit_mps"][()], dtype=float
+            )
+            valid = (
+                np.asarray(episode["controller/ee_speed_sim_valid"][()], dtype=bool)
+                & np.asarray(episode["controller/control_dt_valid"][()], dtype=bool)
+                & np.isfinite(speed)
+                & np.isfinite(active_limit)
+            )
+            motion_event = np.asarray(
+                [controller_phase_mode(value) != "settling_gripper" for value in event],
+                dtype=bool,
+            )
+            for event_index in range(10):
+                event_has_cartesian_limit = (
+                    controller_phase_mode(event_index) != "settling_gripper"
+                )
+                metrics.append(
+                    _metric(
+                        episode_name,
+                        profile,
+                        f"event_{event_index}_{EVENT_NAMES[event_index]}",
+                        speed,
+                        active_limit,
+                        valid & (event == event_index),
+                        enforce_limit=event_has_cartesian_limit,
+                    )
+                )
+            for phase in ("transport", "approach_place"):
+                phase_events = np.asarray(
+                    [controller_phase_mode(value) == phase for value in event],
+                    dtype=bool,
+                )
+                metrics.append(
+                    _metric(
+                        episode_name,
+                        profile,
+                        phase,
+                        speed,
+                        active_limit,
+                        valid & phase_events,
+                    )
+                )
+            metrics.append(
+                _metric(
+                    episode_name,
+                    profile,
+                    "near_human_full_gate",
+                    speed,
+                    active_limit,
+                    valid & motion_event & (gate >= 1.0 - 1e-6),
+                )
+            )
+    return TrajectorySpeedReport(
+        path=str(path),
+        episode_count=len(episode_names),
+        successful_episodes=successful,
+        metrics=tuple(metrics),
+    )
 
 
-def _mean_or_zero(values: np.ndarray) -> float:
-    return float(np.mean(values)) if values.size else 0.0
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--aggregate-only",
+        action="store_true",
+        help="Hide per-event rows and show only phase/full-gate aggregates.",
+    )
+    args = parser.parse_args()
+    report = analyze_cartesian_speed(args.path)
+    if args.json:
+        print(json.dumps(asdict(report), indent=2))
+        return
+    print(
+        f"[SpeedMetrics] path={report.path} episodes={report.episode_count} "
+        f"success={report.successful_episodes}/{report.episode_count}"
+    )
+    for metric in report.metrics:
+        if args.aggregate_only and metric.scope.startswith("event_"):
+            continue
+        print(
+            f"{metric.episode} profile={metric.profile} scope={metric.scope} "
+            f"n={metric.sample_count} mean={metric.mean_mps:.4f} "
+            f"p95={metric.p95_mps:.4f} max={metric.max_mps:.4f} "
+            f"mean_limit={metric.mean_active_limit_mps:.4f} "
+            f"max_limit={metric.max_active_limit_mps:.4f} "
+            f"violations={metric.violation_count}"
+        )
 
 
-def _max_or_zero(values: np.ndarray) -> float:
-    return float(np.max(values)) if values.size else 0.0
-
-
-def _rms_or_zero(values: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(np.square(values)))) if values.size else 0.0
-
-
-def _percentile_or_zero(values: np.ndarray, percentile: float) -> float:
-    return float(np.percentile(values, percentile)) if values.size else 0.0
+if __name__ == "__main__":
+    main()

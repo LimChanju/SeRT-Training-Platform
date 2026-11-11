@@ -25,7 +25,7 @@ distance_gate: clip((0.13 - surface_gap) / (0.13 - 0.05), 0, 1)
 
 ## 수집 데이터
 
-- HDF5 schema: `hri_obs_v8_dual_clock_tracked_action_aligned`
+- HDF5 schema: `hri_obs_v9_cartesian_speed_aligned`
 - 기존 84차원 `obs_policy`는 robot-only checkpoint 호환을 위해 유지한다.
 - safety residual용 `hri_obs_policy`는 gripper 중심거리 field를 제외한 83차원으로 고정한다.
 - 양손 surface gap, closest link/collider ID, contact, penetration, near, near-miss, gate, haptic pulse, geometry validity를 매 step 저장한다.
@@ -36,7 +36,9 @@ distance_gate: clip((0.13 - surface_gap) / (0.13 - 0.05), 0, 1)
 - 각 step에는 simulation time, monotonic time, Unix epoch time을 함께 저장해 이후 EEG marker와 정렬할 수 있게 한다.
 - marker와 sample CSV도 session별 파일로 저장하고 `session_id`, `episode_index`를 포함한다.
 - 한 session의 세 episode는 각각 `slow`, `medium`, `fast` profile을 하나씩 사용한다. session마다 순서를 `slow -> medium -> fast`, `medium -> fast -> slow`, `fast -> slow -> medium`으로 순환해 order effect를 counterbalance한다.
-- 이동 phase의 controller progress만 `1.0x`, `1.5x`, `2.0x`로 조절하고, grasp/release 및 안정화 phase timing은 동일하게 유지한다. HDF5 root에는 schedule/order index를, 각 episode attribute에는 실제 `events_dt`, motion scale, nominal cycle step/time을 저장한다.
+- 속도 profile은 `events_dt` 배율이 아니라 Lula FK로 검증한 end-effector Cartesian 변위 상한으로 적용한다. `transport`는 slow/medium/fast 각각 `0.30/0.40/0.50 m/s`, 접근·배치는 `0.10/0.15/0.20 m/s`, 사람 근접 full gate는 `0.05/0.10/0.15 m/s`이다. 0.13~0.05 m surface-gap 구간에서는 기존 distance gate로 정상 단계 속도에서 근접 속도로 선형 blending한다. 자세한 제어·기록·검증 규칙은 `cartesian_speed_control.md`를 따른다.
+- `PickPlaceController`의 phase timer가 실제 arm tracking보다 빨라 공중에서 gripper를 닫지 않도록 event 2에서 controller가 제어하는 `panda_rightfinger` end-effector와 cube center를 확인한다. finger-link 원점 평균은 grasp gate 기준으로 사용하지 않는다. 기본값은 `0.075 m` 이내에서 3 physics step 연속이며, 3초 안에 충족하지 못하면 해당 attempt를 실패 처리한다. 이 값은 기존 grasp 관측의 `PICK_PLACE_GRASP_MAX_DISTANCE_M=0.075`와 동일하며, Panda pose의 sub-millimeter tracking 편차가 정상 grasp를 막지 않도록 한다. cube별 최대 attempt는 3회이고, 초과하면 production session을 실패로 종료한다.
+- 현재 기본 `HRI_COLLECTION_LABEL`은 `surface_twist_v9_cartesian_speed_v1`이다. events_dt 배율 기반 v8 및 이전 grasp-gate dataset과 동일 speed condition으로 직접 섞지 않는다.
 
 ## 본수집 Experiment Metadata
 
